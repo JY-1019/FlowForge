@@ -42,15 +42,15 @@ result = await engine.run({"query": "AI agent frameworks in 2026"})
 ## Installation
 
 ```bash
-pip install flowforge
+pip install git+https://github.com/JY-1019/FlowForge.git
 ```
 
 With optional extras:
 
 ```bash
-pip install flowforge[all]    # graphviz + openai + google-genai + mcp
-pip install flowforge[viz]    # DAG visualization only
-pip install flowforge[mcp]    # MCP tool integration
+pip install "flowforge[all] @ git+https://github.com/JY-1019/FlowForge.git"
+pip install "flowforge[viz] @ git+https://github.com/JY-1019/FlowForge.git"
+pip install "flowforge[mcp] @ git+https://github.com/JY-1019/FlowForge.git"
 ```
 
 > Requires Python 3.11+
