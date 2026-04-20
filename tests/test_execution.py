@@ -11,6 +11,7 @@ import pytest
 from pydantic import BaseModel
 
 from flowforge import global_config, flow, task, step, FlowForge, BranchCondition
+from flowforge.errors import ExecutionError, ApprovalRequired
 from flowforge.execution.context import GlobalContext, FlowContext, TaskContext
 from flowforge.execution.runner import StepRunner, TaskRunner, FlowRunner, _try_parse_json
 from flowforge.annotations.metadata import StepMeta, TaskMeta, FlowMeta
@@ -827,3 +828,191 @@ class TestOnErrorSkipRemaining:
         from flowforge.errors import ExecutionError
         with pytest.raises(ExecutionError):
             await engine.run("x")
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint / Resume
+# ---------------------------------------------------------------------------
+
+# Module-level agents for checkpoint tests (Python scoping rule).
+
+_checkpoint_call_count = 0
+
+
+@task(name="step1_task", prompt="first task")
+class _CP_Task1:
+    @step(order=1, prompt="step1")
+    async def s1(ctx):
+        global _checkpoint_call_count
+        _checkpoint_call_count += 1
+        return {"stage": 1}
+
+
+@task(name="step2_task", prompt="second task that fails first time")
+class _CP_Task2:
+    @step(order=1, prompt="step2")
+    async def s2(ctx):
+        return {"stage": 2}
+
+
+@flow(name="cp_flow", prompt="checkpoint flow")
+class _CP_Flow:
+    _CP_Task1 = _CP_Task1
+    _CP_Task2 = _CP_Task2
+
+
+@global_config(prompt="checkpoint agent")
+class _CP_Agent:
+    _CP_Flow = _CP_Flow
+
+
+class TestCheckpointResume:
+    @pytest.mark.asyncio
+    async def test_resume_skips_completed_nodes(self):
+        """When resuming from a checkpoint, already-completed nodes should be
+        skipped and their cached outputs reused."""
+        global _checkpoint_call_count
+        _checkpoint_call_count = 0
+
+        engine = FlowForge.compile(_CP_Agent)
+
+        # First run: completes normally.
+        result = await engine.run({"input": "test"})
+        assert _checkpoint_call_count == 1
+
+        # Build checkpoint from the trace.
+        cp = engine.last_trace.checkpoint
+        assert "global.cp_flow.step1_task" in cp.completed_node_ids
+
+        # Reset counter and resume — step1 should be skipped.
+        _checkpoint_call_count = 0
+        result2 = await engine.run({"input": "test"}, resume_from=cp)
+        assert _checkpoint_call_count == 0  # step1 was skipped via checkpoint
+        assert result2 == {"stage": 2}
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_property_on_trace(self):
+        """RunTrace.checkpoint returns a Checkpoint with outputs."""
+        engine = FlowForge.compile(_CP_Agent)
+        result, trace = await engine.run_traced({"input": "test"})
+        cp = trace.checkpoint
+        assert len(cp.completed_node_ids) > 0
+        assert cp.last_output is not None
+
+
+# ---------------------------------------------------------------------------
+# Structured ExecutionError context
+# ---------------------------------------------------------------------------
+
+@task(name="err_task", prompt="error context task")
+class _ErrTask:
+    @step(order=1, prompt="pass through")
+    async def ok_step(ctx):
+        return {"data": "hello"}
+
+    @step(order=2, prompt="always fails")
+    async def fail_step(ctx):
+        raise ValueError("something broke")
+
+
+@flow(name="err_flow", prompt="error context flow", max_retries=0)
+class _ErrFlow:
+    _ErrTask = _ErrTask
+
+
+@global_config(prompt="error agent")
+class _ErrAgent:
+    _ErrFlow = _ErrFlow
+
+
+class TestStructuredErrorContext:
+    @pytest.mark.asyncio
+    async def test_error_carries_input_and_trace_path(self):
+        """ExecutionError should carry step_input and trace_path."""
+        engine = FlowForge.compile(_ErrAgent)
+        with pytest.raises(ExecutionError) as exc_info:
+            await engine.run("input")
+        err = exc_info.value
+        # trace_path should contain flow, task, and step node IDs
+        assert len(err.trace_path) >= 2
+        assert any("err_flow" in p for p in err.trace_path)
+        assert any("err_task" in p for p in err.trace_path)
+        # step_input should be the input to the failing step
+        assert err.step_input is not None
+
+
+# ---------------------------------------------------------------------------
+# Human-in-the-loop approval
+# ---------------------------------------------------------------------------
+
+_approval_log: list[str] = []
+
+
+@task(name="approval_task", prompt="task with approval gate")
+class _ApprovalTask:
+    @step(order=1, prompt="prepare data")
+    async def prepare(ctx):
+        _approval_log.append("prepare")
+        return {"prepared": True}
+
+    @step(order=2, prompt="needs human review", approval=True)
+    async def review_gate(ctx):
+        _approval_log.append("review_gate")
+        return {"reviewed": True}
+
+    @step(order=3, prompt="finalize")
+    async def finalize(ctx):
+        _approval_log.append("finalize")
+        return {"done": True}
+
+
+@flow(name="approval_flow", prompt="flow with approval", max_retries=0)
+class _ApprovalFlow:
+    _ApprovalTask = _ApprovalTask
+
+
+@global_config(prompt="approval agent")
+class _ApprovalAgent:
+    _ApprovalFlow = _ApprovalFlow
+
+
+class TestApproval:
+    @pytest.mark.asyncio
+    async def test_approval_raises_before_step_executes(self):
+        """An approval step should raise ApprovalRequired before executing."""
+        _approval_log.clear()
+        engine = FlowForge.compile(_ApprovalAgent)
+
+        with pytest.raises(ApprovalRequired) as exc_info:
+            await engine.run("input")
+
+        err = exc_info.value
+        # Step 1 (prepare) ran, step 2 (review_gate) did NOT run.
+        assert "prepare" in _approval_log
+        assert "review_gate" not in _approval_log
+        assert "review_gate" in err.node_id
+        assert err.step_input is not None
+
+    @pytest.mark.asyncio
+    async def test_approval_resume_with_checkpoint(self):
+        """After approval, resuming from checkpoint should skip completed steps
+        and continue from the approval step onward."""
+        _approval_log.clear()
+        engine = FlowForge.compile(_ApprovalAgent)
+
+        # First run: pauses at the approval gate.
+        with pytest.raises(ApprovalRequired) as exc_info:
+            await engine.run("input")
+
+        checkpoint = exc_info.value.checkpoint
+        assert checkpoint is not None
+
+        # Resume: approval step should now run (checkpoint marks prepare as done,
+        # but the approval step itself was not completed).
+        _approval_log.clear()
+        result = await engine.run("input", resume_from=checkpoint)
+        # prepare was skipped (checkpoint), review_gate + finalize ran.
+        assert "prepare" not in _approval_log
+        assert "review_gate" in _approval_log
+        assert "finalize" in _approval_log
+        assert result == {"done": True}

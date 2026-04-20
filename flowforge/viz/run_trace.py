@@ -56,6 +56,32 @@ class NodeTrace:
 
 
 @dataclass
+class Checkpoint:
+    """Serialisable snapshot of a run's progress, usable for resume.
+
+    After a failed run, pass the checkpoint from the failed ``RunTrace`` to
+    ``engine.run(resume_from=trace.checkpoint)`` to skip already-completed
+    nodes and continue from the point of failure.
+
+    Attributes
+    ----------
+    node_outputs:
+        Mapping of ``node_id → output`` for every node that completed
+        successfully.  The engine uses this to short-circuit execution
+        of already-completed nodes.
+    completed_node_ids:
+        Set of node IDs that completed successfully.
+    last_output:
+        The output of the most recently completed node — used as the
+        initial input for the first non-completed node on resume.
+    """
+
+    node_outputs: dict[str, Any] = field(default_factory=dict)
+    completed_node_ids: set[str] = field(default_factory=set)
+    last_output: Any = None
+
+
+@dataclass
 class RunTrace:
     """Complete trace of a single engine.run() call."""
 
@@ -66,6 +92,9 @@ class RunTrace:
     input_repr: str = ""
     output_repr: str = ""
     error: str | None = None
+
+    # Actual node outputs for checkpoint/resume (not just reprs).
+    _node_outputs: dict[str, Any] = field(default_factory=dict, repr=False)
 
     # ------------------------------------------------------------------
     # Queries
@@ -90,6 +119,27 @@ class RunTrace:
     @property
     def succeeded(self) -> bool:
         return self.error is None and self.finished_at is not None
+
+    @property
+    def checkpoint(self) -> Checkpoint:
+        """Build a :class:`Checkpoint` from successfully completed nodes.
+
+        Use this after a failed run to resume from where it left off::
+
+            result = await engine.run(data)          # fails at step 3
+            result = await engine.run(data, resume_from=engine.last_trace.checkpoint)
+        """
+        return Checkpoint(
+            node_outputs=dict(self._node_outputs),
+            completed_node_ids=set(self.executed_node_ids),
+            last_output=self._node_outputs.get(
+                max(
+                    (n for n in self.nodes if n.succeeded),
+                    key=lambda n: n.execution_order,
+                    default=NodeTrace(node_id="", node_type="", name="", execution_order=0),
+                ).node_id,
+            ),
+        )
 
     def get_node_trace(self, node_id: str) -> NodeTrace | None:
         """Return the NodeTrace for a given node_id (last attempt if retried)."""
@@ -154,6 +204,8 @@ class RunTracer:
             nt.output_repr = _safe_repr(output_data)
             if selected_branch:
                 nt.selected_branch = selected_branch
+            # Store actual output for checkpoint/resume.
+            self._trace._node_outputs[node_id] = output_data
 
     def error_node(self, node_id: str, error: str) -> None:
         nt = self._active.get(node_id)

@@ -74,12 +74,13 @@ from flowforge.errors import (
     CycleDetectedError,
     CompileError,
     ExecutionError,
+    ApprovalRequired,
 )
 
 if TYPE_CHECKING:
     from flowforge.schema.dag import FlowForgeDAG
     from flowforge.doc.models import AnyDoc
-    from flowforge.viz.run_trace import RunTrace
+    from flowforge.viz.run_trace import RunTrace, Checkpoint
 
 
 class CompiledAgent:
@@ -142,6 +143,7 @@ class CompiledAgent:
         input_data: Any,
         planning_mode: str = "deterministic",
         route: str | list[str] | None = None,
+        resume_from: Any = None,
     ) -> Any:
         """Execute the agent pipeline. Trace stored in self.last_trace.
 
@@ -158,23 +160,34 @@ class CompiledAgent:
                            ``"web_analysis.scrape_and_analyze"`` — specific task.
                            ``["web_analysis", "notification"]`` — multiple routes.
                            Overrides ``planning_mode`` when set.
+            resume_from:   A :class:`Checkpoint` (from a previous run's
+                           ``trace.checkpoint``) to resume from.  Already-
+                           completed nodes are skipped and their cached
+                           outputs are reused.
 
         Note: ``"autonomous"`` / ``"hybrid"`` require ``generate_docs()`` to
         have been called first so the planner has doc summaries to reason over.
         """
-        return await self._engine.run(input_data, planning_mode=planning_mode, route=route)
+        return await self._engine.run(
+            input_data, planning_mode=planning_mode, route=route,
+            resume_from=resume_from,
+        )
 
     async def run_traced(
         self,
         input_data: Any,
         planning_mode: str = "deterministic",
         route: str | list[str] | None = None,
+        resume_from: Any = None,
     ) -> tuple[Any, RunTrace]:
         """Execute the agent pipeline and explicitly return (result, RunTrace).
 
         See :meth:`run` for ``planning_mode`` and ``route`` options.
         """
-        return await self._engine.run_traced(input_data, planning_mode=planning_mode, route=route)
+        return await self._engine.run_traced(
+            input_data, planning_mode=planning_mode, route=route,
+            resume_from=resume_from,
+        )
 
     # ------------------------------------------------------------------
     # Visualisation helpers
@@ -371,4 +384,5 @@ __all__ = [
     "CycleDetectedError",
     "CompileError",
     "ExecutionError",
+    "ApprovalRequired",
 ]

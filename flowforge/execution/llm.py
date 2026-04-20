@@ -143,12 +143,13 @@ def _tool_config_to_anthropic(tool_config: Any) -> dict[str, Any]:
 
     if isinstance(tool_config, FunctionTool):
         import inspect
+        from flowforge.tools.function_tool import _infer_schema_from_hints
         name = tool_config.name or tool_config.func.__name__
         desc = tool_config.description or (inspect.getdoc(tool_config.func) or f"Call {name}")
         return {
             "name": name,
             "description": desc,
-            "input_schema": {"type": "object", "properties": {}, "required": []},
+            "input_schema": _infer_schema_from_hints(tool_config.func),
         }
     elif isinstance(tool_config, MCPServer):
         return {
@@ -279,69 +280,180 @@ async def call_llm_api(
     # Build executor and fetch real MCP schemas.
     executor, mcp_schemas = await _build_executor(tool_configs)
 
-    # Build tools payload — prefer real MCP schemas over stubs.
-    tools_payload: list[dict[str, Any]] = []
-    for tc in (tool_configs or []):
-        name = _get_tool_name(tc)
-        if name and name in mcp_schemas:
-            tools_payload.append(mcp_schemas[name])
+    try:
+        # Build tools payload — prefer real MCP schemas over stubs.
+        tools_payload: list[dict[str, Any]] = []
+        for tc in (tool_configs or []):
+            name = _get_tool_name(tc)
+            if name and name in mcp_schemas:
+                tools_payload.append(mcp_schemas[name])
+            else:
+                schema = _tool_config_to_anthropic(tc)
+                if schema:
+                    tools_payload.append(schema)
+
+        # ── Request logging ──────────────────────────────────────────────
+        tool_names = [t.get("name", "?") for t in tools_payload]
+        schema_name = output_schema.__name__ if output_schema else None
+        logger.info(
+            "LLM request  provider=%s model=%s tools=%s output_schema=%s",
+            llm_config.provider, llm_config.model, tool_names or None, schema_name,
+        )
+        logger.debug("LLM system_prompt:\n%s", system_prompt)
+        logger.debug("LLM user_prompt:\n%s", user_prompt)
+        if output_schema:
+            logger.debug(
+                "LLM structured_output schema: %s",
+                _json.dumps(_pydantic_to_json_schema(output_schema), ensure_ascii=False, indent=2),
+            )
+
+        t0 = time.monotonic()
+
+        if llm_config.provider == "anthropic":
+            result = await _call_anthropic(
+                system_prompt, user_prompt, llm_config, tools_payload,
+                executor=executor, output_schema=output_schema,
+            )
+        elif llm_config.provider == "openai":
+            result = await _call_openai(
+                system_prompt, user_prompt, llm_config, tools_payload,
+                executor=executor, output_schema=output_schema,
+            )
+        elif llm_config.provider == "google":
+            result = await _call_google(
+                system_prompt, user_prompt, llm_config, tools_payload,
+                executor=executor, output_schema=output_schema,
+            )
         else:
-            schema = _tool_config_to_anthropic(tc)
-            if schema:
-                tools_payload.append(schema)
+            raise ValueError(f"Unsupported LLM provider: {llm_config.provider}")
 
-    # ── Request logging ──────────────────────────────────────────────
-    tool_names = [t.get("name", "?") for t in tools_payload]
-    schema_name = output_schema.__name__ if output_schema else None
-    logger.info(
-        "LLM request  provider=%s model=%s tools=%s output_schema=%s",
-        llm_config.provider, llm_config.model, tool_names or None, schema_name,
-    )
-    logger.debug("LLM system_prompt:\n%s", system_prompt)
-    logger.debug("LLM user_prompt:\n%s", user_prompt)
-    if output_schema:
-        logger.debug(
-            "LLM structured_output schema: %s",
-            _json.dumps(_pydantic_to_json_schema(output_schema), ensure_ascii=False, indent=2),
-        )
+        elapsed = (time.monotonic() - t0) * 1000
 
-    t0 = time.monotonic()
+        # ── Response logging ─────────────────────────────────────────────
+        if isinstance(result, dict):
+            result_preview = _json.dumps(result, ensure_ascii=False, default=str)
+            if len(result_preview) > 500:
+                result_preview = result_preview[:500] + "..."
+            logger.info("LLM response  %.0fms  type=dict  preview=%s", elapsed, result_preview)
+        elif isinstance(result, str):
+            preview = result[:300].replace("\n", "\\n")
+            if len(result) > 300:
+                preview += "..."
+            logger.info("LLM response  %.0fms  type=str  len=%d  preview=%s", elapsed, len(result), preview)
+        else:
+            logger.info("LLM response  %.0fms  type=%s", elapsed, type(result).__name__)
 
+        return result
+    finally:
+        # Close the shared HTTP client to release connections.
+        if executor is not None:
+            await executor.close()
+
+
+# ---------------------------------------------------------------------------
+# Streaming API
+# ---------------------------------------------------------------------------
+
+async def stream_llm_api(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    llm_config: LLMConfig,
+    tool_configs: list[ToolConfig] | None = None,
+    tool_registry: ToolRegistry | None = None,
+):
+    """Stream LLM text tokens as an async generator.
+
+    Yields ``str`` chunks as the model produces them.  This is a
+    simplified path — **no tool-use loop** and **no structured output**.
+    Use ``call_llm_api`` for those features.
+
+    Supported providers: ``anthropic``, ``openai``.  Google Gemini falls
+    back to a single-chunk yield of the full response.
+
+    Usage from a step::
+
+        async for chunk in ctx.call_llm("prompt", stream=True):
+            print(chunk, end="", flush=True)
+    """
     if llm_config.provider == "anthropic":
-        result = await _call_anthropic(
-            system_prompt, user_prompt, llm_config, tools_payload,
-            executor=executor, output_schema=output_schema,
-        )
+        async for chunk in _stream_anthropic(system_prompt, user_prompt, llm_config):
+            yield chunk
     elif llm_config.provider == "openai":
-        result = await _call_openai(
-            system_prompt, user_prompt, llm_config, tools_payload,
-            executor=executor, output_schema=output_schema,
-        )
+        async for chunk in _stream_openai(system_prompt, user_prompt, llm_config):
+            yield chunk
     elif llm_config.provider == "google":
-        result = await _call_google(
-            system_prompt, user_prompt, llm_config, tools_payload,
-            output_schema=output_schema,
-        )
+        async for chunk in _stream_google(system_prompt, user_prompt, llm_config):
+            yield chunk
     else:
         raise ValueError(f"Unsupported LLM provider: {llm_config.provider}")
 
-    elapsed = (time.monotonic() - t0) * 1000
 
-    # ── Response logging ─────────────────────────────────────────────
-    if isinstance(result, dict):
-        result_preview = _json.dumps(result, ensure_ascii=False, default=str)
-        if len(result_preview) > 500:
-            result_preview = result_preview[:500] + "..."
-        logger.info("LLM response  %.0fms  type=dict  preview=%s", elapsed, result_preview)
-    elif isinstance(result, str):
-        preview = result[:300].replace("\n", "\\n")
-        if len(result) > 300:
-            preview += "..."
-        logger.info("LLM response  %.0fms  type=str  len=%d  preview=%s", elapsed, len(result), preview)
-    else:
-        logger.info("LLM response  %.0fms  type=%s", elapsed, type(result).__name__)
+async def _stream_anthropic(system_prompt: str, user_prompt: str, config: LLMConfig):
+    """Yield text deltas from the Anthropic streaming API."""
+    import anthropic
 
-    return result
+    client = anthropic.AsyncAnthropic(
+        api_key=config.api_key or None,
+        base_url=config.base_url or None,
+    )
+    async with client.messages.stream(
+        model=config.model,
+        max_tokens=config.max_tokens,
+        temperature=config.temperature,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    ) as stream:
+        async for text in stream.text_stream:
+            yield text
+
+
+async def _stream_openai(system_prompt: str, user_prompt: str, config: LLMConfig):
+    """Yield text deltas from the OpenAI streaming API."""
+    import openai
+
+    client = openai.AsyncOpenAI(
+        api_key=config.api_key or None,
+        base_url=config.base_url or None,
+    )
+    response = await client.chat.completions.create(
+        model=config.model,
+        max_tokens=config.max_tokens,
+        temperature=config.temperature,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        stream=True,
+    )
+    async for chunk in response:
+        delta = chunk.choices[0].delta if chunk.choices else None
+        if delta and delta.content:
+            yield delta.content
+
+
+async def _stream_google(system_prompt: str, user_prompt: str, config: LLMConfig):
+    """Yield text chunks from the Google Gemini streaming API."""
+    import google.generativeai as genai
+
+    if config.api_key:
+        genai.configure(api_key=config.api_key)
+
+    model = genai.GenerativeModel(
+        model_name=config.model,
+        system_instruction=system_prompt,
+    )
+    response = await model.generate_content_async(
+        user_prompt,
+        generation_config=genai.types.GenerationConfig(
+            temperature=config.temperature,
+            max_output_tokens=config.max_tokens,
+        ),
+        stream=True,
+    )
+    async for chunk in response:
+        if chunk.text:
+            yield chunk.text
 
 
 # ---------------------------------------------------------------------------
@@ -631,38 +743,106 @@ async def _call_google(
     user_prompt: str,
     config: LLMConfig,
     tools: list[dict[str, Any]],
+    executor: ToolExecutor | None = None,
     output_schema: type | None = None,
 ) -> Any:
-    """Call the Google Gemini API."""
+    """Call the Google Gemini API with a tool-use loop.
+
+    When executable tools are available and the model returns
+    ``function_call`` parts, the executor runs each tool and feeds results
+    back to the model for the next turn — mirroring the Anthropic/OpenAI
+    behaviour.
+    """
     import google.generativeai as genai
 
     if config.api_key:
         genai.configure(api_key=config.api_key)
 
+    # Convert Anthropic-format tool schemas to Gemini function declarations.
+    gemini_tools = None
+    if tools:
+        declarations = []
+        for t in tools:
+            params = t.get("input_schema", {})
+            # Gemini uses a subset of JSON Schema for parameters.
+            declarations.append(genai.protos.FunctionDeclaration(
+                name=t["name"],
+                description=t.get("description", ""),
+                parameters=params if params.get("properties") else None,
+            ))
+        gemini_tools = [genai.protos.Tool(function_declarations=declarations)]
+
     model = genai.GenerativeModel(
         model_name=config.model,
         system_instruction=system_prompt,
+        tools=gemini_tools,
     )
 
     gen_config_kwargs: dict[str, Any] = {
         "temperature": config.temperature,
         "max_output_tokens": config.max_tokens,
     }
-    if output_schema is not None:
+    if output_schema is not None and not tools:
+        # Only use response_schema when there are no tools; otherwise the
+        # model needs to call tools first before producing final output.
         gen_config_kwargs["response_mime_type"] = "application/json"
         gen_config_kwargs["response_schema"] = output_schema
 
-    response = await model.generate_content_async(
-        user_prompt,
-        generation_config=genai.types.GenerationConfig(**gen_config_kwargs),
+    gen_config = genai.types.GenerationConfig(**gen_config_kwargs)
+
+    # Start the conversation.
+    chat = model.start_chat()
+    response = await chat.send_message_async(
+        user_prompt, generation_config=gen_config,
     )
 
-    # Google with response_schema returns JSON text — parse it.
+    # -- Tool-use loop -------------------------------------------------------
+    has_executable = executor is not None and any(
+        executor.has_tool(t.get("name", "")) for t in tools
+    )
+
+    for round_idx in range(_MAX_TOOL_ROUNDS):
+        # Check for function_call parts in the response.
+        fn_calls = [
+            part for part in response.candidates[0].content.parts
+            if hasattr(part, "function_call") and part.function_call.name
+        ]
+
+        if not fn_calls or not has_executable:
+            break
+
+        # Execute each function call and build response parts.
+        fn_responses: list[Any] = []
+        for part in fn_calls:
+            fc = part.function_call
+            fn_name = fc.name
+            fn_args = dict(fc.args) if fc.args else {}
+
+            if executor and executor.has_tool(fn_name):
+                logger.info("Tool call  round=%d  %s(%s)", round_idx, fn_name, str(fn_args)[:200])
+                result_text = await executor.execute(fn_name, fn_args)
+                logger.info("Tool result  %s → %s", fn_name, result_text[:500] if result_text else "")
+            else:
+                result_text = f"Error: Tool '{fn_name}' not found."
+
+            fn_responses.append(genai.protos.Part(
+                function_response=genai.protos.FunctionResponse(
+                    name=fn_name,
+                    response={"result": result_text},
+                )
+            ))
+
+        # Send tool results back to the model.
+        response = await chat.send_message_async(
+            fn_responses, generation_config=gen_config,
+        )
+
+    # -- Extract final text --------------------------------------------------
+    # Gemini with response_schema returns JSON text — parse it.
     if output_schema is not None:
-        import json
         try:
-            return json.loads(response.text)
-        except (json.JSONDecodeError, ValueError):
+            return _json.loads(response.text)
+        except (_json.JSONDecodeError, ValueError):
             pass
 
     return response.text

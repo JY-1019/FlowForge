@@ -48,7 +48,12 @@ def _parse_sse_json(text: str) -> dict[str, Any] | None:
 
 
 class ToolExecutor:
-    """Executes tool calls returned by LLM tool_use responses."""
+    """Executes tool calls returned by LLM tool_use responses.
+
+    Reuses a single ``httpx.AsyncClient`` across all MCP/HTTP calls for
+    connection pooling and performance.  Call :meth:`close` (or use as an
+    async context manager) when the executor is no longer needed.
+    """
 
     def __init__(self, tool_configs: list[ToolConfig]) -> None:
         from flowforge.types import MCPServer, FunctionTool, HTTPTool
@@ -70,6 +75,28 @@ class ToolExecutor:
         self._mcp_sessions: dict[str, str] = {}   # url → session_id
         self._mcp_initialized: set[str] = set()
         self._mcp_request_id = 0
+
+        # Shared HTTP client — lazily created on first use.
+        self._http_client: Any | None = None
+
+    async def _get_client(self) -> Any:
+        """Return the shared ``httpx.AsyncClient``, creating it on first use."""
+        if self._http_client is None:
+            import httpx
+            self._http_client = httpx.AsyncClient(timeout=60.0)
+        return self._http_client
+
+    async def close(self) -> None:
+        """Close the shared HTTP client and release resources."""
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+
+    async def __aenter__(self) -> "ToolExecutor":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.close()
 
     # ------------------------------------------------------------------
     # Public API
@@ -189,8 +216,6 @@ class ToolExecutor:
         self, url: str, method: str, params: dict[str, Any],
     ) -> dict[str, Any]:
         """Send a single JSON-RPC request and return ``result``."""
-        import httpx
-
         payload = {
             "jsonrpc": "2.0",
             "method": method,
@@ -199,12 +224,12 @@ class ToolExecutor:
         }
         self._last_session_id = None
 
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                url, json=payload, headers=self._mcp_headers(url), timeout=60.0,
-            )
-            resp.raise_for_status()
-            result = self._parse_mcp_response(resp)
+        client = await self._get_client()
+        resp = await client.post(
+            url, json=payload, headers=self._mcp_headers(url),
+        )
+        resp.raise_for_status()
+        result = self._parse_mcp_response(resp)
 
         # Persist session ID from response.
         if self._last_session_id:
@@ -214,8 +239,6 @@ class ToolExecutor:
 
     async def _mcp_initialize(self, url: str) -> None:
         """Perform the MCP initialize handshake + initialized notification."""
-        import httpx
-
         headers = {
             "Content-Type": "application/json",
             "Accept": _MCP_ACCEPT,
@@ -233,24 +256,24 @@ class ToolExecutor:
             "id": self._next_id(),
         }
 
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, json=init_payload, headers=headers, timeout=10.0)
-            resp.raise_for_status()
+        client = await self._get_client()
+        resp = await client.post(url, json=init_payload, headers=headers, timeout=10.0)
+        resp.raise_for_status()
 
-            sid = resp.headers.get("mcp-session-id")
-            if sid:
-                self._mcp_sessions[url] = sid
+        sid = resp.headers.get("mcp-session-id")
+        if sid:
+            self._mcp_sessions[url] = sid
 
-            # 2) notifications/initialized (no id → notification, no response expected)
-            notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-            notif_headers = dict(headers)
-            if sid:
-                notif_headers["Mcp-Session-Id"] = sid
-            try:
-                await client.post(url, json=notif, headers=notif_headers, timeout=10.0)
-            except Exception:
-                # Some servers don't respond to notifications — that's fine.
-                pass
+        # 2) notifications/initialized (no id → notification, no response expected)
+        notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        notif_headers = dict(headers)
+        if sid:
+            notif_headers["Mcp-Session-Id"] = sid
+        try:
+            await client.post(url, json=notif, headers=notif_headers, timeout=10.0)
+        except Exception:
+            # Some servers don't respond to notifications — that's fine.
+            pass
 
         self._mcp_initialized.add(url)
         logger.info(
@@ -309,18 +332,16 @@ class ToolExecutor:
     # ------------------------------------------------------------------
 
     async def _execute_http(self, config: HTTPTool, tool_input: dict[str, Any]) -> str:
-        import httpx
-
-        async with httpx.AsyncClient() as client:
-            if config.method.upper() == "GET":
-                resp = await client.get(
-                    config.url, params=tool_input,
-                    headers=config.headers, timeout=30.0,
-                )
-            else:
-                resp = await client.request(
-                    config.method.upper(), config.url,
-                    json=tool_input, headers=config.headers, timeout=30.0,
-                )
-            resp.raise_for_status()
-            return resp.text
+        client = await self._get_client()
+        if config.method.upper() == "GET":
+            resp = await client.get(
+                config.url, params=tool_input,
+                headers=config.headers, timeout=30.0,
+            )
+        else:
+            resp = await client.request(
+                config.method.upper(), config.url,
+                json=tool_input, headers=config.headers, timeout=30.0,
+            )
+        resp.raise_for_status()
+        return resp.text

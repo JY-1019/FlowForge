@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from flowforge.types import LLMConfig, ToolConfig
     from flowforge.tools.registry import ToolRegistry
     from flowforge.doc.models import AnyDoc
-    from flowforge.viz.run_trace import RunTracer
+    from flowforge.viz.run_trace import RunTracer, Checkpoint
 
 
 class GlobalContext:
@@ -98,6 +98,8 @@ class GlobalContext:
         self.planned_node_ids: set[str] | None = None
         # Raw ToolConfig list from @global_config for hierarchical merging.
         self.global_tools: list[ToolConfig] = global_tools or []
+        # Checkpoint for resume support — populated by engine when resume_from is set.
+        self.checkpoint: Checkpoint | None = None
 
 
 class FlowContext:
@@ -328,7 +330,7 @@ class StepContext:
                     break
         return result
 
-    async def call_llm(self, prompt: str) -> Any:
+    async def call_llm(self, prompt: str, *, stream: bool = False) -> Any:
         """Call the LLM with a templated user prompt.
 
         The annotation ``prompt`` (``self.step_prompt``) is used as the
@@ -343,10 +345,20 @@ class StepContext:
           the LLM ``tools`` parameter for this call.  The ``<...>`` marker is
           removed from the final prompt text.
 
+        Parameters
+        ----------
+        prompt:
+            The user/task prompt (supports ``{var}`` and ``<tool>`` syntax).
+        stream:
+            When ``True``, return an **async generator** that yields ``str``
+            chunks as the model produces them.  Streaming mode does not
+            support tool-use loops or structured output.
+
         Returns
         -------
         Any
-            The LLM response content (text string, or parsed structured output).
+            The LLM response content (text string, parsed structured output,
+            or async generator when ``stream=True``).
 
         Raises
         ------
@@ -364,7 +376,18 @@ class StepContext:
         # 3. Resolve tool configs for referenced tools.
         tool_configs = self._resolve_tool_configs(tool_names)
 
-        # 4. Call LLM (pass output_schema for structured output).
+        # 4. Streaming mode — return async generator directly.
+        if stream:
+            from flowforge.execution.llm import stream_llm_api
+            return stream_llm_api(
+                system_prompt=self.step_prompt,
+                user_prompt=rendered,
+                llm_config=self.llm_config,
+                tool_configs=tool_configs,
+                tool_registry=self.tools,
+            )
+
+        # 5. Normal mode — call LLM (pass output_schema for structured output).
         return await call_llm_api(
             system_prompt=self.step_prompt,
             user_prompt=rendered,

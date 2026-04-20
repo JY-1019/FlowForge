@@ -110,6 +110,10 @@ class StepMeta:
     # When True, this step is the sole runner in its order group (others skip).
     unique: bool = False
 
+    # When True, execution pauses before this step and raises ApprovalRequired.
+    # The caller must approve and resume using the checkpoint mechanism.
+    approval: bool = False
+
     # Tools available to this step (merged with parent task/flow/global tools).
     tools: list[ToolConfig] = field(default_factory=list)
 

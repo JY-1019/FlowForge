@@ -44,6 +44,7 @@ class ExecutionEngine:
         input_data: Any,
         planning_mode: str = "deterministic",
         route: str | list[str] | None = None,
+        resume_from: Any = None,
     ) -> Any:
         """Execute the pipeline. Trace is stored in self.last_trace.
 
@@ -55,9 +56,11 @@ class ExecutionEngine:
                            ``"web_analysis.scrape_and_analyze"`` or
                            ``["web_analysis", "notification"]``.
                            Overrides planning_mode when set.
+            resume_from:   A ``Checkpoint`` from a previous failed run.
         """
         result, trace = await self._execute(
             input_data, trace=True, planning_mode=planning_mode, route=route,
+            resume_from=resume_from,
         )
         self.last_trace = trace
         return result
@@ -67,10 +70,12 @@ class ExecutionEngine:
         input_data: Any,
         planning_mode: str = "deterministic",
         route: str | list[str] | None = None,
+        resume_from: Any = None,
     ) -> tuple[Any, RunTrace]:
         """Execute the pipeline and explicitly return (result, RunTrace)."""
         result, trace = await self._execute(
             input_data, trace=True, planning_mode=planning_mode, route=route,
+            resume_from=resume_from,
         )
         self.last_trace = trace
         return result, trace
@@ -85,6 +90,7 @@ class ExecutionEngine:
         trace: bool = False,
         planning_mode: str = "deterministic",
         route: str | list[str] | None = None,
+        resume_from: Any = None,
     ) -> tuple[Any, RunTrace]:
         from flowforge.tools.registry import ToolRegistry as _ToolRegistry
 
@@ -129,6 +135,10 @@ class ExecutionEngine:
         )
         global_ctx.all_docs = self._docs
         global_ctx.planned_node_ids = planned_node_ids
+
+        # ── Resume: restore checkpoint for skip logic ────────────────────
+        if resume_from is not None:
+            global_ctx.checkpoint = resume_from
 
         root_flows = [
             n for n in self._dag.get_children("global")

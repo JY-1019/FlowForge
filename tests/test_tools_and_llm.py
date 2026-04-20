@@ -659,3 +659,97 @@ class TestToolUseLoopIntegration:
         assert executor is not None
         assert executor.has_tool("my_tool")
         assert schemas == {}  # No MCP → no schemas fetched
+
+
+# ---------------------------------------------------------------------------
+# FunctionTool schema auto-inference
+# ---------------------------------------------------------------------------
+
+class TestFunctionToolSchemaInference:
+    """Test that FunctionToolAdapter infers input_schema from type hints."""
+
+    def test_basic_types(self):
+        def search(query: str, limit: int = 10, verbose: bool = False) -> str:
+            return ""
+
+        from flowforge.tools.function_tool import FunctionToolAdapter
+        adapter = FunctionToolAdapter(search)
+        schema = adapter.schema
+        assert schema["properties"]["query"]["type"] == "string"
+        assert schema["properties"]["limit"]["type"] == "integer"
+        assert schema["properties"]["limit"]["default"] == 10
+        assert schema["properties"]["verbose"]["type"] == "boolean"
+        assert "query" in schema["required"]
+        assert "limit" not in schema["required"]
+
+    def test_float_type(self):
+        def compute(ratio: float) -> float:
+            return ratio
+
+        from flowforge.tools.function_tool import FunctionToolAdapter
+        adapter = FunctionToolAdapter(compute)
+        assert adapter.schema["properties"]["ratio"]["type"] == "number"
+        assert "ratio" in adapter.schema["required"]
+
+    def test_list_type(self):
+        def process(items: list[str]) -> str:
+            return ""
+
+        from flowforge.tools.function_tool import FunctionToolAdapter
+        adapter = FunctionToolAdapter(process)
+        prop = adapter.schema["properties"]["items"]
+        assert prop["type"] == "array"
+        assert prop["items"]["type"] == "string"
+
+    def test_optional_type(self):
+        def fetch(url: str, timeout: int | None = None) -> str:
+            return ""
+
+        from flowforge.tools.function_tool import FunctionToolAdapter
+        adapter = FunctionToolAdapter(fetch)
+        assert adapter.schema["properties"]["url"]["type"] == "string"
+        assert "url" in adapter.schema["required"]
+        # timeout has a default → not required
+        assert "timeout" not in adapter.schema["required"]
+
+    def test_ctx_param_skipped(self):
+        async def my_step(ctx, query: str) -> str:
+            return ""
+
+        from flowforge.tools.function_tool import FunctionToolAdapter
+        adapter = FunctionToolAdapter(my_step)
+        assert "ctx" not in adapter.schema["properties"]
+        assert "query" in adapter.schema["properties"]
+
+    def test_explicit_schema_overrides_inference(self):
+        def my_func(query: str) -> str:
+            return ""
+
+        custom = {"type": "object", "properties": {"x": {"type": "number"}}, "required": ["x"]}
+        from flowforge.tools.function_tool import FunctionToolAdapter
+        adapter = FunctionToolAdapter(my_func, schema=custom)
+        assert adapter.schema == custom
+
+    def test_no_hints_produces_empty_schema(self):
+        def bare_func():
+            return ""
+
+        from flowforge.tools.function_tool import FunctionToolAdapter
+        adapter = FunctionToolAdapter(bare_func)
+        assert adapter.schema["properties"] == {}
+        assert adapter.schema["required"] == []
+
+    def test_llm_tool_config_uses_inferred_schema(self):
+        """_tool_config_to_anthropic uses inferred schema for FunctionTool."""
+        from flowforge.execution.llm import _tool_config_to_anthropic
+
+        def search(query: str, limit: int = 5) -> str:
+            """Search the web."""
+            return ""
+
+        ft = FunctionTool(func=search, name="search")
+        result = _tool_config_to_anthropic(ft)
+        assert result["name"] == "search"
+        assert result["input_schema"]["properties"]["query"]["type"] == "string"
+        assert result["input_schema"]["properties"]["limit"]["type"] == "integer"
+        assert "query" in result["input_schema"]["required"]

@@ -285,6 +285,39 @@ class StepRunner:
         tracer  = task_ctx.global_ctx.tracer
 
         # ------------------------------------------------------------------
+        # Checkpoint: skip if already completed in a previous run
+        # ------------------------------------------------------------------
+        cp = task_ctx.global_ctx.checkpoint
+        if cp is not None and node_id in cp.completed_node_ids:
+            cached = cp.node_outputs.get(node_id)
+            task_ctx.step_results[meta.order] = cached
+            if tracer:
+                tracer.start_node(node_id, "step", meta.func.__name__, step_input)
+                tracer.finish_node(node_id, cached)
+            logger.debug("step skip (checkpoint)  node_id=%s", node_id)
+            return cached
+
+        # ------------------------------------------------------------------
+        # Approval gate: pause execution if this step requires human approval.
+        # When resuming from a checkpoint the approval is implicitly granted
+        # (the caller already saw the input and chose to resume).
+        # ------------------------------------------------------------------
+        if meta.approval and cp is None:
+            from flowforge.errors import ApprovalRequired
+            # Build a checkpoint from the current tracer state so the caller
+            # can resume after approving.
+            checkpoint = None
+            if tracer:
+                tracer.start_node(node_id, "step", meta.func.__name__, step_input)
+                # Finish the trace up to this point so checkpoint is usable.
+                checkpoint = tracer.trace.checkpoint
+            raise ApprovalRequired(
+                node_id=node_id,
+                step_input=step_input,
+                checkpoint=checkpoint,
+            )
+
+        # ------------------------------------------------------------------
         # Phase 1: input validation
         # ------------------------------------------------------------------
         if meta.input_schema is not None and step_input is not None:
@@ -357,11 +390,20 @@ class StepRunner:
             return result
 
         except ExecutionError as e:
+            # Enrich with context if not already set.
+            if e.step_input is None:
+                e.step_input = step_input
+            if node_id not in e.trace_path:
+                e.trace_path.insert(0, node_id)
             if tracer:
                 tracer.error_node(node_id, str(e))
             raise
         except Exception as e:
-            wrapped = ExecutionError(meta.func.__name__, str(e))
+            wrapped = ExecutionError(
+                meta.func.__name__, str(e),
+                step_input=step_input,
+                partial_output=task_ctx.step_results.get(meta.order - 1),
+            )
             if tracer:
                 tracer.error_node(node_id, str(e))
             raise wrapped from e
@@ -495,6 +537,16 @@ class TaskRunner:
         tracer   = flow_ctx.global_ctx.tracer
         max_loops = meta.max_loops if meta.loop_condition is not None else 1
 
+        # Checkpoint: skip if already completed in a previous run.
+        cp = flow_ctx.global_ctx.checkpoint
+        if cp is not None and node_id in cp.completed_node_ids:
+            cached = cp.node_outputs.get(node_id)
+            if tracer:
+                tracer.start_node(node_id, "task", meta.name, task_input)
+                tracer.finish_node(node_id, cached)
+            logger.debug("task skip (checkpoint)  node_id=%s", node_id)
+            return cached
+
         if tracer:
             tracer.start_node(node_id, "task", meta.name, task_input)
         logger.info(
@@ -546,6 +598,8 @@ class TaskRunner:
             return result
 
         except ExecutionError as e:
+            if node_id not in e.trace_path:
+                e.trace_path.insert(0, node_id)
             if tracer:
                 tracer.error_node(node_id, str(e))
             raise
@@ -785,6 +839,18 @@ class FlowRunner:
             After all retry attempts are exhausted.
         """
         node_id      = f"{parent_node_id}.{meta.name}"
+
+        # Checkpoint: skip if already completed in a previous run.
+        cp = global_ctx.checkpoint
+        if cp is not None and node_id in cp.completed_node_ids:
+            cached = cp.node_outputs.get(node_id)
+            tracer = global_ctx.tracer
+            if tracer:
+                tracer.start_node(node_id, "flow", meta.name, flow_input)
+                tracer.finish_node(node_id, cached)
+            logger.debug("flow skip (checkpoint)  node_id=%s", node_id)
+            return cached
+
         _max_retries = max_retries if max_retries is not None else meta.max_retries
         last_exc: Exception | None = None
 
@@ -803,10 +869,18 @@ class FlowRunner:
                     )
                     await asyncio.sleep(wait)
 
-        raise ExecutionError(
+        # Preserve trace_path and step_input from the underlying error.
+        final_err = ExecutionError(
             meta.name,
             f"failed after {_max_retries + 1} attempt(s)",
-        ) from last_exc
+        )
+        if isinstance(last_exc, ExecutionError):
+            final_err.step_input = last_exc.step_input
+            final_err.partial_output = last_exc.partial_output
+            final_err.trace_path = last_exc.trace_path
+            if meta.name not in final_err.trace_path:
+                final_err.trace_path.insert(0, meta.name)
+        raise final_err from last_exc
 
     async def _run_once(
         self,
@@ -933,6 +1007,8 @@ class FlowRunner:
             return current_output
 
         except ExecutionError as e:
+            if node_id not in e.trace_path:
+                e.trace_path.insert(0, node_id)
             if tracer:
                 tracer.error_node(node_id, str(e))
             raise
