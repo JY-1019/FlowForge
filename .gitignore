@@ -1,0 +1,60 @@
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Pytest & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# mypy
+.mypy_cache/
+
+# FlowForge doc cache
+.flowforge_cache/
+
+# MkDocs build output
+site/
+
+# Claude Code (keep CLAUDE.md, ignore personal data)
+.claude/*
+!.claude/CLAUDE.md
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# macOS
+.DS_Store
+
+# Environment variables / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Logs
+*.log
+
+# Temp comparison/test files
+claude_dag_structure.md
+claude_run_compare.md
+gemini_dag_structure.md
+gemini_run_compare.md
+test_research_dag

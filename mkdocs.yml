@@ -1,0 +1,99 @@
+site_name: FlowForge
+site_description: Annotation-Based AI Agent Framework — build AI pipelines with Python decorators only.
+site_url: https://flowforge.dev
+repo_url: https://github.com/yourusername/flowforge
+repo_name: flowforge
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.footer
+    - search.highlight
+    - search.suggest
+    - content.code.annotate
+    - content.code.copy
+    - content.tabs.link
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/graph-outline
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation & Quickstart: getting-started.md
+  - Concepts:
+    - Architecture Overview: concepts/architecture.md
+    - Annotations In Depth: concepts/annotations.md
+    - Data Flow & I/O: concepts/data-flow.md
+    - DAG Compilation: concepts/dag-compilation.md
+  - Guides:
+    - Your First Agent: guides/first-agent.md
+    - Conditional Routing: guides/branching.md
+    - Nested Flows & Tasks: guides/nested-flows.md
+    - Tools & LLM Calling: guides/tools-and-llm.md
+    - Run Visualization: guides/visualization.md
+  - API Reference:
+    - Decorators: api/decorators.md
+    - Types: api/types.md
+    - Engine & CompiledAgent: api/engine.md
+    - Errors: api/errors.md
+    - CLI: api/cli.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  - tags
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/yourusername/flowforge
+  version:
+    provider: mike
+
+copyright: Copyright &copy; 2026 FlowForge Contributors
