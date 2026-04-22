@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json as _json
 import logging
+import os
 import re
 import textwrap
 import time
@@ -393,10 +394,14 @@ async def _stream_anthropic(system_prompt: str, user_prompt: str, config: LLMCon
     """Yield text deltas from the Anthropic streaming API."""
     import anthropic
 
-    client = anthropic.AsyncAnthropic(
-        api_key=config.api_key or None,
-        base_url=config.base_url or None,
-    )
+    client_kwargs: dict[str, Any] = {
+        "api_key": config.api_key or None,
+        "base_url": config.base_url or None,
+    }
+    if not config.verify_ssl or os.environ.get("FLOWFORGE_SSL_VERIFY", "1").lower() in ("0", "false", "no", "off"):
+        import httpx as _httpx
+        client_kwargs["http_client"] = _httpx.AsyncClient(verify=False)
+    client = anthropic.AsyncAnthropic(**client_kwargs)
     async with client.messages.stream(
         model=config.model,
         max_tokens=config.max_tokens,
@@ -412,10 +417,14 @@ async def _stream_openai(system_prompt: str, user_prompt: str, config: LLMConfig
     """Yield text deltas from the OpenAI streaming API."""
     import openai
 
-    client = openai.AsyncOpenAI(
-        api_key=config.api_key or None,
-        base_url=config.base_url or None,
-    )
+    client_kwargs: dict[str, Any] = {
+        "api_key": config.api_key or None,
+        "base_url": config.base_url or None,
+    }
+    if not config.verify_ssl or os.environ.get("FLOWFORGE_SSL_VERIFY", "1").lower() in ("0", "false", "no", "off"):
+        import httpx as _httpx
+        client_kwargs["http_client"] = _httpx.AsyncClient(verify=False)
+    client = openai.AsyncOpenAI(**client_kwargs)
     response = await client.chat.completions.create(
         model=config.model,
         max_tokens=config.max_tokens,
@@ -477,10 +486,14 @@ async def _call_anthropic(
     """
     import anthropic
 
-    client = anthropic.AsyncAnthropic(
-        api_key=config.api_key or None,
-        base_url=config.base_url or None,
-    )
+    client_kwargs: dict[str, Any] = {
+        "api_key": config.api_key or None,
+        "base_url": config.base_url or None,
+    }
+    if not config.verify_ssl or os.environ.get("FLOWFORGE_SSL_VERIFY", "1").lower() in ("0", "false", "no", "off"):
+        import httpx as _httpx
+        client_kwargs["http_client"] = _httpx.AsyncClient(verify=False)
+    client = anthropic.AsyncAnthropic(**client_kwargs)
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_prompt}]
 
@@ -628,10 +641,14 @@ async def _call_openai(
     """Call the OpenAI Chat Completions API with a tool-use loop."""
     import openai
 
-    client = openai.AsyncOpenAI(
-        api_key=config.api_key or None,
-        base_url=config.base_url or None,
-    )
+    client_kwargs: dict[str, Any] = {
+        "api_key": config.api_key or None,
+        "base_url": config.base_url or None,
+    }
+    if not config.verify_ssl or os.environ.get("FLOWFORGE_SSL_VERIFY", "1").lower() in ("0", "false", "no", "off"):
+        import httpx as _httpx
+        client_kwargs["http_client"] = _httpx.AsyncClient(verify=False)
+    client = openai.AsyncOpenAI(**client_kwargs)
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},

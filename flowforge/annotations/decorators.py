@@ -119,6 +119,8 @@ def step(
     condition: BranchCondition | None = None,
     branches: dict[str, Callable[..., Any]] | None = None,
     fallback: Callable[..., Any] | None = None,
+    pass_criteria: str | None = None,
+    pass_criteria_max_retries: int = 3,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark an async function as a step within a leaf task.
 
@@ -174,6 +176,15 @@ def step(
     fallback:
         Handler called when no key in ``branches`` matches the resolved
         condition value.  Falls back to the decorated ``func`` if omitted.
+    pass_criteria:
+        Natural-language criteria the step output must satisfy.  When set,
+        an LLM judge evaluates the output after execution.  If the output
+        fails the criteria, the step is re-run with feedback about what was
+        wrong (up to ``pass_criteria_max_retries`` attempts).  After all
+        retries are exhausted, the last result is used regardless.
+    pass_criteria_max_retries:
+        Maximum number of retry attempts when ``pass_criteria`` is set.
+        Defaults to 3.
 
     Returns
     -------
@@ -196,6 +207,8 @@ def step(
             condition=condition,
             branches=branches or {},
             fallback=fallback,
+            pass_criteria=pass_criteria,
+            pass_criteria_max_retries=pass_criteria_max_retries,
         )
 
         # Validate branch handler return-type consistency at decoration time

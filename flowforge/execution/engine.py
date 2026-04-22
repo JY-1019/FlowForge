@@ -108,6 +108,8 @@ class ExecutionEngine:
         # ── AI Planning (autonomous / hybrid) ──────────────────────────────
         elif planning_mode != "deterministic" and self._docs:
             from flowforge.planner.llm_planner import LLMPlanner
+            import logging as _logging
+            _logger = _logging.getLogger(__name__)
             planner = LLMPlanner(mode=planning_mode)
             try:
                 plan = await planner.plan(
@@ -115,14 +117,21 @@ class ExecutionEngine:
                     self._global_meta.llm_config,
                 )
                 planned_node_ids = set(plan.node_ids)
-                import logging
-                logging.getLogger(__name__).info(
-                    "planner selected %d nodes for mode=%s: %s",
-                    len(planned_node_ids), planning_mode, planned_node_ids,
+                # Log selected routes (flow-level paths) for observability
+                flow_ids = sorted(
+                    nid for nid in planned_node_ids
+                    if nid.startswith("global.") and nid != "global"
+                    and self._dag.get_node(nid) is not None
+                    and self._dag.get_node(nid).type == NodeType.FLOW
+                )
+                _logger.info(
+                    "planner selected %d nodes (%d flows) for mode=%s, "
+                    "rationale: %s, flows: %s",
+                    len(planned_node_ids), len(flow_ids), planning_mode,
+                    plan.rationale, flow_ids,
                 )
             except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(
+                _logging.getLogger(__name__).warning(
                     "planning failed (%s), falling back to deterministic order", e
                 )
 

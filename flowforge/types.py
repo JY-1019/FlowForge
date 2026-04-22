@@ -52,6 +52,7 @@ class LLMConfig(BaseModel):
     max_tokens: int = 4096
     api_key: str | None = None
     base_url: str | None = None
+    verify_ssl: bool = True
 
     model_config = {"arbitrary_types_allowed": True}
 

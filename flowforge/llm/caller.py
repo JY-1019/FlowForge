@@ -35,12 +35,33 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from flowforge.types import LLMConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _get_ssl_verify(llm_config: LLMConfig | None = None) -> bool:
+    """Return ``False`` when the user has opted out of SSL verification.
+
+    Checks two sources (either one disables verification):
+
+    1. ``LLMConfig.verify_ssl = False``
+    2. Environment variable ``FLOWFORGE_SSL_VERIFY=0`` (or ``false``)
+
+    Corporate proxies (e.g. LG CNS, ZScaler) often inject self-signed CA
+    certificates whose ``Basic Constraints`` extension is not marked
+    *critical*.  Modern OpenSSL (3.x) rejects these, breaking API calls.
+    """
+    # LLMConfig option takes precedence
+    if llm_config is not None and not llm_config.verify_ssl:
+        return False
+    # Environment variable fallback
+    val = os.environ.get("FLOWFORGE_SSL_VERIFY", "1").lower()
+    return val not in ("0", "false", "no", "off")
 
 
 async def call_with_tool(
@@ -143,6 +164,10 @@ async def _call_anthropic(
     if llm_config.base_url:
         kwargs["base_url"] = llm_config.base_url
 
+    if not _get_ssl_verify(llm_config):
+        import httpx
+        kwargs["http_client"] = httpx.Client(verify=False)
+
     client = anthropic.Anthropic(api_key=api_key, **kwargs) if api_key else anthropic.Anthropic(**kwargs)
 
     tool_name = tool_schema["name"]
@@ -204,6 +229,10 @@ async def _call_openai(
         init_kwargs["api_key"] = api_key
     if base_url:
         init_kwargs["base_url"] = base_url
+
+    if not _get_ssl_verify(llm_config):
+        import httpx
+        init_kwargs["http_client"] = httpx.AsyncClient(verify=False)
 
     client = openai.AsyncOpenAI(**init_kwargs)
 
@@ -315,7 +344,13 @@ async def _call_google(
         ) from e
 
     api_key = llm_config.api_key
-    client = genai.Client(api_key=api_key) if api_key else genai.Client()
+    genai_kwargs: dict[str, Any] = {}
+    if api_key:
+        genai_kwargs["api_key"] = api_key
+    if not _get_ssl_verify(llm_config):
+        import httpx
+        genai_kwargs["http_options"] = {"client": httpx.AsyncClient(verify=False)}
+    client = genai.Client(**genai_kwargs)
 
     tool_name   = tool_schema["name"]
     input_schema = _json_schema_to_gemini_schema(tool_schema.get("input_schema", {}))

@@ -73,6 +73,12 @@ class GlobalContext:
     all_docs:
         AI-generated documentation for every DAG node, keyed by node ID.
         Populated by ``CompiledAgent.generate_docs()``.
+    shared_data:
+        Mutable dictionary shared across **all** flows in a single run.
+        Unlike ``FlowContext.flow_state`` (scoped to one flow), this dict
+        is accessible from any flow, task, or step via
+        ``ctx.global_ctx.shared_data``.  Use it to pass data between
+        independent flows that don't have a direct input/output chain.
     tracer:
         Optional ``RunTracer`` that records every node start / finish / error
         for post-run visualisation.  ``None`` unless ``run_traced()`` is used.
@@ -92,6 +98,7 @@ class GlobalContext:
         self.tool_registry  = tool_registry
         self.env_vars: dict[str, str] = env_vars or {}
         self.all_docs: dict[str, AnyDoc] = {}
+        self.shared_data: dict[str, Any] = {}
         self.tracer: RunTracer | None = tracer
         # Set by the engine when planning_mode != "deterministic".
         # None means "run everything"; a set means "only run these node IDs".
@@ -198,6 +205,14 @@ class TaskContext:
         """Shortcut to the ``GlobalContext`` through the flow context."""
         return self.flow_ctx.global_ctx
 
+    @property
+    def shared_data(self) -> dict[str, Any]:
+        """Mutable dict shared across all flows in this run.
+
+        Shortcut for ``self.global_ctx.shared_data``.
+        """
+        return self.global_ctx.shared_data
+
 
 class StepContext:
     """Context for a single step invocation.
@@ -258,6 +273,21 @@ class StepContext:
         # Output schema for structured LLM output (Pydantic BaseModel or None).
         self.output_schema: type | None = output_schema
 
+        # Feedback from previous pass_criteria failures (populated by StepRunner
+        # on retry).  Step functions can read this to adjust their behavior.
+        self._pass_criteria_feedback: list[str] = []
+
+    @property
+    def pass_criteria_feedback(self) -> list[str]:
+        """List of feedback strings from previous pass_criteria failures.
+
+        Empty on the first attempt.  On retries, contains one entry per
+        previous failed attempt describing what the LLM judge found wrong.
+        Step functions that use ``ctx.call_llm()`` can include this feedback
+        in the prompt to guide the LLM toward a better response.
+        """
+        return self._pass_criteria_feedback
+
     @property
     def flow_ctx(self) -> FlowContext:
         """Shortcut to the enclosing ``FlowContext``."""
@@ -267,6 +297,15 @@ class StepContext:
     def global_ctx(self) -> GlobalContext:
         """Shortcut to the shared ``GlobalContext``."""
         return self.task_ctx.global_ctx
+
+    @property
+    def shared_data(self) -> dict[str, Any]:
+        """Mutable dict shared across all flows in this run.
+
+        Shortcut for ``self.global_ctx.shared_data``.  Use this to exchange
+        data between independent flows that don't share an input/output chain.
+        """
+        return self.global_ctx.shared_data
 
     @property
     def tools(self) -> ToolRegistry:

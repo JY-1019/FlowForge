@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json as _json
 import logging
 import re
 from typing import Any
@@ -230,6 +231,28 @@ def _get_condition_value(input_data: Any, condition: Any) -> Any:
     return getattr(input_data, field, None)
 
 
+def _parse_judge_response(response: Any) -> dict[str, Any]:
+    """Parse the LLM judge's JSON response into {"pass": bool, "feedback": str}.
+
+    Handles plain dicts, JSON strings, and markdown-fenced JSON.
+    """
+    if isinstance(response, dict):
+        return {"pass": bool(response.get("pass", False)),
+                "feedback": response.get("feedback", "")}
+
+    text = str(response)
+    parsed = _try_parse_json(text)
+    if parsed and "pass" in parsed:
+        return {"pass": bool(parsed["pass"]),
+                "feedback": parsed.get("feedback", "")}
+
+    # Fallback: if the response contains "true" somewhere, assume pass.
+    lower = text.lower()
+    if '"pass": true' in lower or '"pass":true' in lower:
+        return {"pass": True, "feedback": ""}
+    return {"pass": False, "feedback": text[:200]}
+
+
 # ---------------------------------------------------------------------------
 # StepRunner
 # ---------------------------------------------------------------------------
@@ -368,6 +391,14 @@ class StepRunner:
                 result = await run_with_timeout(coro, meta.timeout_seconds)
 
             # ------------------------------------------------------------------
+            # Phase 3.5: pass_criteria — LLM judge + retry loop
+            # ------------------------------------------------------------------
+            if meta.pass_criteria and not meta.is_branch:
+                result = await self._apply_pass_criteria(
+                    meta, ctx, step_input, result, node_id,
+                )
+
+            # ------------------------------------------------------------------
             # Phase 4: output validation & storage
             # ------------------------------------------------------------------
             if meta.output_schema is not None and result is not None:
@@ -407,6 +438,106 @@ class StepRunner:
             if tracer:
                 tracer.error_node(node_id, str(e))
             raise wrapped from e
+
+    async def _apply_pass_criteria(
+        self,
+        meta: StepMeta,
+        ctx: StepContext,
+        step_input: Any,
+        result: Any,
+        node_id: str,
+    ) -> Any:
+        """Evaluate step output against pass_criteria using an LLM judge.
+
+        If the output fails, re-run the step with feedback about what was
+        wrong.  Retries up to ``meta.pass_criteria_max_retries`` times.
+        After all retries are exhausted, the last result is returned as-is.
+        """
+        from flowforge.execution.llm import call_llm_api
+
+        max_retries = meta.pass_criteria_max_retries
+        feedbacks: list[str] = []
+
+        for attempt in range(max_retries + 1):  # 0 = initial check, 1..N = retries
+            # Ask the LLM judge to evaluate the result.
+            result_repr = result
+            if hasattr(result, "model_dump"):
+                result_repr = result.model_dump()
+            elif not isinstance(result, (dict, list, str, int, float, bool)):
+                result_repr = str(result)
+
+            judge_prompt = (
+                f"You are a strict quality judge.  Evaluate whether the "
+                f"following output satisfies the pass criteria.\n\n"
+                f"## Pass Criteria\n{meta.pass_criteria}\n\n"
+                f"## Step Output\n{_json.dumps(result_repr, ensure_ascii=False, default=str)}\n\n"
+            )
+            if feedbacks:
+                history = "\n".join(
+                    f"- Attempt {i+1}: {fb}" for i, fb in enumerate(feedbacks)
+                )
+                judge_prompt += f"## Previous Feedback\n{history}\n\n"
+
+            judge_prompt += (
+                "Respond in JSON: "
+                '{"pass": true/false, "feedback": "reason if failed"}'
+            )
+
+            try:
+                judge_resp = await call_llm_api(
+                    system_prompt="You are an output quality evaluator. Always respond in valid JSON.",
+                    user_prompt=judge_prompt,
+                    llm_config=ctx.llm_config,
+                )
+
+                verdict = _parse_judge_response(judge_resp)
+            except Exception as e:
+                logger.warning(
+                    "pass_criteria judge failed node_id=%s attempt=%d: %s",
+                    node_id, attempt, e,
+                )
+                # If judge itself fails, accept the result.
+                break
+
+            if verdict["pass"]:
+                logger.debug(
+                    "pass_criteria PASSED node_id=%s attempt=%d",
+                    node_id, attempt,
+                )
+                break
+
+            feedback = verdict.get("feedback", "criteria not met")
+            feedbacks.append(feedback)
+            logger.info(
+                "pass_criteria FAILED node_id=%s attempt=%d/%d feedback=%r",
+                node_id, attempt, max_retries, feedback,
+            )
+
+            # If we've exhausted retries, accept the last result.
+            if attempt >= max_retries:
+                logger.warning(
+                    "pass_criteria exhausted retries node_id=%s, using last result",
+                    node_id,
+                )
+                break
+
+            # Re-run the step with feedback injected into context.
+            retry_ctx = StepContext(
+                task_ctx=ctx.task_ctx,
+                step_prompt=meta.prompt,
+                step_input=step_input,
+                order=meta.order,
+                step_tools=meta.tools,
+                output_schema=meta.output_schema,
+            )
+            # Store feedback history so the step function can access it.
+            retry_ctx._pass_criteria_feedback = feedbacks.copy()
+
+            coro = meta.func(retry_ctx)
+            if inspect.isawaitable(coro):
+                result = await run_with_timeout(coro, meta.timeout_seconds)
+
+        return result
 
     async def _run_branch(
         self,

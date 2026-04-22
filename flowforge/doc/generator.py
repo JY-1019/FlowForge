@@ -1,6 +1,7 @@
 """LLM-based doc generation for FlowForge nodes."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, TYPE_CHECKING
@@ -22,6 +23,9 @@ if TYPE_CHECKING:
     from flowforge.types import LLMConfig
 
 logger = logging.getLogger(__name__)
+
+# Default concurrency limit for parallel doc generation.
+_DEFAULT_CONCURRENCY = 5
 
 _DOC_TOOL_SCHEMA = {
     "name": "generate_doc",
@@ -88,19 +92,60 @@ class DocGenerator:
         llm_config: LLMConfig,
         cache: DocCache | None = None,
         force_regenerate: bool = False,
+        concurrency: int = _DEFAULT_CONCURRENCY,
     ) -> None:
         self._llm_config = llm_config
         self._cache = cache or DocCache()
         self._force = force_regenerate
+        self._concurrency = concurrency
 
-    async def generate_all(self, nodes: list[DAGNode]) -> dict[str, AnyDoc]:
-        """Generate docs for all provided nodes. Returns node_id → doc mapping."""
+    async def generate_all(
+        self,
+        nodes: list[DAGNode],
+        *,
+        node_types: set[NodeType] | None = None,
+    ) -> dict[str, AnyDoc]:
+        """Generate docs for provided nodes, optionally filtered by type.
+
+        Parameters
+        ----------
+        nodes:
+            All DAG nodes.
+        node_types:
+            When set, only generate docs for nodes whose type is in this set.
+            For planning-only doc generation, pass ``{NodeType.GLOBAL, NodeType.FLOW}``
+            to skip task/step nodes and dramatically reduce LLM calls.
+
+        Returns node_id → doc mapping.
+        """
+        targets = nodes
+        if node_types is not None:
+            targets = [n for n in nodes if n.type in node_types]
+
+        # Use concurrent generation with a semaphore to limit parallelism.
+        sem = asyncio.Semaphore(self._concurrency)
         docs: dict[str, AnyDoc] = {}
-        for node in nodes:
-            doc = await self.generate_node(node)
+
+        async def _gen(node: DAGNode) -> tuple[str, AnyDoc | None]:
+            async with sem:
+                doc = await self.generate_node(node)
+                return node.id, doc
+
+        results = await asyncio.gather(
+            *[_gen(n) for n in targets],
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("doc generation task failed: %s", result)
+                continue
+            node_id, doc = result
             if doc is not None:
-                docs[node.id] = doc
-                node.doc = doc
+                docs[node_id] = doc
+                # Also attach to the node object
+                node_obj = next((n for n in targets if n.id == node_id), None)
+                if node_obj:
+                    node_obj.doc = doc
         return docs
 
     async def generate_node(self, node: DAGNode) -> AnyDoc | None:

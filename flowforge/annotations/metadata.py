@@ -114,6 +114,13 @@ class StepMeta:
     # The caller must approve and resume using the checkpoint mechanism.
     approval: bool = False
 
+    # Natural-language criteria the step output must satisfy.  When set, an LLM
+    # judge evaluates the output after each execution.  If the judge says the
+    # output fails the criteria, the step is re-run with feedback about what was
+    # wrong (up to ``pass_criteria_max_retries`` times).
+    pass_criteria: str | None = None
+    pass_criteria_max_retries: int = 3
+
     # Tools available to this step (merged with parent task/flow/global tools).
     tools: list[ToolConfig] = field(default_factory=list)
 

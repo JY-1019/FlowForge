@@ -300,3 +300,87 @@ class TestRouteAndLoop:
         result = await engine.run(None, route="main")
         assert result["good"] is True
         assert result["count"] == 2  # looped once, succeeded on 2nd
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Shared data tests
+# ═══════════════════════════════════════════════════════════════════════
+
+@global_config(prompt="shared data agent")
+class SharedDataAgent:
+    @flow(name="producer", prompt="produces shared data")
+    class ProducerFlow:
+        @task(name="produce", prompt="write to shared_data")
+        class ProduceTask:
+            @step(order=1, prompt="store value in shared_data")
+            async def store(ctx):
+                ctx.shared_data["message"] = "hello from producer"
+                ctx.shared_data["count"] = 42
+                return {"produced": True}
+
+    @flow(name="consumer", prompt="consumes shared data")
+    class ConsumerFlow:
+        @task(name="consume", prompt="read from shared_data")
+        class ConsumeTask:
+            @step(order=1, prompt="read value from shared_data")
+            async def read(ctx):
+                return {
+                    "message": ctx.shared_data.get("message", ""),
+                    "count": ctx.shared_data.get("count", 0),
+                }
+
+
+class TestSharedData:
+    @pytest.mark.asyncio
+    async def test_shared_data_across_flows(self):
+        """shared_data written in one flow is readable in a subsequent flow."""
+        engine = FlowForge.compile(SharedDataAgent)
+        result = await engine.run(None)
+        assert result["message"] == "hello from producer"
+        assert result["count"] == 42
+
+    @pytest.mark.asyncio
+    async def test_shared_data_with_route(self):
+        """shared_data is available but empty when only consumer runs."""
+        engine = FlowForge.compile(SharedDataAgent)
+        result = await engine.run(None, route="consumer")
+        assert result["message"] == ""
+        assert result["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_shared_data_isolated_between_runs(self):
+        """Each engine.run() call starts with a fresh shared_data dict."""
+        engine = FlowForge.compile(SharedDataAgent)
+        result1 = await engine.run(None)
+        assert result1["message"] == "hello from producer"
+
+        # Second run: shared_data should be fresh, not carry over.
+        result2 = await engine.run(None, route="consumer")
+        assert result2["message"] == ""
+
+    @pytest.mark.asyncio
+    async def test_shared_data_via_task_context(self):
+        """shared_data is accessible via task_ctx.shared_data shortcut."""
+        from flowforge.execution.context import GlobalContext, FlowContext, TaskContext
+        from flowforge.tools.registry import ToolRegistry
+
+        gctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+        )
+        gctx.shared_data["key"] = "value"
+
+        fctx = FlowContext(
+            global_ctx=gctx,
+            flow_name="f",
+            flow_prompt="f",
+        )
+        tctx = TaskContext(
+            flow_ctx=fctx,
+            task_name="t",
+            task_prompt="t",
+        )
+        assert tctx.shared_data["key"] == "value"
+        tctx.shared_data["new_key"] = "new_value"
+        assert gctx.shared_data["new_key"] == "new_value"

@@ -123,17 +123,38 @@ class CompiledAgent:
         """Trace of the most recent run() call. None before first run."""
         return self._engine.last_trace
 
-    async def generate_docs(self, force: bool = False) -> dict[str, AnyDoc]:
-        """Generate AI docs for all DAG nodes."""
+    async def generate_docs(
+        self,
+        force: bool = False,
+        planning_only: bool = False,
+    ) -> dict[str, AnyDoc]:
+        """Generate AI docs for DAG nodes.
+
+        Parameters
+        ----------
+        force:
+            Regenerate docs even if cached.
+        planning_only:
+            When ``True``, only generate docs for GLOBAL and FLOW nodes.
+            This is sufficient for the autonomous/hybrid planner (which
+            operates at the flow level) and dramatically reduces the
+            number of LLM calls.
+        """
         from flowforge.doc.generator import DocGenerator
         from flowforge.doc.cache import DocCache
+        from flowforge.schema.dag import NodeType
+
+        node_types = {NodeType.GLOBAL, NodeType.FLOW} if planning_only else None
 
         generator = DocGenerator(
             llm_config=self._global_meta.llm_config,
             cache=DocCache(),
             force_regenerate=force,
         )
-        docs = await generator.generate_all(self._dag.get_all_nodes())
+        docs = await generator.generate_all(
+            self._dag.get_all_nodes(),
+            node_types=node_types,
+        )
         self._docs.update(docs)
         self._engine._docs = self._docs
         return docs

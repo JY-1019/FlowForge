@@ -5,16 +5,21 @@ Token budget strategy
 The planner prompt must be as compact as possible while still giving the LLM
 enough context to pick the right execution path.
 
+**Flow-only planning**: Route selection operates at the FLOW level only.
+Tasks and steps within a flow are determined by their ``order`` and
+``branch`` configuration — the planner does not need to reason about them.
+
 What we include (in decreasing token priority):
+
 1. Global system prompt (truncated to 300 chars)
-2. Per-node one-liner: type + id + summary (no edges — tree shape is implied by ids)
-3. Capabilities only for FLOW and TASK nodes (3 items max)
-4. User request
+2. Flow hierarchy as an indented tree, each with a route path + summary
+3. User request
 
 What we deliberately omit:
-- Raw DAG edge list (redundant: the dotted IDs encode the tree already)
-- Step/branch summaries in the overview (implementation detail, not path-selection level)
-- Full input/output schema descriptions (available inside doc if needed at runtime)
+
+- TASK / STEP nodes (execution-level detail, not planning-level)
+- Raw DAG edge list (tree structure visible from indentation)
+- Full input/output schema descriptions
 """
 from __future__ import annotations
 
@@ -52,13 +57,21 @@ class PromptBuilder:
                 truncated += "…"
             parts.append(f"## System\n{truncated}")
 
-        # 2. Node registry — only FLOW and TASK nodes drive path selection.
-        #    STEP/BRANCH are execution details, not planning-level choices.
-        planning_types = {NodeType.GLOBAL, NodeType.FLOW, NodeType.TASK}
+        # 2. Flow tree — only FLOW nodes drive path selection.
+        #    Tasks/steps are execution details handled by order/branch.
+        #    Show as indented tree with route paths for easy selection.
         lines: list[str] = []
         for node in dag.get_all_nodes():
-            if node.type not in planning_types:
+            if node.type == NodeType.GLOBAL:
                 continue
+            if node.type != NodeType.FLOW:
+                continue
+
+            # route path = node.id without "global." prefix
+            route_path = node.id.removeprefix("global.")
+            depth = route_path.count(".")
+            indent = "  " * depth
+
             doc = docs.get(node.id)
             summary = ""
             caps_str = ""
@@ -68,9 +81,9 @@ class PromptBuilder:
                 caps: list[str] = getattr(doc, "capabilities", [])[:_CAPS_MAX]
                 if caps:
                     caps_str = " | " + "; ".join(caps)
-            lines.append(f"[{node.type.value}] {node.id}  {summary}{caps_str}")
+            lines.append(f"{indent}{route_path}  — {summary}{caps_str}")
 
-        parts.append("## Available Nodes\n" + "\n".join(lines))
+        parts.append("## Available Routes (Flow hierarchy)\n" + "\n".join(lines))
 
         # 3. User request
         if hasattr(user_request, "model_dump"):
@@ -82,8 +95,12 @@ class PromptBuilder:
         # 4. Instruction
         parts.append(
             "## Task\n"
-            "Return the ordered list of node IDs that should execute to fulfill this request. "
-            "Only include FLOW and TASK node IDs. Use the plan_execution tool."
+            "Select the MINIMUM set of flow routes needed to fulfill this request.\n"
+            "Return dot-separated route paths (e.g. \"ml_platform.training\").\n"
+            "- Be SPECIFIC: prefer deeper paths when the request targets a narrow capability.\n"
+            "- If the request spans multiple domains, return multiple routes.\n"
+            "- Tasks and steps within each flow run automatically — do NOT include them.\n"
+            "Use the plan_execution tool."
         )
 
         return "\n\n".join(parts)
