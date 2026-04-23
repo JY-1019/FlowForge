@@ -1,8 +1,8 @@
 site_name: FlowForge
 site_description: Annotation-Based AI Agent Framework — build AI pipelines with Python decorators only.
-site_url: https://flowforge.dev
-repo_url: https://github.com/yourusername/flowforge
-repo_name: flowforge
+site_url: https://jy-1019.github.io/FlowForge/
+repo_url: https://github.com/JY-1019/FlowForge
+repo_name: JY-1019/FlowForge
 edit_uri: edit/main/docs/
 
 theme:
@@ -49,7 +49,7 @@ nav:
     - DAG Compilation: concepts/dag-compilation.md
   - Guides:
     - Your First Agent: guides/first-agent.md
-    - Conditional Routing: guides/branching.md
+    - Branch Dispatching: guides/branching.md
     - Nested Flows & Tasks: guides/nested-flows.md
     - Tools & LLM Calling: guides/tools-and-llm.md
     - Run Visualization: guides/visualization.md
@@ -92,8 +92,8 @@ plugins:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/yourusername/flowforge
+      link: https://github.com/JY-1019/FlowForge
   version:
     provider: mike
 
-copyright: Copyright &copy; 2026 FlowForge Contributors
+copyright: Copyright &copy; 2026 Jongyeon Keum

@@ -9,7 +9,7 @@ description = "Annotation-Based AI Agent Framework"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Jongyeon Kim" }]
+authors = [{ name = "Jongyeon Keum" }]
 
 [project.urls]
 Homepage = "https://github.com/JY-1019/FlowForge"

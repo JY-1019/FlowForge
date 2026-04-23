@@ -8,8 +8,7 @@ No graphs. No YAML. No LangChain dependency.
 ---
 
 ```python
-from flowforge import global_config, flow, task, step, branch, FlowForge
-from flowforge.types import BranchCondition
+from flowforge import global_config, flow, task, step, FlowForge
 from pydantic import BaseModel
 
 class Query(BaseModel):
@@ -91,9 +90,10 @@ result = await engine.run(Query(text="What is FlowForge?"))
 ## Installation
 
 ```bash
-pip install flowforge
-# or for docs-serving:
-pip install flowforge[docs]
+pip install git+https://github.com/JY-1019/FlowForge.git
+
+# With all optional extras:
+pip install "flowforge[all] @ git+https://github.com/JY-1019/FlowForge.git"
 ```
 
 Requires **Python 3.11+**.
@@ -104,12 +104,13 @@ Requires **Python 3.11+**.
 
 ```
 @global_config          ← top-level agent config (LLM, tools, system prompt)
-  └─ @flow              ← high-level pipeline stage
+  └─ @flow              ← high-level pipeline stage (nestable, supports branching)
        ├─ @flow         ← sub-pipeline (flows nest recursively)
-       └─ @task         ← execution unit (tasks also nest)
-            ├─ @step    ← single action, runs in order=N
-            └─ @branch  ← conditional routing, also has order=N
+       └─ @task         ← execution unit (nestable, supports branching)
+            └─ @step    ← single action, runs in order=N (supports branching)
 ```
+
+Branch dispatching is built into `@step`, `@task`, and `@flow` via optional `condition`, `branches`, and `fallback` parameters — there is no separate `@branch` decorator.
 
 Every decorator compiles to a **DAG node** with a dotted-path ID (e.g. `global.research.analyze.classify[1]`).
 At runtime the engine traverses the DAG, threads outputs into inputs, and records a full `RunTrace`.

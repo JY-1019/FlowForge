@@ -8,7 +8,7 @@
   <a href="#quick-start">Quick Start</a> &bull;
   <a href="#features">Features</a> &bull;
   <a href="#how-it-works">How It Works</a> &bull;
-  <a href="https://github.com/JY-1019/FlowForge/tree/main/docs">Docs</a>
+  <a href="#documentation">Docs</a>
 </p>
 
 ---
@@ -274,6 +274,33 @@ flowforge/
 └── cli/            # Typer-based CLI
 ```
 
+## Documentation
+
+Full documentation is available via [MkDocs Material](https://squidfunk.github.io/mkdocs-material/). You can serve it locally:
+
+```bash
+# Install docs dependencies
+pip install "flowforge[docs] @ git+https://github.com/JY-1019/FlowForge.git"
+
+# Serve locally (opens at http://localhost:8000)
+mkdocs serve
+```
+
+### Documentation Structure
+
+| Section | Description |
+|---------|-------------|
+| [Getting Started](docs/getting-started.md) | Installation, hello world, first run |
+| [Concepts](docs/concepts/) | Architecture, annotations, data flow, DAG compilation |
+| [Guides](docs/guides/) | First agent, branch dispatching, nested flows, tools & LLM, visualization |
+| [API Reference](docs/api/) | Decorators, types, engine, errors, CLI |
+
+You can also browse the docs directly on GitHub: [docs/](https://github.com/JY-1019/FlowForge/tree/main/docs)
+
 ## License
 
-MIT
+MIT License. See [LICENSE](LICENSE) for details.
+
+## Author
+
+Jongyeon Keum

@@ -28,10 +28,11 @@ Each decorator attaches a metadata object to the class/function:
 | Decorator | Metadata attached | Attribute name |
 |-----------|------------------|---------------|
 | `@step` | `StepMeta` | `__flowforge_step_meta__` |
-| `@branch` | `BranchMeta` | `__flowforge_branch_meta__` |
 | `@task` | `TaskMeta` | `__flowforge_task_meta__` |
 | `@flow` | `FlowMeta` | `__flowforge_flow_meta__` |
 | `@global_config` | `GlobalMeta` | `__flowforge_global_meta__` |
+
+Branch dispatching is not a separate decorator. It is a parameter of `@step`, `@task`, and `@flow` via `condition`, `branches`, and `fallback`.
 
 Validation also runs here — `OrderConflictError` is raised at import time if two steps share the same `order`.
 
@@ -82,7 +83,7 @@ This phase is **optional**. By default the engine executes the full DAG.
 
 ## Phase 4 — Execute
 
-The `ExecutionEngine` drives a `FlowRunner`, which drives `TaskRunner`, which drives `StepRunner`/`BranchRunner`.
+The `ExecutionEngine` drives a `FlowRunner`, which drives `TaskRunner`, which drives `StepRunner`. Branch dispatching is handled within each runner when `condition`/`branches` parameters are present.
 
 ```
 ExecutionEngine.run(input)
@@ -91,8 +92,8 @@ ExecutionEngine.run(input)
        └─ TaskRunner.run(TaskMeta, flow_ctx, task_input)
             ├─ [container: recurse into child tasks]
             └─ [leaf: iterate steps in order, thread output→input]
-                 ├─ StepRunner.run(StepMeta, task_ctx, step_input)
-                 └─ BranchRunner.run(BranchMeta, task_ctx, branch_input)
+                 └─ StepRunner.run(StepMeta, task_ctx, step_input)
+                      └─ [if step has condition/branches: dispatch to handler]
 ```
 
 After every run, a `RunTrace` is stored in `engine.last_trace`.
