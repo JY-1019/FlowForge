@@ -6,12 +6,11 @@
 
 ```
 @global_config
-  └─ @flow                 ← 1+ flows required
+  └─ @flow                 ← 1+ flows required (supports branch dispatching)
        ├─ @flow            ← flows nest recursively
-       └─ @task            ← leaf tasks hold steps/branches
+       └─ @task            ← leaf tasks hold steps (supports branch dispatching)
             ├─ @task       ← container tasks hold child tasks
-            ├─ @step       ← leaf only
-            └─ @branch     ← leaf only, shares order space with @step
+            └─ @step       ← leaf only (supports branch dispatching)
 ```
 
 | Parent | Allowed Children |
@@ -19,9 +18,11 @@
 | `@global_config` | `@flow` |
 | `@flow` | `@flow`, `@task` |
 | `@task` (container) | `@task` |
-| `@task` (leaf) | `@step`, `@branch` |
+| `@task` (leaf) | `@step` |
 | `@step` | — (leaf) |
-| `@branch` | — (leaf, references external handlers) |
+
+!!! note "No `@branch` Decorator"
+    Branch dispatching is built into `@step`, `@task`, and `@flow` via the optional `condition`, `branches`, and `fallback` parameters. There is no separate `@branch` decorator.
 
 ---
 
@@ -224,53 +225,68 @@ async def validate_doc(ctx):
 
 ---
 
-## @branch
+## Branch Dispatching
 
-Conditional routing within a leaf task. Selects one of several handlers based on a field value.
+Conditional routing is built into `@step`, `@task`, and `@flow` — there is no separate `@branch` decorator. Add `condition`, `branches`, and optionally `fallback` to any decorator.
+
+### Step-level branching
 
 ```python
-from flowforge import branch
+from flowforge import step
 from flowforge.types import BranchCondition
 
 async def handle_web(ctx): ...
 async def handle_db(ctx): ...
-async def handle_api(ctx): ...
-async def handle_default(ctx): ...
 
-@branch(
+@step(
     order=2,
-    name="source_router",
-    prompt="Route to the appropriate data source based on query analysis",
-    condition=BranchCondition(
-        field="source_preference",   # field on ctx.input
-        enum=["web", "db", "api"],   # valid values
-    ),
-    branches={
-        "web": handle_web,
-        "db":  handle_db,
-        "api": handle_api,
-    },
-    fallback=handle_default,         # used if value not in enum
+    prompt="Route to the appropriate data source",
+    condition=BranchCondition(field="source", enum=["web", "db"]),
+    branches={"web": handle_web, "db": handle_db},
+    fallback=handle_web,
 )
 async def route_source(ctx): ...
 ```
 
+### Task-level branching
+
+```python
+@task(
+    name="dispatch",
+    prompt="Route to fast or slow processing",
+    condition=BranchCondition(field="mode", enum=["fast", "slow"]),
+    branches={"fast": FastTask, "slow": SlowTask},
+)
+class DispatchTask: ...
+```
+
+### Flow-level branching
+
+```python
+@flow(
+    name="dispatch",
+    prompt="Route by request type",
+    condition=BranchCondition(field="type", enum=["a", "b"]),
+    branches={"a": FlowA, "b": FlowB},
+)
+class DispatchFlow: ...
+```
+
+### Branch parameters
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `order` | `int` | ✅ | Same order space as `@step` |
-| `name` | `str` | ✅ | Branch identifier (used in trace + DAG) |
-| `prompt` | `str` | ✅ | Routing description |
-| `condition` | `BranchCondition` | ✅ | `field` to inspect + valid `enum` values |
-| `branches` | `dict[str, Callable]` | ✅ | Value → async handler mapping |
+| `condition` | `BranchCondition` | `None` | `field` to inspect + valid `enum` values |
+| `branches` | `dict[str, Callable]` | `None` | Value → handler/class mapping |
 | `fallback` | `Callable` | `None` | Handler when no value matches |
 
-!!! tip "Handler Signatures"
-    Branch handlers receive a `BranchContext` just like the decorated function:
+!!! tip "Handler Context"
+    Branch handlers receive a `StepContext` with `selected_branch` and `condition_value` populated:
     ```python
     async def handle_web(ctx):
-        # ctx.input          → same as branch input
-        # ctx.condition_value → the resolved field value
-        # ctx.selected_branch → "web"
+        # ctx.input           → same as step input
+        # ctx.condition_value  → the resolved field value
+        # ctx.selected_branch  → "web"
         return SearchResult(source="web", results=[...])
     ```
 

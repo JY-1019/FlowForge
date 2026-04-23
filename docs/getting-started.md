@@ -15,14 +15,14 @@
 
 ```bash
 # Minimal install
-pip install flowforge
+pip install git+https://github.com/JY-1019/FlowForge.git
 
-# With docs server (MkDocs Material)
-pip install flowforge[docs]
+# With all optional extras (visualization, MCP, OpenAI, Google)
+pip install "flowforge[all] @ git+https://github.com/JY-1019/FlowForge.git"
 
 # Development install (editable + test deps)
-git clone https://github.com/yourusername/flowforge
-cd flowforge
+git clone https://github.com/JY-1019/FlowForge.git
+cd FlowForge
 pip install -e ".[dev]"
 ```
 

@@ -20,7 +20,10 @@ Converts a `@global_config`-decorated class into a `CompiledAgent`. Raises `Comp
 
 ## CompiledAgent
 
-The object returned by `FlowForge.compile()`. Holds the DAG and the execution engine.
+The object returned by `FlowForge.compile()`. Holds the DAG, docs, and a default execution engine.
+
+For **single-user / CLI** usage, call `run()` directly on this object.
+For **multi-user / server** usage, call `create_session()` to get isolated per-user sessions.
 
 ---
 
@@ -58,11 +61,19 @@ await engine.run(input_data)
 print(engine.last_trace.duration_ms)
 ```
 
+#### `.memory` — `SessionMemory`
+
+Session memory that persists across `run()` calls. Stores compact summaries of previous runs so the LLM can reference earlier results.
+
+```python
+engine.memory.clear()  # reset memory
+```
+
 ---
 
 ### Methods
 
-#### `run(input_data)` → `Any`
+#### `run(input_data, ...)` → `Any`
 
 Execute the pipeline. Trace is stored in `engine.last_trace`.
 
@@ -70,7 +81,35 @@ Execute the pipeline. Trace is stored in `engine.last_trace`.
 result = await engine.run(my_input)
 ```
 
-#### `run_traced(input_data)` → `tuple[Any, RunTrace]`
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `input_data` | `Any` | (required) | Input passed to the first flow |
+| `planning_mode` | `str` | `"deterministic"` | `"deterministic"`, `"autonomous"`, or `"hybrid"` |
+| `route` | `str \| list[str] \| None` | `None` | Execute only specific paths |
+| `resume_from` | `Checkpoint \| None` | `None` | Resume from a previous run's checkpoint |
+
+**Planning modes:**
+
+- `"deterministic"` — run all nodes in compiled order (default)
+- `"autonomous"` — call the LLM planner first; only selected nodes execute
+- `"hybrid"` — same as autonomous but allows minor deviations
+
+**Route examples:**
+
+```python
+# Run only the "search" flow
+result = await engine.run(data, route="search")
+
+# Run a specific task within a flow
+result = await engine.run(data, route="research.analyze")
+
+# Run multiple routes
+result = await engine.run(data, route=["analysis", "report"])
+```
+
+#### `run_traced(input_data, ...)` → `tuple[Any, RunTrace]`
 
 Execute and explicitly return `(result, RunTrace)`:
 
@@ -79,13 +118,27 @@ result, trace = await engine.run_traced(my_input)
 print(trace.succeeded, trace.duration_ms)
 ```
 
-#### `generate_docs(force=False)` → `dict[str, AnyDoc]`
+Accepts the same parameters as `run()`.
 
-Generate AI documentation for every DAG node. Uses LLM with caching.
+#### `generate_docs(force=False, planning_only=False)` → `dict[str, AnyDoc]`
+
+Generate AI documentation for DAG nodes. Uses LLM with caching.
 
 ```python
 docs = await engine.generate_docs()
-docs = await engine.generate_docs(force=True)  # ignore cache
+docs = await engine.generate_docs(force=True)          # ignore cache
+docs = await engine.generate_docs(planning_only=True)  # only GLOBAL + FLOW nodes
+```
+
+When `planning_only=True`, only GLOBAL and FLOW level docs are generated — sufficient for the autonomous/hybrid planner and much faster.
+
+#### `create_session()` → `AgentSession`
+
+Create a per-user session with isolated memory and trace. See [AgentSession](#agentsession) below.
+
+```python
+session = engine.create_session()
+result = await session.run(user_input)
 ```
 
 ---
@@ -94,11 +147,11 @@ docs = await engine.generate_docs(force=True)  # ignore cache
 
 #### `visualize(output_path, **kwargs)` → `None`
 
-Render the **full DAG structure** (not a run trace) to an SVG/PNG file.
+Render the **full DAG structure** to an SVG/PNG file. Falls back to Mermaid if graphviz is not installed.
 
 ```python
 engine.visualize("dag.svg")
-engine.visualize("dag.png", fmt="png", show_docs=True)
+engine.visualize("dag.png", fmt="png")
 ```
 
 #### `mermaid()` → `str`
@@ -123,16 +176,18 @@ result, trace = await engine.run_traced(input_data)
 path = engine.visualize_run("run.svg", trace=trace)
 ```
 
-Raises `RuntimeError("No run trace")` if called before any run.
-
 #### `run_mermaid(trace=None)` → `str`
 
-Return a Mermaid diagram for the last (or given) run:
+Return a Mermaid diagram for the last (or given) run.
+
+#### `compare_mermaid(trace=None)` → `str`
+
+Return a Markdown string with two Mermaid diagrams: the full DAG and the executed path side-by-side.
 
 ```python
 await engine.run(input_data)
-mmd = engine.run_mermaid()
-print(mmd)
+md = engine.compare_mermaid()
+# Paste into any Markdown viewer to compare
 ```
 
 #### `print_run_summary(trace=None)` → `None`
@@ -143,6 +198,45 @@ Print a terminal table summarizing the run:
 await engine.run(input_data)
 engine.print_run_summary()
 ```
+
+---
+
+## AgentSession
+
+Per-user session with isolated memory and trace. Created via `engine.create_session()`.
+
+The heavy, immutable resources (DAG, docs, tool registry) are **shared** with the parent `CompiledAgent` — no duplication. Only memory and trace are isolated.
+
+### Usage
+
+```python
+# Single-user (CLI, scripts)
+engine = FlowForge.compile(MyAgent)
+result = await engine.run(input_data)
+
+# Multi-user (FastAPI, etc.)
+engine = FlowForge.compile(MyAgent)
+await engine.generate_docs(planning_only=True)
+
+# Per-request
+session = engine.create_session()
+result = await session.run(user_input)
+```
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `.memory` | `SessionMemory` | Per-session memory, persists across `run()` calls |
+| `.last_trace` | `RunTrace \| None` | Trace of the most recent run in this session |
+
+### Methods
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `run(input_data, ...)` | `Any` | Same interface as `CompiledAgent.run()` |
+| `run_traced(input_data, ...)` | `tuple[Any, RunTrace]` | Same interface as `CompiledAgent.run_traced()` |
+| `compare_mermaid(trace=None)` | `str` | Full DAG vs executed path comparison |
 
 ---
 
@@ -172,6 +266,10 @@ ordered: list[DAGNode] = dag.topological_order()
 # Cycle detection
 cycles: list = dag.detect_cycles()   # empty = no cycles
 
+# Route resolution
+node_ids = dag.resolve_route("search")            # flow + descendants
+node_ids = dag.resolve_route("research.analyze")   # specific task
+
 # Size
 count: int = len(dag)
 ```
@@ -179,10 +277,10 @@ count: int = len(dag)
 ### DAGNode
 
 ```python
-node.id       # str — dotted-path ID, e.g. "global.research.search"
-node.type     # NodeType enum: GLOBAL | FLOW | TASK | STEP | BRANCH
-node.name     # str — short name
-node.meta     # FlowMeta | TaskMeta | StepMeta | BranchMeta | GlobalMeta
+node.id        # str — dotted-path ID, e.g. "global.research.search"
+node.type      # NodeType enum: GLOBAL | FLOW | TASK | STEP
+node.name      # str — short name
+node.meta      # FlowMeta | TaskMeta | StepMeta | GlobalMeta
 node.parent_id # str | None
-node.doc      # AnyDoc | None — populated after generate_docs()
+node.doc       # AnyDoc | None — populated after generate_docs()
 ```
