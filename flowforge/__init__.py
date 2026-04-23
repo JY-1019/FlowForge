@@ -83,8 +83,127 @@ if TYPE_CHECKING:
     from flowforge.viz.run_trace import RunTrace, Checkpoint
 
 
+class AgentSession:
+    """Per-user session — isolates memory and trace while sharing the DAG.
+
+    Created via ``CompiledAgent.create_session()``.  Each session has its
+    own ``SessionMemory`` and ``last_trace``, so concurrent users never
+    interfere with each other.
+
+    The heavy, immutable resources (DAG, docs, tool registry) are shared
+    with the parent ``CompiledAgent`` — no duplication.
+
+    Typical FastAPI usage::
+
+        # app startup
+        agent = FlowForge.compile(MyAgent)
+        await agent.generate_docs(planning_only=True)
+
+        # per request
+        @app.post("/chat")
+        async def chat(req: ChatRequest):
+            session = get_or_create_session(req.user_id)  # your session store
+            result = await session.run(req.input)
+            return result
+    """
+
+    def __init__(
+        self,
+        dag: FlowForgeDAG,
+        global_meta: Any,
+        docs: dict[str, AnyDoc],
+    ) -> None:
+        from flowforge.execution.engine import ExecutionEngine
+        from flowforge.tools.registry import ToolRegistry
+
+        self._dag = dag
+        self._global_meta = global_meta
+        self._docs = docs
+        self._engine = ExecutionEngine(
+            dag=dag,
+            global_meta=global_meta,
+            docs=docs,
+            tool_registry=ToolRegistry(),
+        )
+
+    @property
+    def memory(self) -> Any:
+        """Session memory — persists across ``run()`` calls within this session."""
+        return self._engine.memory
+
+    @property
+    def last_trace(self) -> RunTrace | None:
+        return self._engine.last_trace
+
+    async def run(
+        self,
+        input_data: Any,
+        planning_mode: str = "deterministic",
+        route: str | list[str] | None = None,
+        resume_from: Any = None,
+    ) -> Any:
+        """Execute the pipeline. See ``CompiledAgent.run()`` for details."""
+        return await self._engine.run(
+            input_data, planning_mode=planning_mode, route=route,
+            resume_from=resume_from,
+        )
+
+    async def run_traced(
+        self,
+        input_data: Any,
+        planning_mode: str = "deterministic",
+        route: str | list[str] | None = None,
+        resume_from: Any = None,
+    ) -> tuple[Any, RunTrace]:
+        """Execute the pipeline and return (result, RunTrace)."""
+        return await self._engine.run_traced(
+            input_data, planning_mode=planning_mode, route=route,
+            resume_from=resume_from,
+        )
+
+    def compare_mermaid(self, trace: RunTrace | None = None) -> str:
+        """Return comparison Mermaid diagrams (full DAG vs executed path)."""
+        from flowforge.viz.renderer import render_mermaid
+        from flowforge.viz.subtree import render_run_mermaid
+
+        t = trace or self.last_trace
+        if t is None:
+            raise RuntimeError("No run trace available.")
+
+        status = "OK" if t.succeeded else "FAILED"
+        dur = f"{t.duration_ms:.0f} ms" if t.duration_ms else "-"
+        n_exec = len(t.executed_node_ids)
+        n_total = len(self._dag.get_all_nodes())
+
+        lines = [
+            "# FlowForge - DAG vs Executed Path",
+            "", "## 1. Full DAG Structure", "",
+            "```mermaid", render_mermaid(self._dag), "```", "",
+            f"## 2. Executed Path - Run `{t.run_id}`",
+            f"> Status: **{status}** | Duration: **{dur}** | "
+            f"Executed: **{n_exec} / {n_total}** nodes", "",
+            "```mermaid", render_run_mermaid(self._dag, t), "```",
+        ]
+        return "\n".join(lines)
+
+
 class CompiledAgent:
-    """The result of FlowForge.compile() — holds DAG, docs, and the execution engine."""
+    """The result of FlowForge.compile() — holds DAG, docs, and a default engine.
+
+    For **single-user / CLI** usage, call ``run()`` / ``run_traced()`` directly
+    on this object.
+
+    For **multi-user / server** usage (FastAPI, etc.), call
+    ``create_session()`` to get a per-user ``AgentSession`` with isolated
+    memory and trace::
+
+        agent = FlowForge.compile(MyAgent)
+        await agent.generate_docs(planning_only=True)
+
+        # per user
+        session = agent.create_session()
+        result = await session.run(user_input)
+    """
 
     def __init__(
         self,
@@ -122,6 +241,30 @@ class CompiledAgent:
     def last_trace(self) -> RunTrace | None:
         """Trace of the most recent run() call. None before first run."""
         return self._engine.last_trace
+
+    @property
+    def memory(self) -> Any:
+        """Session memory that persists across ``run()`` calls.
+
+        Stores compact summaries of previous runs so the LLM can reference
+        earlier results.  Call ``engine.memory.clear()`` to reset.
+        """
+        return self._engine.memory
+
+    def create_session(self) -> AgentSession:
+        """Create a per-user session with isolated memory and trace.
+
+        The session shares the compiled DAG and docs (immutable, zero-copy)
+        but has its own ``SessionMemory`` and ``last_trace``.
+
+        Use this in multi-user server environments (FastAPI, etc.) to
+        prevent state leakage between concurrent users.
+        """
+        return AgentSession(
+            dag=self._dag,
+            global_meta=self._global_meta,
+            docs=self._docs,
+        )
 
     async def generate_docs(
         self,
@@ -397,6 +540,7 @@ __all__ = [
     # Main classes
     "FlowForge",
     "CompiledAgent",
+    "AgentSession",
     # Errors
     "FlowForgeError",
     "OrderConflictError",

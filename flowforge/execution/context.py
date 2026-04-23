@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from flowforge.tools.registry import ToolRegistry
     from flowforge.doc.models import AnyDoc
     from flowforge.viz.run_trace import RunTracer, Checkpoint
+    from flowforge.execution.memory import SessionMemory
 
 
 class GlobalContext:
@@ -79,6 +80,10 @@ class GlobalContext:
         is accessible from any flow, task, or step via
         ``ctx.global_ctx.shared_data``.  Use it to pass data between
         independent flows that don't have a direct input/output chain.
+    session_memory:
+        ``SessionMemory`` instance that persists across ``run()`` calls.
+        Stores compact summaries of previous runs so the LLM can reference
+        earlier context.  Managed by ``ExecutionEngine``.
     tracer:
         Optional ``RunTracer`` that records every node start / finish / error
         for post-run visualisation.  ``None`` unless ``run_traced()`` is used.
@@ -92,6 +97,7 @@ class GlobalContext:
         env_vars: dict[str, str] | None = None,
         tracer: RunTracer | None = None,
         global_tools: list[ToolConfig] | None = None,
+        session_memory: SessionMemory | None = None,
     ) -> None:
         self.llm_config     = llm_config
         self.global_prompt  = global_prompt
@@ -107,6 +113,8 @@ class GlobalContext:
         self.global_tools: list[ToolConfig] = global_tools or []
         # Checkpoint for resume support — populated by engine when resume_from is set.
         self.checkpoint: Checkpoint | None = None
+        # Session memory — persists across run() calls.
+        self.session_memory: SessionMemory | None = session_memory
 
 
 class FlowContext:
@@ -190,6 +198,8 @@ class TaskContext:
         parent_task_output: Any = None,
         task_tools: list[ToolConfig] | None = None,
     ) -> None:
+        from flowforge.execution.memory import StepHistory
+
         self.flow_ctx           = flow_ctx
         self.task_name          = task_name
         self.task_prompt        = task_prompt
@@ -199,6 +209,8 @@ class TaskContext:
         self.step_results: OrderedDict[int, Any] = OrderedDict()
         # Tools declared on this task (not yet merged with parents).
         self.task_tools: list[ToolConfig] = task_tools or []
+        # Step-level LLM conversation history within this task.
+        self.step_history = StepHistory()
 
     @property
     def global_ctx(self) -> GlobalContext:
@@ -376,6 +388,16 @@ class StepContext:
         **system prompt**.  The *prompt* argument to this method is the
         **user/task prompt** sent as the user message.
 
+        Memory injection
+        ~~~~~~~~~~~~~~~~
+        Two levels of memory are automatically injected into the system prompt:
+
+        * **Session memory** — summaries of previous ``run()`` calls (if any).
+        * **Step history** — summaries of earlier steps in this task (if any).
+
+        This gives the LLM context about what happened before without
+        replaying full conversations.
+
         Template syntax
         ~~~~~~~~~~~~~~~
         * ``{field_name}`` — replaced with the value of ``self.input.field_name``
@@ -415,23 +437,59 @@ class StepContext:
         # 3. Resolve tool configs for referenced tools.
         tool_configs = self._resolve_tool_configs(tool_names)
 
-        # 4. Streaming mode — return async generator directly.
+        # 4. Build system prompt with memory context.
+        system_prompt = self._build_system_prompt()
+
+        # 5. Streaming mode — return async generator directly.
         if stream:
             from flowforge.execution.llm import stream_llm_api
             return stream_llm_api(
-                system_prompt=self.step_prompt,
+                system_prompt=system_prompt,
                 user_prompt=rendered,
                 llm_config=self.llm_config,
                 tool_configs=tool_configs,
                 tool_registry=self.tools,
             )
 
-        # 5. Normal mode — call LLM (pass output_schema for structured output).
-        return await call_llm_api(
-            system_prompt=self.step_prompt,
+        # 6. Normal mode — call LLM (pass output_schema for structured output).
+        result = await call_llm_api(
+            system_prompt=system_prompt,
             user_prompt=rendered,
             llm_config=self.llm_config,
             tool_configs=tool_configs,
             tool_registry=self.tools,
             output_schema=self.output_schema,
         )
+
+        # 7. Record this step's interaction in the task's step history.
+        step_name = ""
+        if hasattr(self, "_step_func_name"):
+            step_name = self._step_func_name
+        self.task_ctx.step_history.record_step(
+            step_name=step_name,
+            order=self.order,
+            prompt=rendered,
+            response=result,
+        )
+
+        return result
+
+    def _build_system_prompt(self) -> str:
+        """Build the full system prompt with memory blocks appended."""
+        parts = [self.step_prompt]
+
+        # Inject session memory (previous runs).
+        session_mem = self.global_ctx.session_memory
+        if session_mem:
+            block = session_mem.to_prompt_block()
+            if block:
+                parts.append(block)
+
+        # Inject step history (earlier steps in this task).
+        step_hist = self.task_ctx.step_history
+        if step_hist:
+            block = step_hist.to_prompt_block()
+            if block:
+                parts.append(block)
+
+        return "\n\n".join(parts)

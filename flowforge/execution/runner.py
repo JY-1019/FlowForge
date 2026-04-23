@@ -367,6 +367,8 @@ class StepRunner:
             step_tools=meta.tools,
             output_schema=meta.output_schema,
         )
+        # Attach function name so step history can identify this step.
+        ctx._step_func_name = meta.func.__name__
 
         if tracer:
             tracer.start_node(node_id, "step", meta.func.__name__, step_input)

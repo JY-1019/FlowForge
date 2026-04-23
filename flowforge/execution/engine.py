@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 from flowforge.execution.context import GlobalContext
+from flowforge.execution.memory import SessionMemory
 from flowforge.execution.runner import FlowRunner
 from flowforge.schema.dag import FlowForgeDAG, NodeType
 from flowforge.annotations.metadata import GlobalMeta
@@ -19,6 +20,10 @@ class ExecutionEngine:
 
     After each call to `run()` or `run_traced()`, the trace of that execution
     is available via `self.last_trace`.
+
+    The engine maintains a ``SessionMemory`` that persists across ``run()``
+    calls.  Each run automatically records a compact summary so the LLM can
+    reference earlier results.  Clear it with ``engine.memory.clear()``.
     """
 
     def __init__(
@@ -34,6 +39,7 @@ class ExecutionEngine:
         self._tool_registry = tool_registry
         self._flow_runner  = FlowRunner()
         self.last_trace: RunTrace | None = None
+        self.memory = SessionMemory()
 
     # ------------------------------------------------------------------
     # Public interface
@@ -141,6 +147,7 @@ class ExecutionEngine:
             tool_registry=tool_reg,
             tracer=tracer,
             global_tools=self._global_meta.tools,
+            session_memory=self.memory,
         )
         global_ctx.all_docs = self._docs
         global_ctx.planned_node_ids = planned_node_ids
@@ -174,6 +181,14 @@ class ExecutionEngine:
             # Re-raise after finalising the trace
             run_trace = tracer.finish_run(current_output, error=error_msg) if tracer else RunTrace()
             raise
+
+        # Record this run in session memory for cross-run context.
+        self.memory.record_run(
+            input_data=input_data,
+            output_data=current_output,
+            route=route,
+            planning_mode=planning_mode,
+        )
 
         run_trace = tracer.finish_run(current_output) if tracer else RunTrace()
         return current_output, run_trace
