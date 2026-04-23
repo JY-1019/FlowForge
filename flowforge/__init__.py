@@ -58,6 +58,10 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
+__version__ = "0.1.0"
+__author__ = "Jongyeon Keum"
+__license__ = "MIT"
+
 from flowforge.annotations.decorators import (
     global_config,
     flow,
@@ -550,4 +554,8 @@ __all__ = [
     "CompileError",
     "ExecutionError",
     "ApprovalRequired",
+    # Metadata
+    "__version__",
+    "__author__",
+    "__license__",
 ]
