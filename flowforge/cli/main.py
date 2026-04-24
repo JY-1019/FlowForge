@@ -206,5 +206,108 @@ def doc_generate(
     asyncio.run(_gen())
 
 
+def _bundled_mkdocs_yml() -> Path:
+    """Return the path to the mkdocs.yml shipped inside the flowforge package."""
+    import flowforge as _ff_pkg
+
+    pkg_dir = Path(_ff_pkg.__file__).resolve().parent
+    return pkg_dir / "mkdocs.yml"
+
+
+def _require_mkdocs() -> None:
+    """Fail with a helpful message if the `docs` extra is not installed."""
+    try:
+        import mkdocs  # noqa: F401
+    except ImportError:
+        console.print(
+            "[red]mkdocs is not installed.[/red]\n"
+            "Install the docs extra with:\n"
+            "  [cyan]pip install 'flowforge[docs]'[/cyan]  "
+            "[dim](or re-install with the [docs] extra)[/dim]"
+        )
+        raise typer.Exit(1)
+
+
+@app.command()
+def docs(
+    port:   int  = typer.Option(8000, "--port", "-p", help="Port for the local dev server"),
+    host:   str  = typer.Option("127.0.0.1", "--host", "-H", help="Host/interface to bind"),
+    online: bool = typer.Option(False, "--online", help="Open the published GitHub Pages site instead of serving locally"),
+    build:  bool = typer.Option(False, "--build", help="Build a static site to --build-dir and exit"),
+    build_dir: Path = typer.Option(Path("site"), "--build-dir", help="Output directory for --build"),
+    no_open:   bool = typer.Option(False, "--no-open", help="Don't automatically open the browser"),
+) -> None:
+    """Serve the FlowForge documentation locally (or open the published site).
+
+    \b
+    Examples
+    --------
+    flowforge docs                     # start local mkdocs server + open browser
+    flowforge docs --online            # just open https://jy-1019.github.io/FlowForge/
+    flowforge docs --port 9000         # serve on a different port
+    flowforge docs --build             # build static site into ./site/
+    """
+    import subprocess
+    import threading
+    import time
+    import webbrowser
+
+    if online:
+        url = "https://jy-1019.github.io/FlowForge/"
+        console.print(f"[bold]Opening published docs:[/bold] [cyan]{url}[/cyan]")
+        webbrowser.open(url)
+        return
+
+    _require_mkdocs()
+
+    mkdocs_yml = _bundled_mkdocs_yml()
+    if not mkdocs_yml.is_file():
+        console.print(
+            f"[red]Bundled mkdocs.yml not found at {mkdocs_yml}.[/red]\n"
+            "Reinstall flowforge (the docs are shipped as package data):\n"
+            "  [cyan]pip install --force-reinstall 'flowforge[docs]'[/cyan]\n"
+            "Or open the published site instead:\n"
+            "  [cyan]flowforge docs --online[/cyan]"
+        )
+        raise typer.Exit(1)
+
+    if build:
+        out = build_dir.resolve()
+        console.print(f"[bold]Building static docs site → [cyan]{out}[/cyan][/bold]")
+        subprocess.run(
+            [sys.executable, "-m", "mkdocs", "build",
+             "-f", str(mkdocs_yml),
+             "-d", str(out)],
+            check=True,
+        )
+        console.print(f"[green]✓ Built to {out}[/green]")
+        return
+
+    url = f"http://{host}:{port}"
+    console.print(
+        f"[bold]Serving FlowForge docs at [cyan]{url}[/cyan][/bold]  "
+        "[dim](Ctrl+C to stop)[/dim]"
+    )
+
+    if not no_open:
+        def _open_later() -> None:
+            time.sleep(1.5)
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+        threading.Thread(target=_open_later, daemon=True).start()
+
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "mkdocs", "serve",
+             "-f", str(mkdocs_yml),
+             "-a", f"{host}:{port}"],
+            check=False,
+        )
+    except KeyboardInterrupt:
+        pass
+
+
 if __name__ == "__main__":
     app()

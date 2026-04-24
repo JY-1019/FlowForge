@@ -50,9 +50,23 @@ Issues = "https://github.com/JY-1019/FlowForge/issues"
 [project.scripts]
 flowforge = "flowforge.cli.main:app"
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["flowforge*"]
+
+[tool.setuptools.package-data]
+flowforge = [
+    "mkdocs.yml",
+    "_docs/**/*.md",
+    "_docs/**/*.yml",
+    "_docs/**/*.yaml",
+    "_docs/**/*.png",
+    "_docs/**/*.svg",
+    "_docs/**/*.css",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

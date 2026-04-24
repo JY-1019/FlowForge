@@ -276,26 +276,40 @@ flowforge/
 
 ## Documentation
 
-Full documentation is available via [MkDocs Material](https://squidfunk.github.io/mkdocs-material/). You can serve it locally:
+Full documentation is available via [MkDocs Material](https://squidfunk.github.io/mkdocs-material/).
+After installing with the `[docs]` extra, a single command spins up the local docs server
+and opens it in your browser — no repo clone required:
 
 ```bash
-# Install docs dependencies
 pip install "flowforge[docs] @ git+https://github.com/JY-1019/FlowForge.git"
-
-# Serve locally (opens at http://localhost:8000)
-mkdocs serve
+flowforge docs
 ```
+
+Other useful forms:
+
+```bash
+flowforge docs --online           # just open the published GitHub Pages site
+flowforge docs --port 9000        # bind a different port
+flowforge docs --build            # build a static site into ./site/
+flowforge docs --no-open          # serve without auto-opening the browser
+```
+
+Under the hood, `mkdocs.yml` and the full `_docs/` tree are shipped as **package data**
+inside the `flowforge` package, so they're available the moment `pip install` finishes.
+The CLI resolves the bundled `mkdocs.yml` via `importlib`-style package path lookup, so it
+works identically from a wheel install, an editable install (`pip install -e .`), or a
+fresh git clone.
 
 ### Documentation Structure
 
 | Section | Description |
 |---------|-------------|
-| [Getting Started](docs/getting-started.md) | Installation, hello world, first run |
-| [Concepts](docs/concepts/) | Architecture, annotations, data flow, DAG compilation |
-| [Guides](docs/guides/) | First agent, branch dispatching, nested flows, tools & LLM, visualization |
-| [API Reference](docs/api/) | Decorators, types, engine, errors, CLI |
+| [Getting Started](flowforge/_docs/getting-started.md) | Installation, hello world, first run |
+| [Concepts](flowforge/_docs/concepts/) | Architecture, annotations, data flow, DAG compilation |
+| [Guides](flowforge/_docs/guides/) | First agent, branch dispatching, nested flows, tools & LLM, visualization |
+| [API Reference](flowforge/_docs/api/) | Decorators, types, engine, errors, CLI |
 
-You can also browse the docs directly on GitHub: [docs/](https://github.com/JY-1019/FlowForge/tree/main/docs)
+You can also browse the docs directly on GitHub: [flowforge/_docs/](https://github.com/JY-1019/FlowForge/tree/main/flowforge/_docs)
 
 ## License
 
