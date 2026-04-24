@@ -60,11 +60,16 @@ class PromptBuilder:
         # 2. Flow tree — only FLOW nodes drive path selection.
         #    Tasks/steps are execution details handled by order/branch.
         #    Show as indented tree with route paths for easy selection.
+        #    Internal flows (name starts with "_") are excluded — they are
+        #    framework-managed and should never be selected by the planner.
         lines: list[str] = []
         for node in dag.get_all_nodes():
             if node.type == NodeType.GLOBAL:
                 continue
             if node.type != NodeType.FLOW:
+                continue
+            # Skip internal flows (e.g. _dynamic_generator).
+            if node.name.startswith("_"):
                 continue
 
             # route path = node.id without "global." prefix

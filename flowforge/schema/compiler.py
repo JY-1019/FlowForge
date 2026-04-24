@@ -50,6 +50,43 @@ from flowforge.schema.dag import DAGNode, DAGEdge, FlowForgeDAG, NodeType
 logger = logging.getLogger(__name__)
 
 
+def add_flow_to_dag(dag: FlowForgeDAG, flow_meta: FlowMeta) -> str:
+    """Incrementally add a new flow (and its descendants) to an existing DAG.
+
+    This is used by the dynamic flow feature to inject LLM-generated flows
+    into a live ``FlowForgeDAG`` without a full recompile.
+
+    Parameters
+    ----------
+    dag:
+        The existing compiled DAG to extend.
+    flow_meta:
+        Metadata for the new flow to add under the ``"global"`` root.
+
+    Returns
+    -------
+    str
+        The DAG node ID of the newly added flow (e.g. ``"global.my_flow"``).
+
+    Raises
+    ------
+    CompileError
+        If a flow with the same name already exists under ``"global"``.
+    """
+    from flowforge.errors import CompileError
+
+    flow_id = f"global.{flow_meta.name}"
+    if dag.get_node(flow_id) is not None:
+        raise CompileError(
+            f"Cannot add flow '{flow_meta.name}': node '{flow_id}' already "
+            f"exists in the DAG."
+        )
+
+    node_id = _add_flow(dag, flow_meta, parent_id="global")
+    _add_depends_on_edges(dag)
+    return node_id
+
+
 def compile_dag(global_meta: GlobalMeta) -> FlowForgeDAG:
     """Traverse the annotation metadata tree and build a ``FlowForgeDAG``.
 

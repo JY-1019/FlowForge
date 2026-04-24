@@ -553,6 +553,7 @@ def global_config(
     prompt: str,
     llm_config: LLMConfig | None = None,
     tools: list[ToolConfig] | None = None,
+    dynamic_flow: bool = False,
 ) -> Callable[[type], type]:
     """Mark the top-level agent class, collecting all root-level flows.
 
@@ -569,6 +570,12 @@ def global_config(
     tools:
         List of globally registered tools (MCP servers, HTTP adapters, …).
         All steps and tasks in the agent can access these.
+    dynamic_flow:
+        When ``True``, enables runtime flow generation.  If no existing
+        flow matches a user query in autonomous mode, the built-in
+        ``DynamicFlowGenerator`` will analyse the gap, generate new
+        FlowForge decorator code via LLM, compile it, and inject the
+        new flow into the live DAG for execution.
 
     Notes
     -----
@@ -596,6 +603,7 @@ def global_config(
             llm_config=_llm_config,
             tools=tools or [],
             flows=flows,
+            dynamic_flow=dynamic_flow,
         )
         setattr(cls, _GLOBAL_ATTR, meta)
         return cls

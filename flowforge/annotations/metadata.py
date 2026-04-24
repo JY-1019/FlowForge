@@ -430,3 +430,9 @@ class GlobalMeta:
     llm_config: LLMConfig = field(default=None)  # type: ignore[assignment]
     tools: list[ToolConfig] = field(default_factory=list)
     flows: list[FlowMeta] = field(default_factory=list)
+
+    # When True, the agent can dynamically generate new flows at runtime
+    # when no existing flow matches the user's query.  The built-in
+    # DynamicFlowGenerator analyses the gap, generates FlowForge decorator
+    # code via LLM, compiles it, and injects the new flow into the live DAG.
+    dynamic_flow: bool = False

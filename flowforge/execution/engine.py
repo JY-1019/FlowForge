@@ -1,6 +1,7 @@
 """ExecutionEngine — drives DAG execution and owns the RunTracer lifecycle."""
 from __future__ import annotations
 
+import logging
 from typing import Any, TYPE_CHECKING
 
 from flowforge.execution.context import GlobalContext
@@ -13,6 +14,8 @@ from flowforge.viz.run_trace import RunTracer, RunTrace
 if TYPE_CHECKING:
     from flowforge.tools.registry import ToolRegistry
     from flowforge.doc.models import AnyDoc
+
+_logger = logging.getLogger(__name__)
 
 
 class ExecutionEngine:
@@ -32,11 +35,13 @@ class ExecutionEngine:
         global_meta: GlobalMeta,
         docs: dict[str, AnyDoc] | None = None,
         tool_registry: ToolRegistry | None = None,
+        compiled_agent: Any = None,
     ) -> None:
         self._dag          = dag
         self._global_meta  = global_meta
         self._docs         = docs or {}
         self._tool_registry = tool_registry
+        self._compiled_agent = compiled_agent
         self._flow_runner  = FlowRunner()
         self.last_trace: RunTrace | None = None
         self.memory = SessionMemory()
@@ -114,8 +119,6 @@ class ExecutionEngine:
         # ── AI Planning (autonomous / hybrid) ──────────────────────────────
         elif planning_mode != "deterministic" and self._docs:
             from flowforge.planner.llm_planner import LLMPlanner
-            import logging as _logging
-            _logger = _logging.getLogger(__name__)
             planner = LLMPlanner(mode=planning_mode)
             try:
                 plan = await planner.plan(
@@ -123,21 +126,57 @@ class ExecutionEngine:
                     self._global_meta.llm_config,
                 )
                 planned_node_ids = set(plan.node_ids)
-                # Log selected routes (flow-level paths) for observability
-                flow_ids = sorted(
+
+                # Separate user flows from internal flows (name starts with "_").
+                # Internal flows like _dynamic_generator are NEVER selected by
+                # the planner — they are only triggered explicitly below.
+                all_flow_ids = sorted(
                     nid for nid in planned_node_ids
                     if nid.startswith("global.") and nid != "global"
                     and self._dag.get_node(nid) is not None
                     and self._dag.get_node(nid).type == NodeType.FLOW
                 )
+                user_flow_ids = [
+                    fid for fid in all_flow_ids
+                    if not self._dag.get_node(fid).name.startswith("_")
+                ]
+                internal_flow_ids = set(all_flow_ids) - set(user_flow_ids)
+
+                # Strip internal flows from planned_node_ids — they should
+                # never run as a side effect of planner selection.
+                if internal_flow_ids:
+                    internal_subtree: set[str] = set()
+                    for ifid in internal_flow_ids:
+                        internal_subtree |= {
+                            n.id for n in self._dag.get_all_nodes()
+                            if n.id.startswith(ifid)
+                        }
+                    planned_node_ids -= internal_subtree
+
                 _logger.info(
-                    "planner selected %d nodes (%d flows) for mode=%s, "
+                    "planner selected %d nodes (%d user flows) for mode=%s, "
                     "rationale: %s, flows: %s",
-                    len(planned_node_ids), len(flow_ids), planning_mode,
-                    plan.rationale, flow_ids,
+                    len(planned_node_ids), len(user_flow_ids), planning_mode,
+                    plan.rationale, user_flow_ids,
                 )
+
+                # ── Dynamic flow: if planner found NO user flows and
+                # dynamic_flow is enabled, trigger the meta-flow ──────
+                if (
+                    not user_flow_ids
+                    and self._global_meta.dynamic_flow
+                    and self._compiled_agent is not None
+                ):
+                    _logger.info(
+                        "no user flows matched — triggering dynamic flow "
+                        "generation"
+                    )
+                    planned_node_ids = self._dag.resolve_route(
+                        "_dynamic_generator"
+                    )
+
             except Exception as e:
-                _logging.getLogger(__name__).warning(
+                _logger.warning(
                     "planning failed (%s), falling back to deterministic order", e
                 )
 
@@ -151,6 +190,10 @@ class ExecutionEngine:
         )
         global_ctx.all_docs = self._docs
         global_ctx.planned_node_ids = planned_node_ids
+
+        # Inject compiled agent reference for the dynamic flow generator.
+        if self._compiled_agent is not None:
+            global_ctx.shared_data["_compiled_agent"] = self._compiled_agent
 
         # ── Resume: restore checkpoint for skip logic ────────────────────
         if resume_from is not None:

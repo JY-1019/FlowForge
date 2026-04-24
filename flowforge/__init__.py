@@ -70,6 +70,7 @@ from flowforge.annotations.decorators import (
 )
 from flowforge.annotations.decorators import _GLOBAL_ATTR
 from flowforge.types import LLMConfig, BranchCondition, MCPServer, ToolConfig
+from flowforge.dynamic.generator import DynamicFlowGenerator
 from flowforge.errors import (
     FlowForgeError,
     OrderConflictError,
@@ -227,6 +228,7 @@ class CompiledAgent:
             global_meta=global_meta,
             docs=self._docs,
             tool_registry=self._tool_registry,
+            compiled_agent=self,
         )
 
     # ------------------------------------------------------------------
@@ -269,6 +271,81 @@ class CompiledAgent:
             global_meta=self._global_meta,
             docs=self._docs,
         )
+
+    def add_flow(self, flow_cls: type) -> str:
+        """Dynamically add a ``@flow``-decorated class to the live DAG.
+
+        The new flow is compiled incrementally and attached under the
+        ``"global"`` root.  The execution engine is updated in place so
+        subsequent ``run()`` calls can route to the new flow.
+
+        Parameters
+        ----------
+        flow_cls:
+            A class decorated with ``@flow``.
+
+        Returns
+        -------
+        str
+            The DAG node ID of the newly added flow.
+
+        Raises
+        ------
+        CompileError
+            If *flow_cls* is not decorated with ``@flow`` or if a flow with
+            the same name already exists.
+        """
+        from flowforge.annotations.decorators import _FLOW_ATTR
+        from flowforge.schema.compiler import add_flow_to_dag
+        from flowforge.schema.resolver import resolve_execution_order
+
+        if not hasattr(flow_cls, _FLOW_ATTR):
+            raise CompileError(
+                f"{flow_cls.__name__} is not decorated with @flow"
+            )
+
+        flow_meta = getattr(flow_cls, _FLOW_ATTR)
+
+        # Also add to global_meta.flows so recompile() preserves it.
+        self._global_meta.flows.append(flow_meta)
+
+        node_id = add_flow_to_dag(self._dag, flow_meta)
+
+        # Re-validate topological order (catches cycles introduced by
+        # depends_on edges from the new flow).
+        resolve_execution_order(self._dag)
+
+        # Rebuild the engine so it picks up the expanded DAG.
+        self._engine = self._rebuild_engine()
+
+        return node_id
+
+    def recompile(self) -> None:
+        """Full recompile of the DAG from the current ``global_meta``.
+
+        Useful after programmatically mutating ``global_meta.flows``.
+        """
+        from flowforge.schema.compiler import compile_dag
+        from flowforge.schema.resolver import resolve_execution_order
+
+        self._dag = compile_dag(self._global_meta)
+        resolve_execution_order(self._dag)
+        self._engine = self._rebuild_engine()
+
+    def _rebuild_engine(self):
+        from flowforge.execution.engine import ExecutionEngine
+        from flowforge.tools.registry import ToolRegistry
+
+        engine = ExecutionEngine(
+            dag=self._dag,
+            global_meta=self._global_meta,
+            docs=self._docs,
+            tool_registry=self._tool_registry or ToolRegistry(),
+            compiled_agent=self,
+        )
+        # Preserve session memory across rebuilds.
+        engine.memory = self._engine.memory
+        return engine
 
     async def generate_docs(
         self,
@@ -509,6 +586,10 @@ class FlowForge:
         """
         Compile the @global_config-decorated class into a DAG.
 
+        When ``@global_config(dynamic_flow=True)`` is set, the built-in
+        ``_dynamic_generator`` meta-flow is automatically injected into the
+        DAG so the engine can generate new flows at runtime.
+
         Usage:
             engine = FlowForge.compile(MyAgent)
         """
@@ -518,6 +599,30 @@ class FlowForge:
             )
 
         global_meta = getattr(agent_cls, _GLOBAL_ATTR)
+
+        # Inject the built-in dynamic generator flow when dynamic_flow=True.
+        #
+        # If the user has already defined a flow named "_dynamic_generator"
+        # in their agent, we use theirs instead of the built-in one.  This
+        # lets advanced users fully customise the dynamic generation pipeline
+        # while still using the framework's plumbing (gap detection, compile
+        # loop, DAG injection).
+        if global_meta.dynamic_flow:
+            import logging as _logging
+            _compile_logger = _logging.getLogger(__name__)
+
+            existing_names = {f.name for f in global_meta.flows}
+            if "_dynamic_generator" in existing_names:
+                _compile_logger.info(
+                    "user-defined _dynamic_generator flow found — "
+                    "using it instead of the built-in meta-flow"
+                )
+            else:
+                from flowforge.dynamic.meta_flow import DynamicGeneratorFlow
+                from flowforge.annotations.decorators import _FLOW_ATTR
+
+                meta_flow_meta = getattr(DynamicGeneratorFlow, _FLOW_ATTR)
+                global_meta.flows.append(meta_flow_meta)
 
         from flowforge.schema.compiler import compile_dag
         from flowforge.schema.resolver import resolve_execution_order
@@ -545,6 +650,8 @@ __all__ = [
     "FlowForge",
     "CompiledAgent",
     "AgentSession",
+    # Dynamic flow generation
+    "DynamicFlowGenerator",
     # Errors
     "FlowForgeError",
     "OrderConflictError",
