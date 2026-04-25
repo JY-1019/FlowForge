@@ -45,7 +45,7 @@ class DeckRequest(BaseModel):
 
     topic: str = Field(description="Presentation topic")
     audience: str = Field(default="executive stakeholders")
-    slide_count: int = Field(default=6, ge=3, le=12)
+    slide_count: int = Field(default=3, ge=3, le=8)
 
 
 def _llm_config_from_env() -> LLMConfig:
@@ -75,6 +75,7 @@ class ClaudePptxAgent:
         name="presentation_builder",
         prompt="Create a PowerPoint deck using Anthropic's pptx Skill.",
         input_schema=DeckRequest,
+        max_retries=0,
     )
     class PresentationBuilderFlow:
         @task(name="create_deck", prompt="Generate a complete PPTX presentation")
@@ -83,8 +84,11 @@ class ClaudePptxAgent:
                 order=1,
                 prompt=(
                     "Create a polished PowerPoint deck. Use the pptx Skill "
-                    "whenever a presentation file is created or edited."
+                    "whenever a presentation file is created or edited. "
+                    "Do not stop after reading the Skill instructions; create "
+                    "and export the actual PPTX file."
                 ),
+                timeout_seconds=600,
             )
             async def generate_presentation(ctx):
                 request = ctx.input
@@ -97,8 +101,10 @@ class ClaudePptxAgent:
 
                     Requirements:
                     - Use the Claude pptx Skill to create the deck file.
+                    - Actually create and export the .pptx file; do not stop after planning.
+                    - Copy the final .pptx to $OUTPUT_DIR so the API returns a file_id.
                     - Make the deck visually polished, not a plain bullet list.
-                    - Include a title slide, 3-4 content slides, and a closing slide.
+                    - Include a title slide, content slide(s), and a closing slide.
                     - Use speaker notes with concise talking points.
                     - After creating the file, summarize what was created.
                     - Include any generated filename or file_id shown in the response.
@@ -121,7 +127,7 @@ async def main() -> None:
     request = DeckRequest(
         topic="How AI agent workflows change enterprise software delivery",
         audience="CTO and platform engineering leadership",
-        slide_count=6,
+        slide_count=3,
     )
 
     result = await engine.run(request)

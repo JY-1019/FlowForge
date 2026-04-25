@@ -766,6 +766,7 @@ class TestToolUseLoopIntegration:
         from flowforge.execution.llm import (
             _add_anthropic_skill_kwargs,
             _claude_skill_to_container_skill,
+            _format_anthropic_text_response,
             _split_claude_skill_configs,
         )
 
@@ -792,6 +793,27 @@ class TestToolUseLoopIntegration:
             {"type": "anthropic", "skill_id": "pptx", "version": "latest"}
         ]
         assert {"type": "code_execution_20250825", "name": "code_execution"} in kwargs["tools"]
+
+        class TextBlock:
+            text = "Deck created."
+
+        class ToolResultBlock:
+            def model_dump(self, exclude_unset=True):
+                return {
+                    "type": "bash_code_execution_tool_result",
+                    "content": {
+                        "content": [
+                            {
+                                "type": "bash_code_execution_output",
+                                "file_id": "file_123",
+                            }
+                        ]
+                    },
+                }
+
+        formatted = _format_anthropic_text_response([TextBlock(), ToolResultBlock()])
+        assert "Deck created." in formatted
+        assert "file_id: file_123" in formatted
 
     @pytest.mark.asyncio
     async def test_claude_skill_rejected_for_non_anthropic_provider(self):

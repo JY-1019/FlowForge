@@ -334,6 +334,49 @@ def _serialize_anthropic_content(content: Any) -> list[dict[str, Any]]:
     return serialized
 
 
+def _find_values_by_key(value: Any, key: str) -> list[str]:
+    """Recursively find string values for *key* in nested response content."""
+    found: list[str] = []
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k == key and isinstance(v, str):
+                found.append(v)
+            else:
+                found.extend(_find_values_by_key(v, key))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_find_values_by_key(item, key))
+    return found
+
+
+def _extract_anthropic_file_ids(content: Any) -> list[str]:
+    """Extract file IDs emitted by Anthropic server-side tools."""
+    seen: set[str] = set()
+    file_ids: list[str] = []
+    for block in _serialize_anthropic_content(content):
+        for file_id in _find_values_by_key(block, "file_id"):
+            if file_id not in seen:
+                seen.add(file_id)
+                file_ids.append(file_id)
+    return file_ids
+
+
+def _format_anthropic_text_response(content: Any) -> str:
+    """Return text plus any server-generated file IDs from Anthropic content."""
+    text_parts = [
+        getattr(block, "text")
+        for block in (content or [])
+        if hasattr(block, "text")
+    ]
+    text = "\n".join(text_parts)
+    file_ids = _extract_anthropic_file_ids(content)
+    if file_ids:
+        artifact_lines = ["", "Generated files:"]
+        artifact_lines.extend(f"- file_id: {file_id}" for file_id in file_ids)
+        text += "\n".join(artifact_lines)
+    return text
+
+
 # ---------------------------------------------------------------------------
 # Markdown-fence stripping & auto JSON parse
 # ---------------------------------------------------------------------------
@@ -735,9 +778,9 @@ async def _call_anthropic(
 
         if not executable:
             # No more tools to execute — return text.
-            text_parts = [b.text for b in response.content if hasattr(b, "text")]
-            if text_parts:
-                return "\n".join(text_parts)
+            text = _format_anthropic_text_response(response.content)
+            if text:
+                return text
             # No text either — might be the last round, break.
             break
 
@@ -787,8 +830,7 @@ async def _call_anthropic(
                 return block.input
 
     # Fallback: extract text from last response.
-    text_parts = [b.text for b in response.content if hasattr(b, "text")]
-    return "\n".join(text_parts) if text_parts else ""
+    return _format_anthropic_text_response(response.content)
 
 
 # ---------------------------------------------------------------------------
