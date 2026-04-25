@@ -1430,6 +1430,13 @@ _ARTIFACT_RULES: list[tuple[list[str], str, str, str]] = [
         ".pdf",
         "PDF text extraction (read-only)",
     ),
+    (
+        ["이미지", "image", "그림", "picture", "사진", "photo", "png", "jpg",
+         "일러스트", "illustration", "배너", "banner", "썸네일", "thumbnail"],
+        "image_create",
+        ".png",
+        "image file",
+    ),
 ]
 
 

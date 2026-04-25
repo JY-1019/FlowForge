@@ -1725,3 +1725,119 @@ class TestEnhancedPptxCreate:
         result = tool(path="test.pptx", slides=json.dumps(slides))
         assert result["ok"] is True
         assert result["slide_count"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Image creation tool tests
+# ---------------------------------------------------------------------------
+
+class TestImageCreateTool:
+    """Tests for the image_create builtin tool."""
+
+    def test_pillow_canvas_basic(self, tmp_path):
+        from flowforge.tools.builtin import _make_image_create_tool
+        tool = _make_image_create_tool(tmp_path)
+
+        result = tool(
+            path="test.png",
+            width=200,
+            height=100,
+            background="#FF0000",
+        )
+        assert result["ok"] is True
+        assert result["width"] == 200
+        assert result["height"] == 100
+        assert (tmp_path / "test.png").exists()
+
+    def test_pillow_with_elements(self, tmp_path):
+        from flowforge.tools.builtin import _make_image_create_tool
+        import json
+        tool = _make_image_create_tool(tmp_path)
+
+        elements = json.dumps([
+            {"type": "rectangle", "x": 10, "y": 10, "w": 50, "h": 50,
+             "color": "#0000FF", "fill": "#00FF00"},
+            {"type": "ellipse", "x": 70, "y": 10, "w": 40, "h": 40,
+             "color": "#FF0000"},
+            {"type": "line", "x1": 0, "y1": 0, "x2": 100, "y2": 100,
+             "color": "#000000", "width": 3},
+            {"type": "text", "text": "Hello", "x": 10, "y": 60,
+             "size": 16, "color": "#333333"},
+        ])
+
+        result = tool(path="drawn.png", elements=elements)
+        assert result["ok"] is True
+        assert result["element_count"] == 4
+
+    def test_jpeg_output(self, tmp_path):
+        from flowforge.tools.builtin import _make_image_create_tool
+        tool = _make_image_create_tool(tmp_path)
+
+        result = tool(path="test.jpg", width=100, height=100)
+        assert result["ok"] is True
+        assert (tmp_path / "test.jpg").exists()
+
+    def test_path_outside_root_rejected(self, tmp_path):
+        from flowforge.tools.builtin import _make_image_create_tool
+        tool = _make_image_create_tool(tmp_path)
+
+        result = tool(path="/etc/evil.png")
+        assert result["ok"] is False
+        assert "project root" in result["error"]
+
+    def test_ai_prompt_without_key(self, tmp_path):
+        from flowforge.tools.builtin import _make_image_create_tool
+        import os
+        tool = _make_image_create_tool(tmp_path)
+
+        # Ensure no API key is set
+        old_key = os.environ.pop("OPENAI_API_KEY", None)
+        try:
+            result = tool(path="ai.png", ai_prompt="a cat")
+            assert result["ok"] is False
+            assert "OPENAI_API_KEY" in result["error"]
+        finally:
+            if old_key:
+                os.environ["OPENAI_API_KEY"] = old_key
+
+    def test_invalid_elements_json(self, tmp_path):
+        from flowforge.tools.builtin import _make_image_create_tool
+        tool = _make_image_create_tool(tmp_path)
+
+        result = tool(path="bad.png", elements="not json")
+        assert result["ok"] is False
+        assert "Invalid elements JSON" in result["error"]
+
+    def test_pillow_missing(self, tmp_path):
+        from flowforge.tools.builtin import _make_image_create_tool
+        from unittest.mock import patch as _patch
+        import builtins
+
+        tool = _make_image_create_tool(tmp_path)
+        original_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "PIL" or name.startswith("PIL."):
+                raise ImportError("no PIL")
+            return original_import(name, *args, **kwargs)
+
+        with _patch("builtins.__import__", side_effect=mock_import):
+            result = tool(path="no_pil.png")
+            assert result["ok"] is False
+            assert "Pillow" in result["error"]
+
+
+class TestImageArtifactDetection:
+    """image_create is detected via artifact rules."""
+
+    def test_detect_image_korean(self):
+        from flowforge.dynamic.generator import detect_output_artifacts
+        arts = detect_output_artifacts("이미지를 만들어줘")
+        tool_names = [a["tool"] for a in arts]
+        assert "image_create" in tool_names
+
+    def test_detect_image_english(self):
+        from flowforge.dynamic.generator import detect_output_artifacts
+        arts = detect_output_artifacts("generate a banner image")
+        tool_names = [a["tool"] for a in arts]
+        assert "image_create" in tool_names

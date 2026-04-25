@@ -389,6 +389,20 @@ def _create_document_tools(options: DynamicRunOptions) -> list[FunctionTool]:
                 "relative to the project root."
             ),
         ),
+        FunctionTool(
+            func=_make_image_create_tool(project_root),
+            name="image_create",
+            description=(
+                "Create an image file. Two modes:\n"
+                "1) Programmatic: draw text, rectangles, ellipses, lines on "
+                "a canvas using the 'elements' JSON parameter. Requires "
+                "'Pillow' package.\n"
+                "2) AI-generated: set 'ai_prompt' to generate an image using "
+                "OpenAI DALL-E 3 (requires OPENAI_API_KEY env var).\n"
+                "Supports .png, .jpg, .webp output. Path must be relative "
+                "to the project root."
+            ),
+        ),
     ]
 
 
@@ -927,6 +941,225 @@ def _make_chart_create_tool(project_root: Path):
 
     _tool.__name__ = "builtin_chart_create"
     return _tool
+
+
+def _make_image_create_tool(project_root: Path):
+    """Create images programmatically using Pillow.
+
+    Supports: blank canvas, text rendering, basic shapes, compositing.
+    For AI-generated images, uses OpenAI DALL-E when ``OPENAI_API_KEY`` is set.
+    """
+
+    def _tool(
+        path: str,
+        width: int = 1024,
+        height: int = 768,
+        background: str = "#FFFFFF",
+        elements: str = "[]",
+        ai_prompt: str = "",
+        ai_provider: str = "openai",
+        ai_size: str = "1024x1024",
+    ) -> dict[str, Any]:
+        """Create an image file.
+
+        Parameters
+        ----------
+        path : str
+            Output file path (relative to project root). Supports .png, .jpg, .webp.
+        width / height : int
+            Canvas dimensions (ignored when ``ai_prompt`` is set).
+        background : str
+            Background colour (hex like ``"#FF0000"`` or name like ``"white"``).
+        elements : str
+            JSON array of drawing elements. Each element is an object with:
+            - ``"type"``: ``"text"``, ``"rectangle"``, ``"ellipse"``, ``"line"``
+            - ``"text"`` type: ``text``, ``x``, ``y``, ``size`` (font size),
+              ``color``, ``bold`` (bool)
+            - ``"rectangle"`` type: ``x``, ``y``, ``w``, ``h``, ``color``,
+              ``fill`` (optional fill colour)
+            - ``"ellipse"`` type: ``x``, ``y``, ``w``, ``h``, ``color``, ``fill``
+            - ``"line"`` type: ``x1``, ``y1``, ``x2``, ``y2``, ``color``,
+              ``width`` (line width)
+        ai_prompt : str
+            When non-empty, generate the image using an AI model instead of
+            drawing elements.  Requires ``OPENAI_API_KEY`` env var for OpenAI
+            DALL-E.
+        ai_provider : str
+            AI provider: ``"openai"`` (default).
+        ai_size : str
+            AI image size: ``"1024x1024"``, ``"1792x1024"``, ``"1024x1792"``.
+        """
+        import json as _json
+
+        try:
+            resolved = _resolve_safe_path(project_root, path)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
+        # ── AI image generation ──────────────────────────────────────
+        if ai_prompt:
+            return _generate_ai_image(
+                resolved, ai_prompt, ai_provider, ai_size,
+            )
+
+        # ── Programmatic image creation with Pillow ──────────────────
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            return {
+                "ok": False,
+                "error": (
+                    "The 'Pillow' package is not installed. "
+                    "Use the pip_install tool to install it first: "
+                    "pip_install(packages='Pillow')"
+                ),
+            }
+
+        try:
+            element_list = _json.loads(elements) if isinstance(elements, str) else elements
+        except (_json.JSONDecodeError, TypeError) as e:
+            return {"ok": False, "error": f"Invalid elements JSON: {e}"}
+
+        if not isinstance(element_list, list):
+            element_list = []
+
+        try:
+            img = Image.new("RGBA", (width, height), background)
+            draw = ImageDraw.Draw(img)
+
+            for elem in element_list:
+                etype = elem.get("type", "")
+
+                if etype == "text":
+                    text = elem.get("text", "")
+                    x, y = elem.get("x", 0), elem.get("y", 0)
+                    color = elem.get("color", "#000000")
+                    font_size = elem.get("size", 24)
+                    try:
+                        font = ImageFont.truetype("arial.ttf", font_size)
+                    except (OSError, IOError):
+                        try:
+                            font = ImageFont.truetype(
+                                "/System/Library/Fonts/Helvetica.ttc",
+                                font_size,
+                            )
+                        except (OSError, IOError):
+                            font = ImageFont.load_default()
+                    draw.text((x, y), text, fill=color, font=font)
+
+                elif etype == "rectangle":
+                    x, y = elem.get("x", 0), elem.get("y", 0)
+                    w, h = elem.get("w", 100), elem.get("h", 100)
+                    color = elem.get("color", "#000000")
+                    fill = elem.get("fill", None)
+                    draw.rectangle([x, y, x + w, y + h], outline=color, fill=fill)
+
+                elif etype == "ellipse":
+                    x, y = elem.get("x", 0), elem.get("y", 0)
+                    w, h = elem.get("w", 100), elem.get("h", 100)
+                    color = elem.get("color", "#000000")
+                    fill = elem.get("fill", None)
+                    draw.ellipse([x, y, x + w, y + h], outline=color, fill=fill)
+
+                elif etype == "line":
+                    x1, y1 = elem.get("x1", 0), elem.get("y1", 0)
+                    x2, y2 = elem.get("x2", 100), elem.get("y2", 100)
+                    color = elem.get("color", "#000000")
+                    lw = elem.get("width", 2)
+                    draw.line([(x1, y1), (x2, y2)], fill=color, width=lw)
+
+            # Save
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            # Convert RGBA to RGB for JPEG
+            ext = resolved.suffix.lower()
+            if ext in (".jpg", ".jpeg"):
+                img = img.convert("RGB")
+            img.save(str(resolved))
+
+            return {
+                "ok": True,
+                "path": path,
+                "width": width,
+                "height": height,
+                "element_count": len(element_list),
+                "size": resolved.stat().st_size,
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"Failed to create image: {e}"}
+
+    _tool.__name__ = "builtin_image_create"
+    return _tool
+
+
+def _generate_ai_image(
+    resolved: Path,
+    prompt: str,
+    provider: str,
+    size: str,
+) -> dict[str, Any]:
+    """Generate an image using an AI provider API."""
+    import os as _os
+
+    if provider == "openai":
+        api_key = _os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            return {
+                "ok": False,
+                "error": (
+                    "OPENAI_API_KEY environment variable is not set. "
+                    "Set it to use AI image generation with OpenAI DALL-E."
+                ),
+            }
+
+        try:
+            import urllib.request
+            import urllib.error
+            import json as _json
+            import base64
+
+            req_body = _json.dumps({
+                "model": "dall-e-3",
+                "prompt": prompt,
+                "n": 1,
+                "size": size,
+                "response_format": "b64_json",
+            }).encode("utf-8")
+
+            req = urllib.request.Request(
+                "https://api.openai.com/v1/images/generations",
+                data=req_body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                method="POST",
+            )
+
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result = _json.loads(resp.read().decode("utf-8"))
+
+            b64_data = result["data"][0]["b64_json"]
+            img_bytes = base64.b64decode(b64_data)
+
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            resolved.write_bytes(img_bytes)
+
+            return {
+                "ok": True,
+                "path": str(resolved.name),
+                "provider": "openai",
+                "model": "dall-e-3",
+                "size": size,
+                "file_size": len(img_bytes),
+                "revised_prompt": result["data"][0].get("revised_prompt", ""),
+            }
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            return {"ok": False, "error": f"OpenAI API error {e.code}: {body[:500]}"}
+        except Exception as e:
+            return {"ok": False, "error": f"AI image generation failed: {e}"}
+
+    return {"ok": False, "error": f"Unsupported AI image provider: {provider!r}"}
 
 
 def _resolve_safe_path(project_root: Path, path: str) -> Path:
