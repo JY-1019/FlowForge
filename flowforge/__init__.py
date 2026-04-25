@@ -667,19 +667,27 @@ class FlowForge:
         global_meta = getattr(agent_cls, _GLOBAL_ATTR)
         options = _coerce_dynamic_options(dynamic_options)
 
+        # ── Builtin tool injection ─────────────────────────────────────
+        # Builtin tools are injected when EITHER:
+        #   1. @global_config(include_builtin_tools=True)  — user explicitly opts in
+        #   2. dynamic_flow=True AND DynamicRunOptions.include_builtin_tools=True
+        _want_builtin = (
+            global_meta.include_builtin_tools
+            or (global_meta.dynamic_flow and options.include_builtin_tools)
+        )
+        if _want_builtin:
+            from flowforge.tools.builtin import create_builtin_tool_pack
+
+            _extend_tools_once(
+                global_meta.tools,
+                create_builtin_tool_pack(options),
+            )
+
         if global_meta.dynamic_flow:
             if options.auto_load_generated:
                 from flowforge.dynamic.manifest import load_generated_assets
 
                 load_generated_assets(global_meta, options)
-
-            if options.include_builtin_tools:
-                from flowforge.tools.builtin import create_builtin_tool_pack
-
-                _extend_tools_once(
-                    global_meta.tools,
-                    create_builtin_tool_pack(options),
-                )
 
         # Inject the built-in dynamic generator flow when dynamic_flow=True.
         #

@@ -436,3 +436,8 @@ class GlobalMeta:
     # DynamicFlowGenerator analyses the gap, generates FlowForge decorator
     # code via LLM, compiles it, and injects the new flow into the live DAG.
     dynamic_flow: bool = False
+
+    # When True, inject the framework's builtin tool pack (web, json,
+    # files, document tools) into the global tool list at compile time.
+    # This makes builtin tools available to all steps via ctx.call_tool().
+    include_builtin_tools: bool = False

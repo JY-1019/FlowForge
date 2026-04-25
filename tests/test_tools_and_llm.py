@@ -873,3 +873,54 @@ class TestBuiltinShellTools:
         result = tool.func("pip install requests")
         assert result["ok"] is False
         assert "disabled" in result["stderr"]
+
+
+# ---------------------------------------------------------------------------
+# Builtin tools available in user-defined flows via include_builtin_tools
+# ---------------------------------------------------------------------------
+
+@task(name="user_bt_task", prompt="use builtin tools")
+class _UserBuiltinTask:
+    @step(order=1, prompt="read a file")
+    async def use_builtin(ctx):
+        return {"done": True}
+
+
+@flow(name="user_bt_flow", prompt="user flow with builtins")
+class _UserBuiltinFlow:
+    _UserBuiltinTask = _UserBuiltinTask
+
+
+@global_config(
+    prompt="agent with builtin tools but no dynamic flow",
+    include_builtin_tools=True,
+)
+class _UserBuiltinAgent:
+    _UserBuiltinFlow = _UserBuiltinFlow
+
+
+class TestIncludeBuiltinTools:
+    """include_builtin_tools=True injects tools without dynamic_flow."""
+
+    def test_builtin_tools_injected_without_dynamic_flow(self):
+        engine = FlowForge.compile(_UserBuiltinAgent)
+        tool_names = [t.name for t in engine._global_meta.tools
+                      if isinstance(t, FunctionTool)]
+        # Core builtin tools should be present
+        assert "web_fetch_url" in tool_names
+        assert "files_read_text" in tool_names
+        assert "files_write_text" in tool_names
+        assert "json_select_fields" in tool_names
+        assert "csv_read" in tool_names
+        assert "pptx_create" in tool_names
+        assert "chart_create" in tool_names
+
+    def test_builtin_tools_not_injected_by_default(self):
+        @global_config(prompt="plain agent")
+        class PlainAgent:
+            _UserBuiltinFlow = _UserBuiltinFlow
+
+        engine = FlowForge.compile(PlainAgent)
+        tool_names = [t.name for t in engine._global_meta.tools
+                      if isinstance(t, FunctionTool)]
+        assert "web_fetch_url" not in tool_names
