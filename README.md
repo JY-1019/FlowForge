@@ -248,29 +248,30 @@ class T:
 
 ### Dynamic Flow Generation
 
-Agent가 Agent를 만든다. 기존 DAG에 없는 기능을 LLM이 자동 생성:
+Let the agent create missing flows when the compiled DAG does not already
+cover a user request:
 
 ```python
 from flowforge import global_config, FlowForge, DynamicRunOptions
 
 @global_config(
-    prompt="다목적 AI 에이전트",
+    prompt="General-purpose AI agent",
     llm_config=LLMConfig.for_claude(),
-    dynamic_flow=True,  # 동적 생성 활성화
+    dynamic_flow=True,  # enable dynamic generation
 )
 class MyAgent:
-    pass  # flow가 없어도 OK
+    pass  # zero static flows is OK
 
 options = DynamicRunOptions(
     project_root=".",
-    persist_generated=True,       # 생성 코드 저장
-    auto_load_generated=True,     # 다음 실행 시 재사용
-    include_builtin_tools=True,   # 내장 도구 (PPT, CSV, 차트 등)
+    persist_generated=True,       # save generated code
+    auto_load_generated=True,     # reuse it on the next compile
+    include_builtin_tools=True,   # built-ins for PPT, CSV, charts, etc.
 )
 
 engine = FlowForge.compile(MyAgent, dynamic_options=options)
 result = await engine.run(
-    "세계 Top 5 산 높이를 표로 정리해줘",
+    "Make a table of the five tallest mountains in the world",
     planning_mode="autonomous",
 )
 ```
@@ -278,7 +279,7 @@ result = await engine.run(
 Key features:
 - **Manifest caching** — generated flows are saved, loaded on compile, and skipped when already present
 - **14+ builtin tools** — web, files, PPT, CSV, DOCX, charts, PDF, markdown
-- **Auto artifact detection** — "PPT로 만들어줘" → automatically includes `pptx_create` tool
+- **Auto artifact detection** — "make a PPT" → automatically includes `pptx_create`
 - **AST safety validation** — blocks dangerous imports/calls before execution
 - **Contract-first chaining** — generated flow output matches downstream input schema
 

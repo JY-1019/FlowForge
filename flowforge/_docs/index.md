@@ -87,17 +87,17 @@ result = await engine.run(Query(text="What is FlowForge?"))
 
     ---
 
-    Agent가 Agent를 만든다. 기존 DAG에 없는 기능이 필요하면
-    LLM이 새 Flow 코드를 생성하고 실행 중에 주입한다.
-    생성된 Flow는 manifest에 저장되어 다음 실행에서 재사용된다.
+    Let the agent create missing flows. When the existing DAG does not cover a
+    requirement, the LLM can generate a new Flow, inject it at runtime, and
+    persist it in the manifest for reuse.
 
 -   :material-tools: **Tools & Skills**
 
     ---
 
-    MCP, HTTP, Python 함수, Anthropic native Claude Skills,
-    그리고 로컬 `SKILL.md` 기반 Agent Skills를 같은 `tools=[...]`
-    인터페이스로 등록하고 `<tool-name>`으로 활성화한다.
+    Register MCP, HTTP, Python functions, Anthropic-native Claude Skills, and
+    local `SKILL.md` Agent Skills through the same `tools=[...]` interface and
+    activate them with `<tool-name>`.
 
 </div>
 

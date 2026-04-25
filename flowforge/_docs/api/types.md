@@ -208,7 +208,8 @@ async def review(ctx):
 
 ## DynamicRunOptions
 
-동적 flow 생성의 전체 동작을 제어한다. `FlowForge.compile()`과 `engine.run()` 모두에 전달 가능.
+Controls dynamic flow generation. You can pass it to both
+`FlowForge.compile()` and `engine.run()`.
 
 ```python
 from flowforge import DynamicRunOptions
@@ -229,49 +230,50 @@ result = await engine.run(input_data, dynamic_options=options)
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | `bool` | `True` | 동적 생성 on/off. `False`면 gap 감지 시에도 생성 안 함 |
-| `project_root` | `str \| None` | `None` | 프로젝트 루트 경로. `None`이면 `cwd()` 사용 |
-| `generated_dir` | `str` | `"flowforge/generated"` | 생성 코드 저장 디렉토리. `project_root` 내부여야 함 |
-| `persist_generated` | `bool` | `True` | 생성 코드를 파일로 저장 + `manifest.json` 업데이트 |
-| `auto_load_generated` | `bool` | `True` | 컴파일 시 `manifest.json`에서 이전 생성 flow 자동 로드 |
-| `include_builtin_tools` | `bool` | `True` | 내장 도구 팩 활성화 (web, json, files, document tools) |
-| `allow_tool_generation` | `bool` | `False` | 필요 시 새 `FunctionTool` 코드 생성을 허용 |
-| `allow_codegen_tool_use` | `bool` | `False` | 생성 코드 내 `tool_use` (LLM 도구 선택) 허용 |
-| `allowed_shell_modes` | `list[str]` | `["readonly", "project_exec"]` | 셸 도구 모드: `"readonly"`, `"workspace_write"`, `"project_exec"`, `"install_dependency"` |
-| `shell_timeout_seconds` | `int` | `60` | 셸 실행 타임아웃 |
-| `shell_output_max_chars` | `int` | `4000` | 셸 출력 최대 문자 수 |
-| `mcp_server_commands` | `dict[str, list[str]]` | `{}` | 동적 생성 중 사용할 MCP server command map |
-| `mcp_start_timeout_seconds` | `int` | `15` | MCP server 시작 대기 시간 |
-| `project_context_max_chars` | `int` | `4000` | 코드 생성 프롬프트의 프로젝트 컨텍스트 최대 문자 수 |
-| `max_requirements` | `int` | `8` | planner gap requirement 최대 개수 |
-| `dependency_policy` | `DependencyPolicy` | default | 패키지 설치 허용 정책 |
+| `enabled` | `bool` | `True` | Enable or disable dynamic generation. If `False`, gaps are not generated |
+| `project_root` | `str \| None` | `None` | Project root. `None` means `cwd()` |
+| `generated_dir` | `str` | `"flowforge/generated"` | Directory for generated code. Must stay under `project_root` |
+| `persist_generated` | `bool` | `True` | Save generated code and update `manifest.json` |
+| `auto_load_generated` | `bool` | `True` | Load previously generated flows from `manifest.json` at compile time |
+| `include_builtin_tools` | `bool` | `True` | Enable the built-in tool pack for web, JSON, files, and documents |
+| `allow_tool_generation` | `bool` | `False` | Allow generation of new `FunctionTool` code when needed |
+| `allow_codegen_tool_use` | `bool` | `False` | Allow generated code to use LLM tool selection |
+| `allowed_shell_modes` | `list[str]` | `["readonly", "project_exec"]` | Shell modes: `"readonly"`, `"workspace_write"`, `"project_exec"`, `"install_dependency"` |
+| `shell_timeout_seconds` | `int` | `60` | Shell execution timeout |
+| `shell_output_max_chars` | `int` | `4000` | Maximum captured shell output |
+| `mcp_server_commands` | `dict[str, list[str]]` | `{}` | MCP server command map available during dynamic generation |
+| `mcp_start_timeout_seconds` | `int` | `15` | MCP server startup timeout |
+| `project_context_max_chars` | `int` | `4000` | Maximum project context characters included in codegen prompts |
+| `max_requirements` | `int` | `8` | Maximum number of planner gap requirements |
+| `dependency_policy` | `DependencyPolicy` | default | Package installation policy |
 
-**캐싱 동작:**
+**Caching behavior:**
 
-- `persist_generated=True` + `auto_load_generated=True` (기본값): 생성된 flow가 프로세스 간 자동 재사용
-- 같은 세션 내에서도 DAG/manifest 기반 중복 체크로 재생성 방지
-- 생성 전에 DAG에 같은 flow가 있는지, `manifest.json`에 같은 flow가 기록되어 있는지 모두 확인
+- `persist_generated=True` + `auto_load_generated=True` (default): generated flows are reused across processes
+- Within the same session, the DAG and manifest are checked to avoid regeneration
+- Before generating, FlowForge checks both the current DAG and `manifest.json` for a flow with the same name
 
-자세한 설명은 [Dynamic Flow Generation Guide](../guides/dynamic-flow.md#dynamicrunoptions) 참조.
+See the [Dynamic Flow Generation Guide](../guides/dynamic-flow.md#dynamicrunoptions) for details.
 
 ---
 
 ## DependencyPolicy
 
-생성 코드의 패키지 설치를 제어한다. `DynamicRunOptions.dependency_policy`에 전달.
+Controls package installation for generated code. Pass it through
+`DynamicRunOptions.dependency_policy`.
 
 ```python
 from flowforge.types import DependencyPolicy
 
 policy = DependencyPolicy(
-    allow_install=True,                 # pip_install 도구 사용 허용
-    allowed_packages=["httpx"],         # 화이트리스트 (비어있으면 전체 허용)
-    denied_packages=["subprocess"],     # 블랙리스트 (항상 적용)
+    allow_install=True,                 # allow the pip_install tool
+    allowed_packages=["httpx"],         # allowlist; empty means allow all
+    denied_packages=["subprocess"],     # denylist; always wins
 )
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `allow_install` | `bool` | `False` | `pip_install` 도구 사용 허용 여부 |
-| `allowed_packages` | `list[str]` | `[]` | 설치 허용 패키지. 빈 리스트면 전체 허용 |
-| `denied_packages` | `list[str]` | `[]` | 설치 차단 패키지. 화이트리스트보다 우선 |
+| `allow_install` | `bool` | `False` | Whether the `pip_install` tool may be used |
+| `allowed_packages` | `list[str]` | `[]` | Package allowlist. Empty means all packages are allowed |
+| `denied_packages` | `list[str]` | `[]` | Package denylist. Takes precedence over the allowlist |
