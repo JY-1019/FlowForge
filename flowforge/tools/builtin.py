@@ -64,8 +64,19 @@ def create_builtin_tool_pack(options: DynamicRunOptions) -> list[FunctionTool]:
     # General-purpose utility tools.
     tools.extend(_create_utility_tools(options))
 
-    # Document processing tools (PDF, PPTX, CSV, DOCX, Markdown, Chart).
+    # Document processing tools (PDF, PPTX, CSV, DOCX, Markdown, Chart, Image).
     tools.extend(_create_document_tools(options))
+
+    # Claude Code skill invocation tool.
+    tools.append(FunctionTool(
+        func=_make_claude_skill_tool(options),
+        name="claude_skill",
+        description=(
+            "Invoke a Claude Code skill (slash command) and return the "
+            "result. Pass the skill name (e.g. 'commit', 'review-pr') "
+            "and a prompt string. Requires the 'claude' CLI in PATH."
+        ),
+    ))
 
     # ── Shell tools (mode-gated) ──────────────────────────────────────
     if "readonly" in modes:
@@ -1171,6 +1182,94 @@ def _resolve_safe_path(project_root: Path, path: str) -> Path:
     except ValueError:
         raise ValueError(f"path must stay inside project root: {resolved}")
     return resolved
+
+
+def _make_claude_skill_tool(options: DynamicRunOptions):
+    """Create a tool that invokes Claude Code skills via the CLI."""
+
+    def _tool(
+        skill_name: str,
+        prompt: str,
+        timeout_seconds: int = 300,
+        model: str = "",
+    ) -> dict[str, Any]:
+        """Invoke a Claude Code skill and return the result.
+
+        Parameters
+        ----------
+        skill_name : str
+            The skill to invoke (e.g. ``"commit"``, ``"review-pr"``).
+        prompt : str
+            The prompt/arguments for the skill.
+        timeout_seconds : int
+            Maximum execution time (default 300s).
+        model : str
+            Model override (e.g. ``"sonnet"``).
+        """
+        import shutil
+
+        claude_bin = shutil.which("claude")
+        if not claude_bin:
+            return {
+                "ok": False,
+                "error": (
+                    "Claude CLI ('claude') not found in PATH. "
+                    "Install Claude Code: https://docs.anthropic.com/en/docs/claude-code"
+                ),
+                "skill": skill_name,
+            }
+
+        full_prompt = f"/{skill_name} {prompt}"
+        cmd = [claude_bin, "--print", "--no-input"]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.extend(["--max-tokens", "4096"])
+        cmd.extend(["--prompt", full_prompt])
+
+        run_cwd = options.project_root or None
+
+        try:
+            completed = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=run_cwd,
+                check=False,
+            )
+
+            max_output = max(500, options.shell_output_max_chars or _DEFAULT_MAX_OUTPUT_CHARS)
+            if completed.returncode == 0:
+                return {
+                    "ok": True,
+                    "result": _trim_output(completed.stdout.strip(), max_output),
+                    "skill": skill_name,
+                }
+            else:
+                return {
+                    "ok": False,
+                    "error": _trim_output(
+                        completed.stderr.strip() or f"exit code {completed.returncode}",
+                        max_output,
+                    ),
+                    "result": _trim_output(completed.stdout.strip(), max_output),
+                    "skill": skill_name,
+                }
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "error": f"Skill '{skill_name}' timed out after {timeout_seconds}s",
+                "skill": skill_name,
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": f"Failed to invoke skill: {e}",
+                "skill": skill_name,
+            }
+
+    _tool.__name__ = "builtin_claude_skill"
+    return _tool
 
 
 def _make_import_check_tool():

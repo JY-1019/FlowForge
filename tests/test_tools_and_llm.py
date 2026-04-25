@@ -924,3 +924,102 @@ class TestIncludeBuiltinTools:
         tool_names = [t.name for t in engine._global_meta.tools
                       if isinstance(t, FunctionTool)]
         assert "web_fetch_url" not in tool_names
+
+    def test_image_create_and_claude_skill_in_builtins(self):
+        engine = FlowForge.compile(_UserBuiltinAgent)
+        tool_names = [t.name for t in engine._global_meta.tools
+                      if isinstance(t, FunctionTool)]
+        assert "image_create" in tool_names
+        assert "claude_skill" in tool_names
+
+
+class TestClaudeSkillTool:
+    """Tests for the claude_skill builtin tool."""
+
+    def test_claude_cli_not_found(self):
+        from flowforge.tools.builtin import _make_claude_skill_tool
+        from unittest.mock import patch as _patch
+
+        tool = _make_claude_skill_tool(DynamicRunOptions())
+
+        with _patch("shutil.which", return_value=None):
+            result = tool(skill_name="commit", prompt="test")
+            assert result["ok"] is False
+            assert "not found" in result["error"]
+            assert result["skill"] == "commit"
+
+    def test_claude_skill_success(self):
+        from flowforge.tools.builtin import _make_claude_skill_tool
+        from unittest.mock import patch as _patch, MagicMock
+        import subprocess as sp
+
+        tool = _make_claude_skill_tool(DynamicRunOptions())
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "Commit created successfully"
+        mock_result.stderr = ""
+
+        with _patch("shutil.which", return_value="/usr/local/bin/claude"), \
+             _patch("subprocess.run", return_value=mock_result) as mock_run:
+            result = tool(skill_name="commit", prompt="fix bug")
+            assert result["ok"] is True
+            assert "Commit created" in result["result"]
+            assert result["skill"] == "commit"
+            # Verify the CLI was called with correct args
+            call_args = mock_run.call_args
+            cmd = call_args[0][0]
+            assert "/usr/local/bin/claude" in cmd
+            assert "--prompt" in cmd
+
+
+class TestCallSkillContext:
+    """Tests for StepContext.call_skill()."""
+
+    @pytest.mark.asyncio
+    async def test_call_skill_cli_not_found(self):
+        """call_skill returns error when claude CLI is not in PATH."""
+        from unittest.mock import patch as _patch
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="f")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="t")
+        step_ctx = StepContext(task_ctx=task_ctx, step_prompt="s")
+
+        with _patch("shutil.which", return_value=None):
+            result = await step_ctx.call_skill("commit", "test commit")
+            assert result["ok"] is False
+            assert "not found" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_call_skill_success(self):
+        """call_skill returns result on successful CLI invocation."""
+        from unittest.mock import patch as _patch, AsyncMock as _AM
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="f")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="t")
+        step_ctx = StepContext(task_ctx=task_ctx, step_prompt="s")
+
+        # Mock asyncio.create_subprocess_exec
+        mock_proc = _AM()
+        mock_proc.communicate = _AM(return_value=(
+            b"Review complete: LGTM",
+            b"",
+        ))
+        mock_proc.returncode = 0
+
+        with _patch("shutil.which", return_value="/usr/bin/claude"), \
+             _patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await step_ctx.call_skill("review-pr", "PR #42")
+            assert result["ok"] is True
+            assert "LGTM" in result["result"]
+            assert result["skill"] == "review-pr"

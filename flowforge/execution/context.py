@@ -477,6 +477,128 @@ class StepContext:
             f"Tool {tool_name!r} not found. Available FunctionTools: {available}"
         )
 
+    async def call_skill(
+        self,
+        skill_name: str,
+        prompt: str,
+        *,
+        timeout: int = 300,
+        model: str = "",
+        max_tokens: int = 4096,
+        cwd: str | None = None,
+    ) -> dict[str, Any]:
+        """Call a Claude Code skill (slash command) from within a step.
+
+        This method invokes the ``claude`` CLI with a skill prompt and
+        returns the result.  It enables FlowForge steps to leverage
+        Claude Code's built-in skills (e.g. ``/commit``, ``/review-pr``,
+        code generation, etc.) or any custom skills installed in the
+        user's environment.
+
+        Parameters
+        ----------
+        skill_name:
+            The skill name to invoke (e.g. ``"commit"``, ``"review-pr"``,
+            ``"pdf"``).  This is equivalent to typing ``/skill_name`` in
+            Claude Code.
+        prompt:
+            The prompt or arguments to pass to the skill.
+        timeout:
+            Maximum execution time in seconds (default: 300).
+        model:
+            Model override (e.g. ``"sonnet"``).  Uses the default if empty.
+        max_tokens:
+            Maximum tokens for the response.
+        cwd:
+            Working directory for the CLI invocation.  Defaults to the
+            dynamic options ``project_root`` if available, otherwise ``cwd()``.
+
+        Returns
+        -------
+        dict
+            ``{"ok": True, "result": "...", "skill": "..."}`` on success,
+            ``{"ok": False, "error": "...", "skill": "..."}`` on failure.
+
+        Examples
+        --------
+        ```python
+        @step(order=1, prompt="코드 리뷰")
+        async def review(ctx):
+            result = await ctx.call_skill("review-pr", "PR #42를 리뷰해줘")
+            return result
+        ```
+        """
+        import asyncio
+        import shutil
+
+        # Find claude CLI
+        claude_bin = shutil.which("claude")
+        if not claude_bin:
+            return {
+                "ok": False,
+                "error": (
+                    "Claude CLI ('claude') not found in PATH. "
+                    "Install Claude Code first: https://docs.anthropic.com/en/docs/claude-code"
+                ),
+                "skill": skill_name,
+            }
+
+        # Build the full prompt with skill invocation
+        full_prompt = f"/{skill_name} {prompt}"
+
+        cmd = [claude_bin, "--print", "--no-input"]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.extend(["--max-tokens", str(max_tokens)])
+        cmd.extend(["--prompt", full_prompt])
+
+        # Determine working directory
+        run_cwd = cwd
+        if not run_cwd:
+            dyn_opts = getattr(self.global_ctx, "dynamic_options", None)
+            if dyn_opts and dyn_opts.project_root:
+                run_cwd = dyn_opts.project_root
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=run_cwd,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout,
+            )
+
+            output = stdout.decode("utf-8", errors="replace").strip()
+            err_output = stderr.decode("utf-8", errors="replace").strip()
+
+            if proc.returncode == 0:
+                return {
+                    "ok": True,
+                    "result": output,
+                    "skill": skill_name,
+                }
+            else:
+                return {
+                    "ok": False,
+                    "error": err_output or f"claude exited with code {proc.returncode}",
+                    "result": output,
+                    "skill": skill_name,
+                }
+        except asyncio.TimeoutError:
+            return {
+                "ok": False,
+                "error": f"Skill '{skill_name}' timed out after {timeout}s",
+                "skill": skill_name,
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": f"Failed to invoke skill: {e}",
+                "skill": skill_name,
+            }
+
     async def call_llm(
         self,
         prompt: str,
