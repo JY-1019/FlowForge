@@ -20,7 +20,7 @@ class MyAgent: ...
 |------|------|----------|-------------|
 | `prompt` | `str` | Yes | System-level prompt prepended to every LLM call |
 | `llm_config` | `LLMConfig` | | Default model/temperature/token settings |
-| `tools` | `list[ToolConfig]` | | Global tool registrations (MCP, function, HTTP). Available to **all** flows, tasks, and steps. |
+| `tools` | `list[ToolConfig]` | | Global tool registrations (MCP, function, HTTP, Claude Skill). Available to **all** flows, tasks, and steps. |
 | `dynamic_flow` | `bool` | | Enable dynamic flow generation. Injects the internal `_dynamic_generator` meta-flow. See [Dynamic Flow Guide](../guides/dynamic-flow.md). |
 
 Attaches `GlobalMeta` to the class as `cls.__flowforge_global_meta__`.
@@ -172,6 +172,7 @@ Call the LLM with a templated user prompt.
 - `prompt` argument is the **user prompt**
 - `{field}` in the prompt is replaced with `ctx.input.field`
 - `<tool_name>` in the prompt includes that tool in the API call
+- `<skill_name>` works the same for `ClaudeSkill`; Anthropic requests receive `container.skills`
 - Returns the LLM response content
 
 ```python

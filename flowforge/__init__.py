@@ -73,6 +73,7 @@ from flowforge.types import (
     LLMConfig,
     BranchCondition,
     MCPServer,
+    ClaudeSkill,
     ToolConfig,
     DynamicRunOptions,
     DependencyPolicy,
@@ -106,7 +107,7 @@ def _coerce_dynamic_options(
 
 
 def _tool_name(tool: ToolConfig) -> str:
-    from flowforge.types import MCPServer, FunctionTool, HTTPTool
+    from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill
 
     if isinstance(tool, MCPServer):
         return tool.name
@@ -116,6 +117,8 @@ def _tool_name(tool: ToolConfig) -> str:
         )
     if isinstance(tool, HTTPTool):
         return tool.name
+    if isinstance(tool, ClaudeSkill):
+        return tool.name or tool.skill_id
     return ""
 
 
@@ -738,6 +741,7 @@ __all__ = [
     "LLMConfig",
     "BranchCondition",
     "MCPServer",
+    "ClaudeSkill",
     "ToolConfig",
     "DynamicRunOptions",
     "DependencyPolicy",

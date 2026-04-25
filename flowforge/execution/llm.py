@@ -19,6 +19,11 @@ tool-use format before the call.
 When the LLM returns ``tool_use`` blocks, the tool-use loop executes each
 tool call (MCP, FunctionTool, HTTPTool) and feeds the results back to the
 LLM until it produces a final text or structured-output response.
+
+Claude Agent Skills declared as ``ClaudeSkill`` are provider-native Anthropic
+capabilities.  They are selected with the same ``<name>`` syntax, but are
+attached to the request via ``container.skills`` instead of being executed by
+FlowForge's local tool loop.
 """
 from __future__ import annotations
 
@@ -39,6 +44,15 @@ logger = logging.getLogger(__name__)
 
 # Maximum number of tool-use round-trips before forcing a final answer.
 _MAX_TOOL_ROUNDS = 25
+
+_ANTHROPIC_SKILL_BETAS = [
+    "code-execution-2025-08-25",
+    "skills-2025-10-02",
+]
+_ANTHROPIC_CODE_EXECUTION_TOOL = {
+    "type": "code_execution_20250825",
+    "name": "code_execution",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +184,62 @@ def _tool_config_to_anthropic(tool_config: Any) -> dict[str, Any]:
     return {}
 
 
+def _split_claude_skill_configs(
+    tool_configs: list[ToolConfig] | None,
+) -> tuple[list[ToolConfig], list[Any]]:
+    """Split local executable tools from Anthropic-native Claude Skills."""
+    if not tool_configs:
+        return [], []
+
+    from flowforge.types import ClaudeSkill
+
+    regular: list[ToolConfig] = []
+    skills: list[ClaudeSkill] = []
+    for tc in tool_configs:
+        if isinstance(tc, ClaudeSkill):
+            skills.append(tc)
+        else:
+            regular.append(tc)
+    return regular, skills
+
+
+def _claude_skill_to_container_skill(skill: Any) -> dict[str, Any]:
+    """Return one ``container.skills`` entry for a ``ClaudeSkill`` config."""
+    skill_id = getattr(skill, "skill_id", "") or getattr(skill, "name", "")
+    payload = {
+        "type": getattr(skill, "type", "anthropic"),
+        "skill_id": skill_id,
+    }
+    version = getattr(skill, "version", "")
+    if version:
+        payload["version"] = version
+    return payload
+
+
+def _add_anthropic_skill_kwargs(
+    kwargs: dict[str, Any],
+    skills: list[Any],
+) -> None:
+    """Attach Claude Skill request fields to Anthropic Messages kwargs."""
+    if not skills:
+        return
+
+    kwargs["betas"] = list(_ANTHROPIC_SKILL_BETAS)
+    kwargs["container"] = {
+        "skills": [_claude_skill_to_container_skill(skill) for skill in skills]
+    }
+
+    tools = list(kwargs.get("tools", []))
+    has_code_execution = any(
+        tool.get("name") == _ANTHROPIC_CODE_EXECUTION_TOOL["name"]
+        and tool.get("type") == _ANTHROPIC_CODE_EXECUTION_TOOL["type"]
+        for tool in tools
+    )
+    if not has_code_execution:
+        tools.append(dict(_ANTHROPIC_CODE_EXECUTION_TOOL))
+    kwargs["tools"] = tools
+
+
 def _pydantic_to_json_schema(schema: type) -> dict[str, Any]:
     """Convert a Pydantic BaseModel class to a JSON Schema dict for tool_use.
 
@@ -229,7 +299,7 @@ async def _build_executor(
 
 def _get_tool_name(tc: Any) -> str:
     """Extract a tool name from a ``ToolConfig`` instance."""
-    from flowforge.types import MCPServer, FunctionTool, HTTPTool
+    from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill
 
     if isinstance(tc, MCPServer):
         return tc.name
@@ -237,7 +307,31 @@ def _get_tool_name(tc: Any) -> str:
         return tc.name or (tc.func.__name__ if hasattr(tc.func, "__name__") else "")
     elif isinstance(tc, HTTPTool):
         return tc.name or "http_tool"
+    elif isinstance(tc, ClaudeSkill):
+        return tc.name or tc.skill_id
     return ""
+
+
+def _serialize_anthropic_content(content: Any) -> list[dict[str, Any]]:
+    """Serialize Anthropic SDK content blocks for message history reuse."""
+    serialized: list[dict[str, Any]] = []
+    for block in content or []:
+        if isinstance(block, dict):
+            serialized.append(block)
+        elif hasattr(block, "model_dump"):
+            serialized.append(block.model_dump(exclude_unset=True))
+        else:
+            btype = getattr(block, "type", "")
+            if btype == "text":
+                serialized.append({"type": "text", "text": getattr(block, "text", "")})
+            elif btype == "tool_use":
+                serialized.append({
+                    "type": "tool_use",
+                    "id": getattr(block, "id", ""),
+                    "name": getattr(block, "name", ""),
+                    "input": getattr(block, "input", {}),
+                })
+    return serialized
 
 
 # ---------------------------------------------------------------------------
@@ -319,13 +413,19 @@ async def call_llm_api(
         The LLM response — a ``dict`` when *output_schema* is set (parsed
         from the tool call), otherwise a plain text string.
     """
+    regular_tool_configs, claude_skill_configs = _split_claude_skill_configs(
+        tool_configs
+    )
+    if claude_skill_configs and llm_config.provider != "anthropic":
+        raise ValueError("ClaudeSkill tools require LLMConfig(provider='anthropic').")
+
     # Build executor and fetch real MCP schemas.
-    executor, mcp_schemas = await _build_executor(tool_configs)
+    executor, mcp_schemas = await _build_executor(regular_tool_configs)
 
     try:
         # Build tools payload — prefer real MCP schemas over stubs.
         tools_payload: list[dict[str, Any]] = []
-        for tc in (tool_configs or []):
+        for tc in regular_tool_configs:
             name = _get_tool_name(tc)
             if name and name in mcp_schemas:
                 tools_payload.append(mcp_schemas[name])
@@ -356,6 +456,7 @@ async def call_llm_api(
                 system_prompt, user_prompt, llm_config, tools_payload,
                 executor=executor, output_schema=output_schema,
                 max_tool_rounds=max_tool_rounds,
+                claude_skills=claude_skill_configs,
             )
         elif llm_config.provider == "openai":
             result = await _call_openai(
@@ -424,6 +525,10 @@ async def stream_llm_api(
         async for chunk in ctx.call_llm("prompt", stream=True):
             print(chunk, end="", flush=True)
     """
+    _, claude_skill_configs = _split_claude_skill_configs(tool_configs)
+    if claude_skill_configs:
+        raise ValueError("ClaudeSkill tools are not supported with stream=True.")
+
     if llm_config.provider == "anthropic":
         async for chunk in _stream_anthropic(system_prompt, user_prompt, llm_config):
             yield chunk
@@ -524,6 +629,7 @@ async def _call_anthropic(
     executor: ToolExecutor | None = None,
     output_schema: type | None = None,
     max_tool_rounds: int | None = None,
+    claude_skills: list[Any] | None = None,
 ) -> Any:
     """Call the Anthropic Messages API with a tool-use loop.
 
@@ -576,14 +682,22 @@ async def _call_anthropic(
     has_executable = executor is not None and any(
         executor.has_tool(t.get("name", "")) for t in tools
     )
-    if output_schema and not has_executable:
+    has_claude_skills = bool(claude_skills)
+    if output_schema and not has_executable and not has_claude_skills:
         kwargs["tool_choice"] = {"type": "tool", "name": _structured_tool_name}
+
+    if claude_skills:
+        _add_anthropic_skill_kwargs(kwargs, claude_skills)
+
+    create_message = (
+        client.beta.messages.create if claude_skills else client.messages.create
+    )
 
     # -- Tool-use loop -------------------------------------------------------
     tool_rounds = max_tool_rounds or _MAX_TOOL_ROUNDS
     for round_idx in range(tool_rounds):
         kwargs["messages"] = messages
-        response = await client.messages.create(**kwargs)
+        response = await create_message(**kwargs)
 
         # Log raw response
         logger.debug(
@@ -596,6 +710,16 @@ async def _call_anthropic(
                 logger.debug("  content[%d] text=%s", i, block.text[:200].replace("\n", "\\n"))
             elif btype == "tool_use":
                 logger.debug("  content[%d] tool_use=%s  input=%s", i, block.name, str(block.input)[:200])
+
+        if claude_skills and getattr(response, "stop_reason", None) == "pause_turn":
+            messages.append({
+                "role": "assistant",
+                "content": _serialize_anthropic_content(response.content),
+            })
+            container_id = getattr(getattr(response, "container", None), "id", None)
+            if container_id:
+                kwargs.setdefault("container", {})["id"] = container_id
+            continue
 
         tool_uses = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
 
@@ -619,17 +743,9 @@ async def _call_anthropic(
 
         # Serialize assistant content blocks for message history.
         assistant_content: list[dict[str, Any]] = []
-        for block in response.content:
-            btype = getattr(block, "type", "?")
-            if btype == "text":
-                assistant_content.append({"type": "text", "text": block.text})
-            elif btype == "tool_use":
-                assistant_content.append({
-                    "type": "tool_use",
-                    "id": block.id,
-                    "name": block.name,
-                    "input": block.input,
-                })
+        for block in _serialize_anthropic_content(response.content):
+            if block.get("type") in {"text", "tool_use"}:
+                assistant_content.append(block)
         messages.append({"role": "assistant", "content": assistant_content})
 
         # Execute each tool and collect results.
@@ -665,7 +781,7 @@ async def _call_anthropic(
         logger.info("Tool loop exhausted (%d rounds), forcing structured_output", tool_rounds)
         kwargs["messages"] = messages
         kwargs["tool_choice"] = {"type": "tool", "name": _structured_tool_name}
-        response = await client.messages.create(**kwargs)
+        response = await create_message(**kwargs)
         for block in response.content:
             if getattr(block, "type", None) == "tool_use" and block.name == _structured_tool_name:
                 return block.input

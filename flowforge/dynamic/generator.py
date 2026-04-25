@@ -1191,7 +1191,7 @@ class DynamicFlowGenerator:
         if not self._tool_configs:
             return "(no tools available)"
 
-        from flowforge.types import MCPServer, FunctionTool, HTTPTool
+        from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill
         import inspect
 
         lines: list[str] = []
@@ -1216,6 +1216,10 @@ class DynamicFlowGenerator:
                 name = tool.name
                 description = tool.description
                 kind = "http"
+            elif isinstance(tool, ClaudeSkill):
+                name = tool.name or tool.skill_id
+                description = tool.description
+                kind = "claude-skill"
 
             if not name:
                 continue
@@ -1224,6 +1228,8 @@ class DynamicFlowGenerator:
             if params_info:
                 entry += f"\n    Parameters: {params_info}"
                 entry += f"\n    Call: await ctx.call_tool(\"{name}\", {_format_call_example(tool.func)})"
+            elif kind == "claude-skill":
+                entry += f"\n    Call: await ctx.call_llm(\"instruction <{name}>\")"
             lines.append(entry)
 
         return "\n".join(lines) if lines else "(no named tools available)"
@@ -1330,7 +1336,7 @@ class DynamicFlowGenerator:
         return None
 
     def _tool_names(self) -> list[str]:
-        from flowforge.types import MCPServer, FunctionTool, HTTPTool
+        from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill
 
         names: list[str] = []
         for tool in self._tool_configs:
@@ -1343,6 +1349,8 @@ class DynamicFlowGenerator:
                 )
             elif isinstance(tool, HTTPTool):
                 name = tool.name
+            elif isinstance(tool, ClaudeSkill):
+                name = tool.name or tool.skill_id
             if name:
                 names.append(name)
         return names

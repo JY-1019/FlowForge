@@ -19,6 +19,7 @@ from flowforge.tools.registry import ToolRegistry
 from flowforge.types import (
     LLMConfig,
     MCPServer,
+    ClaudeSkill,
     FunctionTool,
     HTTPTool,
     DynamicRunOptions,
@@ -151,6 +152,18 @@ class TestToolDeclaration:
         meta = my_step.__flowforge_step_meta__
         assert len(meta.tools) == 1
         assert meta.tools[0].name == "test_mcp"
+
+    def test_step_with_claude_skill(self):
+        skill = ClaudeSkill(name="pptx")
+
+        @step(order=1, prompt="create presentation", tools=[skill])
+        async def my_step(ctx):
+            pass
+
+        meta = my_step.__flowforge_step_meta__
+        assert len(meta.tools) == 1
+        assert meta.tools[0].name == "pptx"
+        assert meta.tools[0].skill_id == "pptx"
 
     def test_task_with_tools(self):
         http = HTTPTool(url="http://api", name="api_tool")
@@ -339,6 +352,28 @@ class TestToolResolution:
         assert len(resolved) == 1
         assert resolved[0].name == "search"
 
+    def test_resolve_claude_skill_by_name(self):
+        skill = ClaudeSkill(name="pptx")
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+            global_tools=[skill],
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx, flow_name="f", flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx, task_name="t", task_prompt="test",
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx, step_prompt="test",
+        )
+
+        resolved = step_ctx._resolve_tool_configs(["pptx"])
+        assert resolved == [skill]
+
     def test_resolve_unknown_tool_skipped(self):
         global_ctx = GlobalContext(
             llm_config=LLMConfig(),
@@ -457,6 +492,39 @@ class TestCallLLM:
             assert "<web_search>" not in call_kwargs["user_prompt"]
             assert len(call_kwargs["tool_configs"]) == 1
             assert call_kwargs["tool_configs"][0].name == "web_search"
+
+    @pytest.mark.asyncio
+    async def test_call_llm_passes_claude_skill_from_angle_brackets(self):
+        """ClaudeSkill uses the same <name> syntax as regular tools."""
+        pptx_skill = ClaudeSkill(name="pptx")
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(provider="anthropic", model="test-model"),
+            global_prompt="system",
+            tool_registry=ToolRegistry(),
+            global_tools=[pptx_skill],
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx, flow_name="f", flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx, task_name="t", task_prompt="test",
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="You create decks",
+            step_input={"topic": "solar energy"},
+        )
+
+        with patch("flowforge.execution.llm.call_llm_api", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = "created"
+
+            result = await step_ctx.call_llm("Create a deck about {topic}. <pptx>")
+
+            assert result == "created"
+            call_kwargs = mock_call.call_args.kwargs
+            assert "<pptx>" not in call_kwargs["user_prompt"]
+            assert call_kwargs["tool_configs"] == [pptx_skill]
 
     @pytest.mark.asyncio
     async def test_call_llm_no_tools(self):
@@ -693,6 +761,49 @@ class TestToolUseLoopIntegration:
         assert executor is not None
         assert executor.has_tool("my_tool")
         assert schemas == {}  # No MCP → no schemas fetched
+
+    def test_claude_skill_request_helpers(self):
+        from flowforge.execution.llm import (
+            _add_anthropic_skill_kwargs,
+            _claude_skill_to_container_skill,
+            _split_claude_skill_configs,
+        )
+
+        skill = ClaudeSkill(name="pptx")
+        regular = FunctionTool(func=lambda: "ok", name="local_tool")
+
+        regular_tools, skills = _split_claude_skill_configs([regular, skill])
+        assert regular_tools == [regular]
+        assert skills == [skill]
+        assert _claude_skill_to_container_skill(skill) == {
+            "type": "anthropic",
+            "skill_id": "pptx",
+            "version": "latest",
+        }
+
+        kwargs = {"tools": [{"name": "local_tool", "input_schema": {}}]}
+        _add_anthropic_skill_kwargs(kwargs, skills)
+
+        assert kwargs["betas"] == [
+            "code-execution-2025-08-25",
+            "skills-2025-10-02",
+        ]
+        assert kwargs["container"]["skills"] == [
+            {"type": "anthropic", "skill_id": "pptx", "version": "latest"}
+        ]
+        assert {"type": "code_execution_20250825", "name": "code_execution"} in kwargs["tools"]
+
+    @pytest.mark.asyncio
+    async def test_claude_skill_rejected_for_non_anthropic_provider(self):
+        from flowforge.execution.llm import call_llm_api
+
+        with pytest.raises(ValueError, match="ClaudeSkill"):
+            await call_llm_api(
+                system_prompt="system",
+                user_prompt="make a deck",
+                llm_config=LLMConfig(provider="openai", model="test"),
+                tool_configs=[ClaudeSkill(name="pptx")],
+            )
 
 
 # ---------------------------------------------------------------------------

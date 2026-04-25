@@ -191,15 +191,22 @@ class QualityCheck: ...
 Tools cascade through the hierarchy. Call the LLM from any step:
 
 ```python
-@global_config(prompt="...", tools=[MCPServer("https://api.example.com/mcp")])
+@global_config(
+    prompt="...",
+    tools=[
+        MCPServer("https://api.example.com/mcp"),
+        ClaudeSkill(name="pptx"),
+    ],
+)
 class Agent:
-    @flow(name="f", prompt="...", tools=[ToolConfig(name="calculator")])
+    @flow(name="f", prompt="...", tools=[FunctionTool(func=calculate, name="calculator")])
     class F:
-        @task(name="t", prompt="...", tools=[ToolConfig(name="formatter")])
+        @task(name="t", prompt="...")
         class T:
-            @step(order=1, prompt="Use {query} to find answers <calculator>")
+            @step(order=1, prompt="Use {query} to find answers")
             async def solve(ctx):
-                result = await ctx.call_llm("Solve: {query}")
+                result = await ctx.call_llm("Solve: {query} <calculator>")
+                deck = await ctx.call_llm("Turn the result into slides. <pptx>")
                 return result
 ```
 

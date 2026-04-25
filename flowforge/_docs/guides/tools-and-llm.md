@@ -21,10 +21,10 @@ Inside a step function, use `ctx.call_llm(prompt)` to make an AI API call. The a
 
 ## Tool Types
 
-FlowForge provides three built-in tool configurations:
+FlowForge provides four tool configurations:
 
 ```python
-from flowforge.types import MCPServer, FunctionTool, HTTPTool
+from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill
 
 # MCP Server
 mcp = MCPServer(url="https://api.example.com/mcp", name="search", description="Web search")
@@ -37,7 +37,14 @@ func_tool = FunctionTool(func=my_func, name="my_func", description="Custom funct
 
 # HTTP API
 http = HTTPTool(url="https://api.example.com/translate", name="translate", method="POST")
+
+# Claude Agent Skill (Anthropic provider only)
+pptx = ClaudeSkill(name="pptx")
 ```
+
+`ClaudeSkill` is provider-native: FlowForge does not execute it locally.
+When referenced as `<pptx>` in `ctx.call_llm()`, it is passed to Anthropic as
+`container.skills` with the required code execution beta tool.
 
 ---
 
@@ -53,6 +60,7 @@ Tools on `@global_config` are available to **every** flow, task, and step in the
     tools=[
         MCPServer(url="https://search.example.com/mcp", name="web_search"),
         MCPServer(url="https://db.example.com/mcp", name="db_search"),
+        ClaudeSkill(name="pptx"),
     ]
 )
 class MyAgent:
@@ -111,6 +119,30 @@ async def translate_step(ctx):
     )
     return {"translated": result}
 ```
+
+### Claude Skill Example
+
+```python
+@global_config(
+    prompt="Document automation assistant",
+    llm_config=LLMConfig.for_claude(),
+    tools=[ClaudeSkill(name="pptx")],
+)
+class MyAgent:
+    @flow(name="deck", prompt="Create decks")
+    class DeckFlow:
+        @task(name="make", prompt="Make a presentation")
+        class MakeDeck:
+            @step(order=1, prompt="Generate a PowerPoint")
+            async def make(ctx):
+                return await ctx.call_llm(
+                    "Create a 5-slide presentation from this input. <pptx>"
+                )
+```
+
+Claude Skills require Anthropic's Messages API skill support. FlowForge adds
+the required `code-execution-2025-08-25` and `skills-2025-10-02` beta flags
+for calls that include `ClaudeSkill`.
 
 ---
 

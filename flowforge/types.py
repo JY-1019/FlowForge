@@ -154,7 +154,34 @@ class HTTPTool(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
-ToolConfig = MCPServer | FunctionTool | HTTPTool
+class ClaudeSkill(BaseModel):
+    """Claude Agent Skill configuration for Anthropic-native skill use.
+
+    ``ClaudeSkill`` entries can be declared anywhere regular FlowForge tools
+    are accepted.  Referencing the skill with ``<name>`` in ``ctx.call_llm()``
+    attaches it to the Anthropic Messages API request via ``container.skills``.
+
+    Examples
+    --------
+    ``ClaudeSkill(name="pptx")`` enables Anthropic's built-in PowerPoint skill.
+    ``ClaudeSkill(type="custom", skill_id="skill_...", name="finance")``
+    enables a custom workspace skill and lets prompts reference ``<finance>``.
+    """
+
+    name: str = ""
+    skill_id: str = ""
+    type: Literal["anthropic", "custom"] = "anthropic"
+    version: str = "latest"
+    description: str = ""
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.skill_id and self.name:
+            self.skill_id = self.name
+        if not self.name and self.skill_id:
+            self.name = self.skill_id
+
+
+ToolConfig = MCPServer | FunctionTool | HTTPTool | ClaudeSkill
 
 
 class DependencyPolicy(BaseModel):

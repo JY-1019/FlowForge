@@ -90,9 +90,40 @@ http_tool = HTTPTool(
 
 ---
 
+## ClaudeSkill
+
+Anthropic-native Claude Agent Skill. Unlike `FunctionTool`, `MCPServer`, or
+`HTTPTool`, this is not executed by FlowForge's local tool loop. When selected
+with `<skill_name>` inside `ctx.call_llm()`, FlowForge attaches it to the
+Anthropic Messages API request via `container.skills` and enables the required
+code execution beta tool.
+
+```python
+from flowforge import ClaudeSkill
+
+pptx = ClaudeSkill(name="pptx")  # Anthropic-managed PowerPoint Skill
+
+custom = ClaudeSkill(
+    name="finance_model",
+    type="custom",
+    skill_id="skill_01AbCdEfGhIjKlMnOpQrStUv",
+    version="latest",
+)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | `str` | `""` | FlowForge reference name used in `<name>` prompts |
+| `skill_id` | `str` | `""` | Anthropic Skill ID. Defaults to `name` when omitted |
+| `type` | `"anthropic" \| "custom"` | `"anthropic"` | Skill source |
+| `version` | `str` | `"latest"` | Skill version passed to Claude |
+| `description` | `str` | `""` | Optional local description |
+
+---
+
 ## ToolConfig (Union)
 
-`ToolConfig = MCPServer | FunctionTool | HTTPTool`
+`ToolConfig = MCPServer | FunctionTool | HTTPTool | ClaudeSkill`
 
 Used in `@global_config(tools=[...])`:
 
@@ -102,9 +133,19 @@ Used in `@global_config(tools=[...])`:
     tools=[
         MCPServer("https://search.api.com/mcp"),
         FunctionTool(name="compute", func=my_compute_fn, description="..."),
+        ClaudeSkill(name="pptx"),
     ]
 )
 class MyAgent: ...
+```
+
+Use a Claude Skill from a step with the same angle-bracket syntax as other
+LLM tools:
+
+```python
+@step(order=1, prompt="Create a presentation")
+async def make_deck(ctx):
+    return await ctx.call_llm("Create a deck from this report. <pptx>")
 ```
 
 ---

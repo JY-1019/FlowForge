@@ -398,8 +398,6 @@ class StepContext:
 
         Later levels can shadow earlier ones (same tool name = override).
         """
-        from flowforge.types import MCPServer, FunctionTool, HTTPTool
-
         # Collect in order: global → flow → task → step
         all_tools: list[ToolConfig] = []
 
@@ -420,7 +418,7 @@ class StepContext:
         is not found, it is silently skipped (the LLM may still know about
         the tool from the global registry).
         """
-        from flowforge.types import MCPServer, FunctionTool, HTTPTool
+        from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill
 
         merged = self.merged_tools
         result: list[ToolConfig] = []
@@ -433,6 +431,8 @@ class StepContext:
                     tc_name = tc.name or (tc.func.__name__ if hasattr(tc.func, '__name__') else "")
                 elif isinstance(tc, HTTPTool):
                     tc_name = tc.name
+                elif isinstance(tc, ClaudeSkill):
+                    tc_name = tc.name or tc.skill_id
                 if tc_name == name:
                     result.append(tc)
                     break
