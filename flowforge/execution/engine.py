@@ -185,7 +185,9 @@ class ExecutionEngine:
                         "partial gap" if gap_detected else "no matching user flows",
                     )
                     dynamic_results: list[dict[str, Any]] = []
-                    dynamic_payloads = self._build_dynamic_inputs(input_data, plan)
+                    dynamic_payloads = self._build_dynamic_inputs(
+                        input_data, plan, run_dynamic_options,
+                    )
                     if not dynamic_payloads:
                         _logger.warning(
                             "no valid dynamic payloads could be built — "
@@ -440,11 +442,40 @@ class ExecutionEngine:
         self,
         input_data: Any,
         plan: Any,
+        dynamic_options: DynamicRunOptions | None = None,
     ) -> list[Any]:
-        """Build one dynamic-generation payload per missing requirement."""
+        """Build one dynamic-generation payload per missing requirement.
+
+        Before building a payload, checks:
+        1. Whether a flow with the same name already exists in the DAG
+           (may have been injected earlier in this session).
+        2. Whether the manifest already has a record for this flow name
+           (generated in a previous process but not loaded — e.g.
+           ``auto_load_generated=False``).
+
+        Either condition skips generation for that requirement.
+        """
         metadata = getattr(plan, "metadata", {}) or {}
         requirements = metadata.get("requirements") or []
         payloads: list[Any] = []
+
+        opts = dynamic_options or self._dynamic_options
+
+        # Collect existing flow names from DAG for dedup
+        existing_flow_names: set[str] = set()
+        for node in self._dag.get_all_nodes():
+            if node.type == NodeType.FLOW:
+                existing_flow_names.add(node.name)
+
+        # Also check manifest on disk (covers auto_load_generated=False case)
+        manifest_flow_names: set[str] = set()
+        if opts is not None:
+            try:
+                from flowforge.dynamic.manifest import load_manifest
+                manifest = load_manifest(opts)
+                manifest_flow_names = {r.name for r in manifest.flows}
+            except Exception:
+                pass
 
         for index, requirement in enumerate(requirements):
             if not isinstance(requirement, dict):
@@ -457,6 +488,22 @@ class ExecutionEngine:
             flow_prompt = requirement.get("suggested_flow_prompt")
             if not flow_name or not flow_prompt:
                 continue
+
+            # Skip if a flow with this name already exists
+            if flow_name in existing_flow_names:
+                _logger.info(
+                    "skipping dynamic generation for %r — already in DAG",
+                    flow_name,
+                )
+                continue
+            if flow_name in manifest_flow_names:
+                _logger.info(
+                    "skipping dynamic generation for %r — found in manifest "
+                    "(consider auto_load_generated=True to reuse it)",
+                    flow_name,
+                )
+                continue
+
             payloads.append({
                 "user_query": str(input_data),
                 "requirement": requirement,
