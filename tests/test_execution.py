@@ -95,6 +95,31 @@ async def test_step_runner_stores_result():
     await runner.run(meta, task_ctx, None)
     assert 1 in task_ctx.step_results
     assert task_ctx.step_results[1] == "output_value"
+    assert "my_step" in task_ctx.step_results
+    assert task_ctx.step_results.get("my_step") == "output_value"
+
+
+@pytest.mark.asyncio
+async def test_previous_results_supports_step_name_lookup():
+    """Later steps can read prior outputs by order or function name."""
+    seen = {}
+
+    async def first_step(ctx):
+        return {"value": 7}
+
+    async def second_step(ctx):
+        seen["by_order"] = ctx.previous_results.get(1)
+        seen["by_name"] = ctx.previous_results.get("first_step")
+        return "done"
+
+    runner   = StepRunner()
+    task_ctx = make_task_ctx()
+
+    await runner.run(StepMeta(order=1, prompt="test", func=first_step), task_ctx, None)
+    await runner.run(StepMeta(order=2, prompt="test", func=second_step), task_ctx, None)
+
+    assert seen["by_order"] == {"value": 7}
+    assert seen["by_name"] == {"value": 7}
 
 
 # ---------------------------------------------------------------------------

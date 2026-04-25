@@ -240,6 +240,46 @@ def _get_tool_name(tc: Any) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Markdown-fence stripping & auto JSON parse
+# ---------------------------------------------------------------------------
+
+_FENCE_RE = re.compile(
+    r"^\s*```(?:json|python|text|javascript|js|ts|typescript)?\s*\n"
+    r"(.*?)"
+    r"\n\s*```\s*$",
+    re.DOTALL,
+)
+
+
+def _strip_fences_and_parse(value: Any) -> Any:
+    """Post-process an LLM string response.
+
+    1. If *value* is not a ``str``, return it unchanged.
+    2. Strip surrounding markdown code-fences (```json ... ```, etc.).
+    3. Attempt ``json.loads`` — if it succeeds, return the parsed dict/list.
+    4. Otherwise return the (fence-stripped) string.
+    """
+    if not isinstance(value, str):
+        return value
+
+    text = value.strip()
+
+    # Strip markdown fences
+    m = _FENCE_RE.match(text)
+    if m:
+        text = m.group(1).strip()
+
+    # Try JSON parse
+    try:
+        return _json.loads(text)
+    except (ValueError, TypeError):
+        pass
+
+    # Return fence-stripped text (may still be useful even if not JSON)
+    return text if m else value
+
+
 async def call_llm_api(
     *,
     system_prompt: str,
@@ -248,6 +288,7 @@ async def call_llm_api(
     tool_configs: list[ToolConfig] | None = None,
     tool_registry: ToolRegistry | None = None,
     output_schema: type | None = None,
+    max_tool_rounds: int | None = None,
 ) -> Any:
     """Call the LLM using the configured provider.
 
@@ -314,16 +355,19 @@ async def call_llm_api(
             result = await _call_anthropic(
                 system_prompt, user_prompt, llm_config, tools_payload,
                 executor=executor, output_schema=output_schema,
+                max_tool_rounds=max_tool_rounds,
             )
         elif llm_config.provider == "openai":
             result = await _call_openai(
                 system_prompt, user_prompt, llm_config, tools_payload,
                 executor=executor, output_schema=output_schema,
+                max_tool_rounds=max_tool_rounds,
             )
         elif llm_config.provider == "google":
             result = await _call_google(
                 system_prompt, user_prompt, llm_config, tools_payload,
                 executor=executor, output_schema=output_schema,
+                max_tool_rounds=max_tool_rounds,
             )
         else:
             raise ValueError(f"Unsupported LLM provider: {llm_config.provider}")
@@ -343,6 +387,9 @@ async def call_llm_api(
             logger.info("LLM response  %.0fms  type=str  len=%d  preview=%s", elapsed, len(result), preview)
         else:
             logger.info("LLM response  %.0fms  type=%s", elapsed, type(result).__name__)
+
+        # Auto-strip markdown fences and parse JSON when possible
+        result = _strip_fences_and_parse(result)
 
         return result
     finally:
@@ -476,6 +523,7 @@ async def _call_anthropic(
     tools: list[dict[str, Any]],
     executor: ToolExecutor | None = None,
     output_schema: type | None = None,
+    max_tool_rounds: int | None = None,
 ) -> Any:
     """Call the Anthropic Messages API with a tool-use loop.
 
@@ -532,7 +580,8 @@ async def _call_anthropic(
         kwargs["tool_choice"] = {"type": "tool", "name": _structured_tool_name}
 
     # -- Tool-use loop -------------------------------------------------------
-    for round_idx in range(_MAX_TOOL_ROUNDS):
+    tool_rounds = max_tool_rounds or _MAX_TOOL_ROUNDS
+    for round_idx in range(tool_rounds):
         kwargs["messages"] = messages
         response = await client.messages.create(**kwargs)
 
@@ -613,7 +662,7 @@ async def _call_anthropic(
 
     # -- Loop exhausted: force structured output if needed -------------------
     if output_schema is not None:
-        logger.info("Tool loop exhausted (%d rounds), forcing structured_output", _MAX_TOOL_ROUNDS)
+        logger.info("Tool loop exhausted (%d rounds), forcing structured_output", tool_rounds)
         kwargs["messages"] = messages
         kwargs["tool_choice"] = {"type": "tool", "name": _structured_tool_name}
         response = await client.messages.create(**kwargs)
@@ -637,6 +686,7 @@ async def _call_openai(
     tools: list[dict[str, Any]],
     executor: ToolExecutor | None = None,
     output_schema: type | None = None,
+    max_tool_rounds: int | None = None,
 ) -> Any:
     """Call the OpenAI Chat Completions API with a tool-use loop."""
     import openai
@@ -694,7 +744,8 @@ async def _call_openai(
     if output_schema and not has_executable:
         kwargs["tool_choice"] = {"type": "function", "function": {"name": _structured_fn_name}}
 
-    for round_idx in range(_MAX_TOOL_ROUNDS):
+    tool_rounds = max_tool_rounds or _MAX_TOOL_ROUNDS
+    for round_idx in range(tool_rounds):
         kwargs["messages"] = messages
         response = await client.chat.completions.create(**kwargs)
         msg = response.choices[0].message
@@ -762,6 +813,7 @@ async def _call_google(
     tools: list[dict[str, Any]],
     executor: ToolExecutor | None = None,
     output_schema: type | None = None,
+    max_tool_rounds: int | None = None,
 ) -> Any:
     """Call the Google Gemini API with a tool-use loop.
 
@@ -818,7 +870,8 @@ async def _call_google(
         executor.has_tool(t.get("name", "")) for t in tools
     )
 
-    for round_idx in range(_MAX_TOOL_ROUNDS):
+    tool_rounds = max_tool_rounds or _MAX_TOOL_ROUNDS
+    for round_idx in range(tool_rounds):
         # Check for function_call parts in the response.
         fn_calls = [
             part for part in response.candidates[0].content.parts

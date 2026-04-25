@@ -69,7 +69,14 @@ from flowforge.annotations.decorators import (
     step,
 )
 from flowforge.annotations.decorators import _GLOBAL_ATTR
-from flowforge.types import LLMConfig, BranchCondition, MCPServer, ToolConfig
+from flowforge.types import (
+    LLMConfig,
+    BranchCondition,
+    MCPServer,
+    ToolConfig,
+    DynamicRunOptions,
+    DependencyPolicy,
+)
 from flowforge.dynamic.generator import DynamicFlowGenerator
 from flowforge.errors import (
     FlowForgeError,
@@ -86,6 +93,39 @@ if TYPE_CHECKING:
     from flowforge.schema.dag import FlowForgeDAG
     from flowforge.doc.models import AnyDoc
     from flowforge.viz.run_trace import RunTrace, Checkpoint
+
+
+def _coerce_dynamic_options(
+    value: DynamicRunOptions | dict[str, Any] | None,
+) -> DynamicRunOptions:
+    if isinstance(value, DynamicRunOptions):
+        return value
+    if value is None:
+        return DynamicRunOptions()
+    return DynamicRunOptions.model_validate(value)
+
+
+def _tool_name(tool: ToolConfig) -> str:
+    from flowforge.types import MCPServer, FunctionTool, HTTPTool
+
+    if isinstance(tool, MCPServer):
+        return tool.name
+    if isinstance(tool, FunctionTool):
+        return tool.name or (
+            tool.func.__name__ if hasattr(tool.func, "__name__") else ""
+        )
+    if isinstance(tool, HTTPTool):
+        return tool.name
+    return ""
+
+
+def _extend_tools_once(target: list[ToolConfig], tools: list[ToolConfig]) -> None:
+    existing = {_tool_name(tool) for tool in target if _tool_name(tool)}
+    for tool in tools:
+        name = _tool_name(tool)
+        if name and name not in existing:
+            target.append(tool)
+            existing.add(name)
 
 
 class AgentSession:
@@ -117,6 +157,7 @@ class AgentSession:
         dag: FlowForgeDAG,
         global_meta: Any,
         docs: dict[str, AnyDoc],
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
     ) -> None:
         from flowforge.execution.engine import ExecutionEngine
         from flowforge.tools.registry import ToolRegistry
@@ -124,11 +165,13 @@ class AgentSession:
         self._dag = dag
         self._global_meta = global_meta
         self._docs = docs
+        self._dynamic_options = _coerce_dynamic_options(dynamic_options)
         self._engine = ExecutionEngine(
             dag=dag,
             global_meta=global_meta,
             docs=docs,
             tool_registry=ToolRegistry(),
+            dynamic_options=self._dynamic_options,
         )
 
     @property
@@ -146,11 +189,12 @@ class AgentSession:
         planning_mode: str = "deterministic",
         route: str | list[str] | None = None,
         resume_from: Any = None,
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
     ) -> Any:
         """Execute the pipeline. See ``CompiledAgent.run()`` for details."""
         return await self._engine.run(
             input_data, planning_mode=planning_mode, route=route,
-            resume_from=resume_from,
+            resume_from=resume_from, dynamic_options=dynamic_options,
         )
 
     async def run_traced(
@@ -159,11 +203,12 @@ class AgentSession:
         planning_mode: str = "deterministic",
         route: str | list[str] | None = None,
         resume_from: Any = None,
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
     ) -> tuple[Any, RunTrace]:
         """Execute the pipeline and return (result, RunTrace)."""
         return await self._engine.run_traced(
             input_data, planning_mode=planning_mode, route=route,
-            resume_from=resume_from,
+            resume_from=resume_from, dynamic_options=dynamic_options,
         )
 
     def compare_mermaid(self, trace: RunTrace | None = None) -> str:
@@ -215,20 +260,24 @@ class CompiledAgent:
         dag: FlowForgeDAG,
         global_meta: Any,
         docs: dict[str, AnyDoc] | None = None,
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
     ) -> None:
         from flowforge.execution.engine import ExecutionEngine
         from flowforge.tools.registry import ToolRegistry
 
         self._dag = dag
         self._global_meta = global_meta
-        self._docs: dict[str, AnyDoc] = docs or {}
+        self._docs: dict[str, AnyDoc] = docs if docs is not None else {}
         self._tool_registry = ToolRegistry()
+        self._dynamic_options = _coerce_dynamic_options(dynamic_options)
+        self._last_dynamic_generation: dict[str, Any] | None = None
         self._engine = ExecutionEngine(
             dag=dag,
             global_meta=global_meta,
             docs=self._docs,
             tool_registry=self._tool_registry,
             compiled_agent=self,
+            dynamic_options=self._dynamic_options,
         )
 
     # ------------------------------------------------------------------
@@ -247,6 +296,16 @@ class CompiledAgent:
     def last_trace(self) -> RunTrace | None:
         """Trace of the most recent run() call. None before first run."""
         return self._engine.last_trace
+
+    @property
+    def last_dynamic_generation(self) -> dict[str, Any] | None:
+        """Metadata about the most recent dynamic-flow injection, if any."""
+        return self._last_dynamic_generation
+
+    @property
+    def dynamic_options(self) -> DynamicRunOptions:
+        """Default dynamic generation options for this compiled agent."""
+        return self._dynamic_options
 
     @property
     def memory(self) -> Any:
@@ -270,6 +329,7 @@ class CompiledAgent:
             dag=self._dag,
             global_meta=self._global_meta,
             docs=self._docs,
+            dynamic_options=self._dynamic_options,
         )
 
     def add_flow(self, flow_cls: type) -> str:
@@ -342,6 +402,7 @@ class CompiledAgent:
             docs=self._docs,
             tool_registry=self._tool_registry or ToolRegistry(),
             compiled_agent=self,
+            dynamic_options=self._dynamic_options,
         )
         # Preserve session memory across rebuilds.
         engine.memory = self._engine.memory
@@ -389,6 +450,7 @@ class CompiledAgent:
         planning_mode: str = "deterministic",
         route: str | list[str] | None = None,
         resume_from: Any = None,
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
     ) -> Any:
         """Execute the agent pipeline. Trace stored in self.last_trace.
 
@@ -415,7 +477,7 @@ class CompiledAgent:
         """
         return await self._engine.run(
             input_data, planning_mode=planning_mode, route=route,
-            resume_from=resume_from,
+            resume_from=resume_from, dynamic_options=dynamic_options,
         )
 
     async def run_traced(
@@ -424,6 +486,7 @@ class CompiledAgent:
         planning_mode: str = "deterministic",
         route: str | list[str] | None = None,
         resume_from: Any = None,
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
     ) -> tuple[Any, RunTrace]:
         """Execute the agent pipeline and explicitly return (result, RunTrace).
 
@@ -431,7 +494,7 @@ class CompiledAgent:
         """
         return await self._engine.run_traced(
             input_data, planning_mode=planning_mode, route=route,
-            resume_from=resume_from,
+            resume_from=resume_from, dynamic_options=dynamic_options,
         )
 
     # ------------------------------------------------------------------
@@ -582,7 +645,10 @@ class FlowForge:
     """Main entry point — compile an annotated agent class into a runnable pipeline."""
 
     @staticmethod
-    def compile(agent_cls: type) -> CompiledAgent:
+    def compile(
+        agent_cls: type,
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
+    ) -> CompiledAgent:
         """
         Compile the @global_config-decorated class into a DAG.
 
@@ -599,6 +665,21 @@ class FlowForge:
             )
 
         global_meta = getattr(agent_cls, _GLOBAL_ATTR)
+        options = _coerce_dynamic_options(dynamic_options)
+
+        if global_meta.dynamic_flow:
+            if options.auto_load_generated:
+                from flowforge.dynamic.manifest import load_generated_assets
+
+                load_generated_assets(global_meta, options)
+
+            if options.include_builtin_tools:
+                from flowforge.tools.builtin import create_builtin_tool_pack
+
+                _extend_tools_once(
+                    global_meta.tools,
+                    create_builtin_tool_pack(options),
+                )
 
         # Inject the built-in dynamic generator flow when dynamic_flow=True.
         #
@@ -632,7 +713,11 @@ class FlowForge:
         # Validate — raises on cycles
         resolve_execution_order(dag)
 
-        return CompiledAgent(dag=dag, global_meta=global_meta)
+        return CompiledAgent(
+            dag=dag,
+            global_meta=global_meta,
+            dynamic_options=options,
+        )
 
 
 __all__ = [
@@ -646,6 +731,8 @@ __all__ = [
     "BranchCondition",
     "MCPServer",
     "ToolConfig",
+    "DynamicRunOptions",
+    "DependencyPolicy",
     # Main classes
     "FlowForge",
     "CompiledAgent",

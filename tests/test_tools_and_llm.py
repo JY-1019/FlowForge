@@ -16,7 +16,14 @@ from flowforge.execution.context import GlobalContext, FlowContext, TaskContext,
 from flowforge.execution.runner import StepRunner
 from flowforge.execution.llm import render_prompt, parse_tool_refs
 from flowforge.tools.registry import ToolRegistry
-from flowforge.types import LLMConfig, MCPServer, FunctionTool, HTTPTool
+from flowforge.types import (
+    LLMConfig,
+    MCPServer,
+    FunctionTool,
+    HTTPTool,
+    DynamicRunOptions,
+    DependencyPolicy,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +281,33 @@ class TestToolMerging:
         merged = step_ctx.merged_tools
         assert len(merged) == 1
         assert merged[0].name == "shared_tool"
+
+    def test_step_results_alias_exposes_task_results(self):
+        """StepContext.step_results aliases the enclosing task accumulator."""
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx,
+            flow_name="f",
+            flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx,
+            task_name="t",
+            task_prompt="test",
+        )
+        task_ctx.step_results[1] = {"ok": True}
+
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="test",
+        )
+
+        assert step_ctx.step_results is task_ctx.step_results
+        assert step_ctx.step_results[1] == {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -753,3 +787,89 @@ class TestFunctionToolSchemaInference:
         assert result["input_schema"]["properties"]["query"]["type"] == "string"
         assert result["input_schema"]["properties"]["limit"]["type"] == "integer"
         assert "query" in result["input_schema"]["required"]
+
+
+class TestBuiltinShellTools:
+    def test_builtin_pack_includes_codegen_support_tools(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(project_root=str(tmp_path))
+        names = [tool.name for tool in create_builtin_tool_pack(options)]
+
+        assert "python_import_check" in names
+        assert "mcp_start_server" in names
+
+    def test_readonly_shell_tool_runs_allowlisted_command(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(project_root=str(tmp_path))
+        tool = next(
+            item for item in create_builtin_tool_pack(options)
+            if item.name == "shell_readonly"
+        )
+
+        result = tool.func("pwd")
+        assert result["ok"] is True
+        assert result["cwd"] == str(tmp_path)
+
+    def test_readonly_shell_tool_truncates_large_output(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        (tmp_path / "large.txt").write_text("x" * 2000)
+        options = DynamicRunOptions(
+            project_root=str(tmp_path),
+            shell_output_max_chars=500,
+        )
+        tool = next(
+            item for item in create_builtin_tool_pack(options)
+            if item.name == "shell_readonly"
+        )
+
+        result = tool.func("cat large.txt")
+        assert result["ok"] is True
+        assert result["truncated"] is True
+        assert len(result["stdout"]) < 600
+
+    def test_python_import_check_reports_available_module(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(project_root=str(tmp_path))
+        tool = next(
+            item for item in create_builtin_tool_pack(options)
+            if item.name == "python_import_check"
+        )
+
+        result = tool.func("json")
+        assert result["ok"] is True
+        assert result["results"][0]["module"] == "json"
+        assert result["results"][0]["available"] is True
+
+    def test_mcp_start_server_requires_declared_command(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(project_root=str(tmp_path))
+        tool = next(
+            item for item in create_builtin_tool_pack(options)
+            if item.name == "mcp_start_server"
+        )
+
+        result = tool.func("browser")
+        assert result["ok"] is False
+        assert "not declared" in result["stderr"]
+
+    def test_install_tool_respects_dependency_policy(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(
+            project_root=str(tmp_path),
+            allowed_shell_modes=["install_dependency"],
+            dependency_policy=DependencyPolicy(allow_install=False),
+        )
+        tool = next(
+            item for item in create_builtin_tool_pack(options)
+            if item.name == "shell_install_dependency"
+        )
+
+        result = tool.func("pip install requests")
+        assert result["ok"] is False
+        assert "disabled" in result["stderr"]

@@ -106,3 +106,51 @@ Used in `@global_config(tools=[...])`:
 )
 class MyAgent: ...
 ```
+
+---
+
+## DynamicRunOptions
+
+Controls dynamic flow generation behavior. Pass to `FlowForge.compile()` or `engine.run()`.
+
+```python
+from flowforge import DynamicRunOptions
+
+options = DynamicRunOptions(
+    project_root=".",
+    generated_dir="generated",
+    persist_generated=True,
+    include_builtin_tools=True,
+)
+
+engine = FlowForge.compile(MyAgent, dynamic_options=options)
+result = await engine.run(input_data, dynamic_options=options)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `True` | Enable/disable dynamic generation |
+| `project_root` | `str` | `""` | Project root path for generated files |
+| `generated_dir` | `str` | `"generated"` | Directory for generated code (must be inside project_root) |
+| `persist_generated` | `bool` | `False` | Save generated code to disk + manifest.json |
+| `auto_load_generated` | `bool` | `False` | Load previously generated flows at compile time |
+| `include_builtin_tools` | `bool` | `True` | Inject builtin tools (web_fetch_url, json_select_fields, files_*) |
+| `allow_codegen_tool_use` | `bool` | `False` | Allow generated code to use tool_use |
+| `allowed_shell_modes` | `list[str]` | `["readonly"]` | Allowed shell execution modes |
+| `shell_output_max_chars` | `int` | `4000` | Max chars for shell command output |
+| `project_context_max_chars` | `int` | `4000` | Max chars for project context in codegen prompt |
+
+---
+
+## DependencyPolicy
+
+Controls what generated code is allowed to import.
+
+```python
+from flowforge.types import DependencyPolicy
+
+policy = DependencyPolicy(
+    allowed_packages=["httpx", "pydantic"],
+    blocked_packages=["subprocess", "ctypes"],
+)
+```

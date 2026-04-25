@@ -155,3 +155,48 @@ class HTTPTool(BaseModel):
 
 
 ToolConfig = MCPServer | FunctionTool | HTTPTool
+
+
+class DependencyPolicy(BaseModel):
+    """Policy for dependencies requested by dynamically generated tools.
+
+    Dynamic generation can discover that a missing capability needs an
+    additional package.  The policy is intentionally explicit: generation can
+    describe dependencies freely, but installation is gated by this model.
+    """
+
+    allow_install: bool = False
+    allowed_managers: list[str] = Field(
+        default_factory=lambda: ["pip", "uv", "npm", "pnpm", "yarn"]
+    )
+    allowed_packages: list[str] = Field(default_factory=list)
+    denied_packages: list[str] = Field(default_factory=list)
+
+
+class DynamicRunOptions(BaseModel):
+    """Runtime options for dynamic flow/tool generation.
+
+    These options are accepted by ``FlowForge.compile()`` and ``engine.run()``.
+    ``@global_config(dynamic_flow=True)`` still declares that the agent is
+    allowed to use dynamic generation; this object controls where generated
+    code lives and what extra capabilities the dynamic generator may use.
+    """
+
+    enabled: bool = True
+    project_root: str | None = None
+    generated_dir: str = "flowforge/generated"
+    persist_generated: bool = True
+    auto_load_generated: bool = True
+    include_builtin_tools: bool = True
+    allow_tool_generation: bool = False
+    allow_codegen_tool_use: bool = False
+    allowed_shell_modes: list[
+        Literal["readonly", "workspace_write", "project_exec", "install_dependency"]
+    ] = Field(default_factory=lambda: ["readonly", "project_exec"])
+    shell_timeout_seconds: int = 60
+    shell_output_max_chars: int = 4000
+    mcp_server_commands: dict[str, list[str]] = Field(default_factory=dict)
+    mcp_start_timeout_seconds: int = 15
+    project_context_max_chars: int = 4000
+    max_requirements: int = 8
+    dependency_policy: DependencyPolicy = Field(default_factory=DependencyPolicy)

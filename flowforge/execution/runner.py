@@ -313,7 +313,7 @@ class StepRunner:
         cp = task_ctx.global_ctx.checkpoint
         if cp is not None and node_id in cp.completed_node_ids:
             cached = cp.node_outputs.get(node_id)
-            task_ctx.step_results[meta.order] = cached
+            task_ctx.step_results.set_result(meta.order, meta.func.__name__, cached)
             if tracer:
                 tracer.start_node(node_id, "step", meta.func.__name__, step_input)
                 tracer.finish_node(node_id, cached)
@@ -406,7 +406,7 @@ class StepRunner:
             if meta.output_schema is not None and result is not None:
                 result = _to_validated(meta.output_schema, result)
 
-            task_ctx.step_results[meta.order] = result
+            task_ctx.step_results.set_result(meta.order, meta.func.__name__, result)
 
             if tracer:
                 tracer.finish_node(

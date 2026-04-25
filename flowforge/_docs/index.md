@@ -83,6 +83,13 @@ result = await engine.run(Query(text="What is FlowForge?"))
     `flowforge validate`, `flowforge viz`, `flowforge run --trace` —
     inspect and execute your agents without writing any boilerplate.
 
+-   :material-creation-outline: **Dynamic Flow Generation**
+
+    ---
+
+    Agent가 Agent를 만든다. 기존 DAG에 없는 기능이 필요하면
+    LLM이 새 Flow 코드를 생성하고 실행 중에 주입한다.
+
 </div>
 
 ---
@@ -124,4 +131,5 @@ At runtime the engine traverses the DAG, threads outputs into inputs, and record
 - [I/O Data Flow →](concepts/data-flow.md)
 - [Tools & LLM Calling →](guides/tools-and-llm.md)
 - [Run Visualization Guide →](guides/visualization.md)
+- [Dynamic Flow Generation →](guides/dynamic-flow.md)
 - [CLI Reference →](api/cli.md)

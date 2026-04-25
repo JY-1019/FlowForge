@@ -45,7 +45,7 @@ from collections import OrderedDict
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from flowforge.types import LLMConfig, ToolConfig
+    from flowforge.types import LLMConfig, ToolConfig, DynamicRunOptions
     from flowforge.tools.registry import ToolRegistry
     from flowforge.doc.models import AnyDoc
     from flowforge.viz.run_trace import RunTracer, Checkpoint
@@ -98,6 +98,7 @@ class GlobalContext:
         tracer: RunTracer | None = None,
         global_tools: list[ToolConfig] | None = None,
         session_memory: SessionMemory | None = None,
+        dynamic_options: DynamicRunOptions | None = None,
     ) -> None:
         self.llm_config     = llm_config
         self.global_prompt  = global_prompt
@@ -109,12 +110,18 @@ class GlobalContext:
         # Set by the engine when planning_mode != "deterministic".
         # None means "run everything"; a set means "only run these node IDs".
         self.planned_node_ids: set[str] | None = None
+        # Ordered root-flow IDs selected by route/planner.
+        # Used only at the top-level execution boundary; nested filtering
+        # continues to use ``planned_node_ids``.
+        self.planned_root_flow_ids: list[str] | None = None
         # Raw ToolConfig list from @global_config for hierarchical merging.
         self.global_tools: list[ToolConfig] = global_tools or []
         # Checkpoint for resume support — populated by engine when resume_from is set.
         self.checkpoint: Checkpoint | None = None
         # Session memory — persists across run() calls.
         self.session_memory: SessionMemory | None = session_memory
+        # Dynamic generation options for this run.
+        self.dynamic_options: DynamicRunOptions | None = dynamic_options
 
 
 class FlowContext:
@@ -165,6 +172,45 @@ class FlowContext:
         self.flow_tools: list[ToolConfig] = flow_tools or []
 
 
+class StepResults(OrderedDict):
+    """Ordered step outputs keyed by order, with optional name aliases.
+
+    The canonical keys remain integer ``order`` values.  Name aliases are a
+    compatibility layer for generated/user code that asks for a prior result
+    by step function name, e.g. ``ctx.step_results.get("search_papers")``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._name_to_order: dict[str, int] = {}
+
+    def set_result(self, order: int, step_name: str, value: Any) -> None:
+        super().__setitem__(order, value)
+        if step_name:
+            self._name_to_order[step_name] = order
+
+    def snapshot(self) -> "StepResults":
+        copied = StepResults()
+        for key, value in self.items():
+            super(StepResults, copied).__setitem__(key, value)
+        copied._name_to_order = dict(self._name_to_order)
+        return copied
+
+    def _resolve_key(self, key: Any) -> Any:
+        if isinstance(key, str):
+            return self._name_to_order.get(key, key)
+        return key
+
+    def __getitem__(self, key: Any) -> Any:
+        return super().__getitem__(self._resolve_key(key))
+
+    def __contains__(self, key: object) -> bool:
+        return super().__contains__(self._resolve_key(key))
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        return super().get(self._resolve_key(key), default)
+
+
 class TaskContext:
     """Context for a single task invocation.
 
@@ -205,8 +251,8 @@ class TaskContext:
         self.task_prompt        = task_prompt
         self.task_input         = task_input
         self.parent_task_output = parent_task_output
-        # Keyed by step order; populated incrementally as steps finish.
-        self.step_results: OrderedDict[int, Any] = OrderedDict()
+        # Canonically keyed by step order; also supports step-name lookups.
+        self.step_results: StepResults = StepResults()
         # Tools declared on this task (not yet merged with parents).
         self.task_tools: list[ToolConfig] = task_tools or []
         # Step-level LLM conversation history within this task.
@@ -273,7 +319,7 @@ class StepContext:
         self.order         = order
 
         # Snapshot of accumulated step results at the time this step starts.
-        self.previous_results: dict[int, Any] = dict(task_ctx.step_results)
+        self.previous_results: StepResults = task_ctx.step_results.snapshot()
 
         # Branch-dispatching fields — populated by StepRunner when is_branch.
         self.condition_value: Any = None
@@ -299,6 +345,17 @@ class StepContext:
         in the prompt to guide the LLM toward a better response.
         """
         return self._pass_criteria_feedback
+
+    @property
+    def step_results(self) -> OrderedDict[int, Any]:
+        """Backward-compatible alias for prior step outputs in this task.
+
+        Some user-authored or dynamically generated step code refers to
+        ``ctx.step_results`` directly. ``TaskContext`` is still the source of
+        truth, but exposing it here keeps step handlers ergonomic and avoids
+        brittle failures in generated flows.
+        """
+        return self.task_ctx.step_results
 
     @property
     def flow_ctx(self) -> FlowContext:
@@ -381,7 +438,52 @@ class StepContext:
                     break
         return result
 
-    async def call_llm(self, prompt: str, *, stream: bool = False) -> Any:
+    async def call_tool(self, tool_name: str, **kwargs: Any) -> Any:
+        """Call a tool by name from the merged tool hierarchy.
+
+        Searches the merged tool chain (global -> flow -> task -> step) for a
+        ``FunctionTool`` matching *tool_name* and invokes its underlying
+        function with the provided keyword arguments.
+
+        Parameters
+        ----------
+        tool_name:
+            The name of the tool to call (e.g. ``"pptx_create"``).
+        **kwargs:
+            Arguments passed through to the tool function.
+
+        Returns
+        -------
+        Any
+            The tool function's return value.
+
+        Raises
+        ------
+        ValueError
+            If the tool is not found.
+        """
+        import inspect
+        from flowforge.types import FunctionTool as _FT
+
+        for tc in self.merged_tools:
+            if isinstance(tc, _FT) and tc.name == tool_name:
+                if inspect.iscoroutinefunction(tc.func):
+                    return await tc.func(**kwargs)
+                return tc.func(**kwargs)
+        available = [
+            tc.name for tc in self.merged_tools if isinstance(tc, _FT)
+        ]
+        raise ValueError(
+            f"Tool {tool_name!r} not found. Available FunctionTools: {available}"
+        )
+
+    async def call_llm(
+        self,
+        prompt: str,
+        *,
+        stream: bool = False,
+        max_tool_rounds: int | None = None,
+    ) -> Any:
         """Call the LLM with a templated user prompt.
 
         The annotation ``prompt`` (``self.step_prompt``) is used as the
@@ -459,6 +561,7 @@ class StepContext:
             tool_configs=tool_configs,
             tool_registry=self.tools,
             output_schema=self.output_schema,
+            max_tool_rounds=max_tool_rounds,
         )
 
         # 7. Record this step's interaction in the task's step history.

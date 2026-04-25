@@ -10,6 +10,21 @@ Public API
     compile → inject → execute.  Used internally by the ``ExecutionEngine``
     and also available for programmatic use.
 """
-from flowforge.dynamic.generator import DynamicFlowGenerator
+from flowforge.dynamic.generator import DynamicFlowGenerator, detect_output_artifacts
+from flowforge.dynamic.manifest import (
+    DynamicManifest,
+    GeneratedFlowRecord,
+    GeneratedToolRecord,
+    load_manifest,
+    save_manifest,
+)
 
-__all__ = ["DynamicFlowGenerator"]
+__all__ = [
+    "DynamicFlowGenerator",
+    "detect_output_artifacts",
+    "DynamicManifest",
+    "GeneratedFlowRecord",
+    "GeneratedToolRecord",
+    "load_manifest",
+    "save_manifest",
+]

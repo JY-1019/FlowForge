@@ -8,6 +8,11 @@
 from flowforge import FlowForge
 
 engine = FlowForge.compile(MyAgent)
+
+# With dynamic flow generation:
+from flowforge import DynamicRunOptions
+options = DynamicRunOptions(persist_generated=True)
+engine = FlowForge.compile(MyAgent, dynamic_options=options)
 ```
 
 Converts a `@global_config`-decorated class into a `CompiledAgent`. Raises `CompileError` if:
@@ -15,6 +20,8 @@ Converts a `@global_config`-decorated class into a `CompiledAgent`. Raises `Comp
 - The class is not decorated with `@global_config`
 - The DAG has cycles (`CycleDetectedError`)
 - Step orders conflict (`OrderConflictError`)
+
+When `dynamic_options` is provided and the agent has `dynamic_flow=True`, the internal `_dynamic_generator` meta-flow is injected into the DAG. If `auto_load_generated=True`, previously generated flows are loaded from the manifest.
 
 ---
 
@@ -69,6 +76,18 @@ Session memory that persists across `run()` calls. Stores compact summaries of p
 engine.memory.clear()  # reset memory
 ```
 
+#### `.last_dynamic_generation` — `dict[str, Any] | None`
+
+Information about the most recent dynamic flow generation, if any:
+
+```python
+result = await engine.run(input_data, planning_mode="autonomous")
+dyn = engine.last_dynamic_generation
+if dyn and dyn.get("success"):
+    print(f"Generated: {dyn['dynamic_flow']}")
+    print(dyn["generated_code"])
+```
+
 ---
 
 ### Methods
@@ -89,6 +108,7 @@ result = await engine.run(my_input)
 | `planning_mode` | `str` | `"deterministic"` | `"deterministic"`, `"autonomous"`, or `"hybrid"` |
 | `route` | `str \| list[str] \| None` | `None` | Execute only specific paths |
 | `resume_from` | `Checkpoint \| None` | `None` | Resume from a previous run's checkpoint |
+| `dynamic_options` | `DynamicRunOptions \| None` | `None` | Override dynamic generation options for this run |
 
 **Planning modes:**
 

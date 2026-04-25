@@ -41,7 +41,7 @@ def _find_agent_class(module):
     return None
 
 
-def _compile(agent_file: Path):
+def _compile(agent_file: Path, dynamic_options=None):
     """Load module, find agent class, compile DAG."""
     from flowforge import FlowForge
 
@@ -50,7 +50,7 @@ def _compile(agent_file: Path):
     if cls is None:
         console.print("[red]No @global_config class found in the file.[/red]")
         raise typer.Exit(1)
-    return FlowForge.compile(cls)
+    return FlowForge.compile(cls, dynamic_options=dynamic_options)
 
 
 @app.command()
@@ -136,6 +136,9 @@ def run(
     viz_mermaid: bool = typer.Option(False, "--viz-mermaid", help="Print executed-path Mermaid to stdout"),
     compare: bool = typer.Option(False, "--compare", help="Print full DAG + executed path side by side"),
     compare_output: Optional[Path] = typer.Option(None, "--compare-output", help="Save comparison to a .md file"),
+    planning_mode: str = typer.Option("deterministic", "--planning-mode", help="deterministic | autonomous | hybrid"),
+    allow_dynamic: bool = typer.Option(False, "--allow-dynamic", help="Allow dynamic flow/tool generation for this run"),
+    dynamic_dir: Path = typer.Option(Path("flowforge/generated"), "--dynamic-dir", help="Directory for generated flow/tool files"),
 ) -> None:
     """Run the agent with a user query.
 
@@ -148,10 +151,21 @@ def run(
     flowforge run agent.py -q "hello" --compare-output viz.md
     flowforge run agent.py -q "hello" --viz --viz-output run.svg
     """
-    engine = _compile(agent_file)
+    from flowforge import DynamicRunOptions
+
+    dynamic_options = DynamicRunOptions(
+        enabled=allow_dynamic,
+        project_root=str(agent_file.resolve().parent),
+        generated_dir=str(dynamic_dir),
+    )
+    engine = _compile(agent_file, dynamic_options=dynamic_options)
 
     async def _run():
-        result, run_trace = await engine.run_traced(query)
+        result, run_trace = await engine.run_traced(
+            query,
+            planning_mode=planning_mode,
+            dynamic_options=dynamic_options,
+        )
 
         console.print("[bold green]Result:[/bold green]")
         console.print(result)

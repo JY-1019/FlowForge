@@ -11,9 +11,10 @@
 
 ### Project State
 - Python 3.12, pip package at `/Users/jongyeon/workspace/flowforge/`
-- **122 tests pass** — always verify with `python -m pytest tests/ -x -q` after any change
+- **311 tests pass** — always verify with `python -m pytest tests/ -x -q` after any change
 - Public API: `@global_config`, `@flow`, `@task`, `@step`, `FlowForge.compile()`
 - **No `@branch` decorator** — removed. Branch dispatching is a parameter of `@step`/`@task`/`@flow`
+- **Dynamic flow generation**: `@global_config(dynamic_flow=True)` + `DynamicRunOptions`
 
 ### Key Files
 
@@ -26,7 +27,14 @@
 | `flowforge/schema/compiler.py` | Annotation → DAG nodes/edges |
 | `flowforge/schema/dag.py` | `FlowForgeDAG`, `DAGNode`, `NodeType` (GLOBAL/FLOW/TASK/STEP only) |
 | `flowforge/errors.py` | All exception types |
-| `flowforge/types.py` | `LLMConfig`, `BranchCondition`, `MCPServer`, `ToolConfig` |
+| `flowforge/types.py` | `LLMConfig`, `BranchCondition`, `MCPServer`, `ToolConfig`, `DynamicRunOptions`, `DependencyPolicy` |
+| `flowforge/dynamic/__init__.py` | Dynamic flow generation public API |
+| `flowforge/dynamic/generator.py` | `DynamicFlowGenerator` — LLM code gen, AST safety, compile, retry |
+| `flowforge/dynamic/meta_flow.py` | Built-in `_dynamic_generator` meta-flow (3-step: analyse → prepare → generate+inject) |
+| `flowforge/dynamic/manifest.py` | `DynamicManifest`, `GeneratedFlowRecord`, `GeneratedToolRecord`, file-locked persistence |
+| `flowforge/tools/builtin.py` | Builtin tool pack: shell tools + utility tools (web, json, files) |
+| `flowforge/planner/llm_planner.py` | LLM planner with requirement decomposition and gap detection |
+| `flowforge/planner/prompt_builder.py` | Planner prompt assembly (flow-level only) |
 | `tests/test_annotations.py` | Decorator unit tests |
 | `tests/test_dag_compile.py` | DAG compilation tests |
 | `tests/test_execution.py` | End-to-end execution tests |
@@ -34,6 +42,8 @@
 | `tests/test_validators.py` | Validator unit tests |
 | `tests/test_tools_and_llm.py` | Hierarchical tools & `ctx.call_llm()` tests |
 | `tests/test_route_and_loop.py` | Route filtering & task loop tests |
+| `tests/test_dynamic_flow.py` | Dynamic flow generation: AST safety, manifest, contract, partial gap, utility tools |
+| `tests/test_planner.py` | Planner prompt building and gap metadata round-trip |
 
 ### Critical: Python Scoping in Tests
 
@@ -175,6 +185,9 @@ This format is used by both the compiler and the runner — keep them in sync wh
 - **Never** reference `NodeType.BRANCH` — only GLOBAL/FLOW/TASK/STEP exist.
 - **Never** use `T = T` syntax inside a class body to reference a locally-scoped class.
 - **Never** skip `python -m pytest tests/ -x -q` after changes.
+- **Never** call `sys.modules.pop()` on dynamically generated modules — it breaks `__module__` references needed at runtime.
+- **Never** bypass AST safety validation (`_validate_generated_ast`) when executing generated code.
+- **Never** write to manifest.json without acquiring `_manifest_lock` — concurrent corruption risk.
 
 ---
 
@@ -759,21 +772,29 @@ flowforge/
 │   ├── compiler.py            # 어노테이션 → DAG + doc 생성 트리거
 │   ├── dag.py                 # DAG 노드/엣지 모델, networkx 래퍼
 │   └── resolver.py            # 의존성 해석, 위상 정렬, 순환 감지
+├── dynamic/
+│   ├── __init__.py            # Dynamic flow generation public API
+│   ├── generator.py           # DynamicFlowGenerator: LLM codegen, AST safety, compile, retry
+│   ├── meta_flow.py           # _dynamic_generator 메타플로우 (analyse→prepare→generate+inject)
+│   └── manifest.py            # DynamicManifest, file-locked persistence (flows + tools)
 ├── doc/
 │   ├── generator.py           # LLM 기반 doc 자동 생성
 │   ├── models.py              # GlobalDoc, FlowDoc, TaskDoc, StepDoc, BranchDoc
 │   └── cache.py               # doc 캐시 (prompt 변경 시만 재생성)
 ├── planner/
 │   ├── base.py                # AbstractPlanner
-│   ├── llm_planner.py         # LLM 기반 경로 선택 (doc 활용)
-│   ├── prompt_builder.py      # Schema + doc → 프롬프트 조립
+│   ├── llm_planner.py         # LLM planner: 경로 선택, requirement decomposition, gap detection
+│   ├── prompt_builder.py      # Schema + doc → 프롬프트 조립 (flow-level)
 │   └── path_selector.py       # Deterministic/Autonomous/Hybrid
 ├── execution/
-│   ├── engine.py              # DAG 실행기 (Visitor)
+│   ├── engine.py              # DAG 실행기 (Visitor) + dynamic flow orchestration
 │   ├── runner.py              # Flow/Task/Step/Branch 개별 실행기
 │   ├── parallel.py            # anyio TaskGroup 병렬 실행
-│   └── context.py             # Context 계층 구현
+│   ├── context.py             # Context 계층 구현
+│   └── llm.py                 # ctx.call_llm() 구현
 ├── tools/
+│   ├── __init__.py            # Tool registration + builtin tool injection
+│   ├── builtin.py             # Builtin tool pack: shell tools (mode-gated) + utility tools
 │   ├── registry.py            # ToolRegistry
 │   ├── mcp_adapter.py         # MCP 어댑터
 │   ├── function_tool.py       # 함수 → tool 래퍼
@@ -994,6 +1015,169 @@ flowforge validate ./my_agent.py
 
 # doc 강제 재생성
 flowforge doc-generate ./my_agent.py --force
+```
+
+---
+
+## 15. Dynamic Flow Generation
+
+> **Agent가 Agent를 만든다** — `@global_config(dynamic_flow=True)` 활성화 시, FlowForge는 실행 중 기존 DAG에 없는 기능을 LLM으로 코드 생성하여 자동 확장한다.
+
+### 15.1 아키텍처 개요
+
+```
+유저 요청
+  → AI Planner: 기존 DAG 스캔
+  → gap_detected / requirements[].covered=False
+  → Engine: _dynamic_generator 메타플로우 트리거 (requirement 당 1회)
+  → Meta-flow 3-step:
+      [1] analyse_gap     — 기존 flow로 커버 가능한지 확인
+      [2] prepare_codegen — downstream contract, 도구 목록 등 brief 조립
+      [3] generate_and_inject — LLM codegen → AST 검증 → compile → persist → inject
+  → Engine: replan → 새 flow 포함하여 실행
+```
+
+### 15.2 DynamicRunOptions
+
+`DynamicRunOptions`는 동적 생성의 모든 동작을 제어한다:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `True` | 동적 생성 on/off |
+| `project_root` | `str` | `""` | 프로젝트 루트 경로 |
+| `generated_dir` | `str` | `"generated"` | 생성 파일 저장 디렉토리 (project_root 내부) |
+| `persist_generated` | `bool` | `False` | manifest.json + 파일 영속화 |
+| `auto_load_generated` | `bool` | `False` | 컴파일 시 기존 생성 파일 자동 로드 |
+| `include_builtin_tools` | `bool` | `True` | 내장 도구(web, json, files) 활성화 |
+| `allow_codegen_tool_use` | `bool` | `False` | 생성 코드 내 tool_use 허용 |
+| `allowed_shell_modes` | `list[str]` | `["readonly"]` | 셸 도구 허용 모드 |
+| `shell_output_max_chars` | `int` | `4000` | 셸 출력 최대 문자 수 |
+| `project_context_max_chars` | `int` | `4000` | 프로젝트 컨텍스트 최대 문자 수 |
+
+### 15.3 AST 안전 검증
+
+생성된 코드는 `exec_module()` 전에 AST 스캔을 통과해야 한다:
+
+- **차단 import**: `subprocess`, `shutil`, `ctypes`, `socket`
+- **차단 호출**: `os.system`, `os.popen`, `subprocess.run`, `shutil.rmtree` 등
+- **차단 builtin**: `__import__`, `exec`, `eval`, `compile`
+
+`_validate_generated_ast(code)` → `None`이면 안전, 문자열이면 거부 사유.
+
+### 15.4 Manifest 영속화
+
+`persist_generated=True`일 때, 생성된 flow/tool은 파일로 저장되고 `manifest.json`에 등록된다:
+
+```
+generated/
+├── manifest.json          ← DynamicManifest (flows + tools 레코드)
+├── manifest.json.lock     ← fcntl.flock 동시성 보호
+├── flows/
+│   └── fetch_papers.py    ← 생성된 flow 코드
+└── tools/
+    └── custom_tool.py     ← 생성된 tool 코드
+```
+
+`GeneratedFlowRecord`의 `bridge` 필드:
+- `"contract"`: downstream flow의 `input_schema`를 JSON Schema로 추출하여 codegen 프롬프트에 주입
+- `"shared_data"`: 공유 데이터를 통한 연결
+- `""`: 독립 실행
+
+모든 manifest 읽기/쓰기는 `_manifest_lock` (fcntl.flock) 내에서 수행된다.
+
+### 15.5 Contract-First Flow Chaining
+
+downstream flow가 존재할 때:
+1. `downstream_flow_route`로 대상 flow를 지정
+2. 해당 flow의 `input_schema`를 JSON Schema로 추출
+3. codegen 프롬프트에 "이 스키마와 호환되는 output을 생성하라" 지시
+4. 컴파일 후 `check_contract_compatibility()`로 검증
+
+### 15.6 Builtin Tool Pack
+
+`include_builtin_tools=True`일 때 주입되는 도구:
+
+| Tool | Description | 제약 |
+|------|-------------|------|
+| `pip_install` | Python 패키지 설치 | `DependencyPolicy(allow_install=True)` |
+| `python_import_check` | 모듈 import 가능 여부 확인 | 항상 사용 가능 |
+| `web_fetch_url` | URL에서 텍스트 가져오기 (urllib) | 항상 사용 가능 |
+| `json_select_fields` | JSON에서 특정 필드 추출 | 항상 사용 가능 |
+| `files_read_text` | 텍스트 파일 읽기 | project_root 내부만 |
+| `files_write_text` | 텍스트 파일 쓰기 | project_root 내부만 |
+| `files_list_dir` | 디렉토리 목록 | project_root 내부만 |
+| `pdf_read_text` | PDF 텍스트 추출 | `pypdf` 필요, project_root 내부만 |
+| `pptx_create` | PPTX 프레젠테이션 생성 | `python-pptx` 필요, project_root 내부만 |
+| `csv_read` | CSV 파일 읽기 | 항상 사용 가능, project_root 내부만 |
+| `csv_write` | CSV 파일 쓰기 | 항상 사용 가능, project_root 내부만 |
+| `docx_create` | Word 문서 생성 | `python-docx` 필요, project_root 내부만 |
+| `markdown_write` | Markdown 파일 쓰기 | 항상 사용 가능, project_root 내부만 |
+| `chart_create` | 차트 이미지(PNG) 생성 | `matplotlib` 필요, project_root 내부만 |
+| `shell_*` | 셸 명령 실행 | `allowed_shell_modes` 에 따름 |
+
+파일 도구는 `_resolve_safe_path()`로 경로를 검증하여 project_root 바깥 접근을 차단한다.
+외부 패키지가 필요한 도구(`pypdf`, `python-pptx`, `python-docx`, `matplotlib`)는 패키지 미설치 시 명확한 에러 메시지를 반환하며, `pip_install` 도구로 먼저 설치하도록 안내한다.
+
+### 15.6.1 `ctx.call_tool()` — Step에서 직접 도구 호출
+
+`StepContext.call_tool(tool_name, **kwargs)`로 Step 함수 내에서 등록된 도구를 직접 호출할 수 있다:
+
+```python
+@step(order=1, prompt="PPT 생성")
+async def render(ctx):
+    result = await ctx.call_tool("pptx_create", path="report.pptx", slides=json_str)
+```
+
+`call_tool`은 `merged_tools` (global → flow → task → step) 에서 이름이 일치하는 `FunctionTool`을 찾아 실행한다.
+
+### 15.7 Planner Requirement Decomposition
+
+autonomous 모드에서 Planner는 유저 요청을 `requirements[]` 배열로 분해:
+
+```json
+{
+  "requirements": [
+    {"description": "논문 검색", "covered": false, "needs_flow": true,
+     "suggested_flow_name": "search_papers", "suggested_flow_prompt": "..."},
+    {"description": "PDF 분석", "covered": true, "covered_by": "paper_report_pipeline"}
+  ],
+  "gap_detected": true
+}
+```
+
+`covered=false`인 각 requirement마다 `_dynamic_generator`가 한 번씩 실행된다.
+
+### 15.8 사용 예시
+
+```python
+from flowforge import FlowForge, global_config, DynamicRunOptions
+from flowforge.types import LLMConfig, FunctionTool
+
+@global_config(
+    prompt="AI 리서치 에이전트",
+    llm_config=LLMConfig.for_claude(model="claude-sonnet-4-6"),
+    tools=[my_search_tool],
+    dynamic_flow=True,
+)
+class MyAgent:
+    ExistingPipeline = ExistingPipeline  # 기존 flow
+
+options = DynamicRunOptions(
+    project_root=".",
+    generated_dir="generated",
+    persist_generated=True,
+    include_builtin_tools=True,
+)
+
+engine = FlowForge.compile(MyAgent, dynamic_options=options)
+await engine.generate_docs(planning_only=True)
+
+# planner가 gap을 감지하면 자동으로 flow를 생성하고 실행
+result = await engine.run(
+    "최근 수학 논문을 검색해서 요약해줘",
+    planning_mode="autonomous",
+    dynamic_options=options,
+)
 ```
 
 ---

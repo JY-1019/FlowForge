@@ -9,6 +9,7 @@
     prompt: str,
     llm_config: LLMConfig | None = None,
     tools: list[ToolConfig] | None = None,
+    dynamic_flow: bool = False,
 )
 class MyAgent: ...
 ```
@@ -20,6 +21,7 @@ class MyAgent: ...
 | `prompt` | `str` | Yes | System-level prompt prepended to every LLM call |
 | `llm_config` | `LLMConfig` | | Default model/temperature/token settings |
 | `tools` | `list[ToolConfig]` | | Global tool registrations (MCP, function, HTTP). Available to **all** flows, tasks, and steps. |
+| `dynamic_flow` | `bool` | | Enable dynamic flow generation. Injects the internal `_dynamic_generator` meta-flow. See [Dynamic Flow Guide](../guides/dynamic-flow.md). |
 
 Attaches `GlobalMeta` to the class as `cls.__flowforge_global_meta__`.
 
