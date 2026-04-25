@@ -191,11 +191,14 @@ class QualityCheck: ...
 Tools cascade through the hierarchy. Call the LLM from any step:
 
 ```python
+from flowforge.types import AgentSkill, ClaudeSkill, FunctionTool, MCPServer
+
 @global_config(
     prompt="...",
     tools=[
         MCPServer("https://api.example.com/mcp"),
         ClaudeSkill(name="pptx"),
+        AgentSkill(path=".agents/skills/code-review"),
     ],
 )
 class Agent:
@@ -207,6 +210,7 @@ class Agent:
             async def solve(ctx):
                 result = await ctx.call_llm("Solve: {query} <calculator>")
                 deck = await ctx.call_llm("Turn the result into slides. <pptx>")
+                review = await ctx.call_llm("Review the solution. <code-review>")
                 return result
 ```
 

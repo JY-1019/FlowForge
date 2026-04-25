@@ -20,6 +20,7 @@ from flowforge.types import (
     LLMConfig,
     MCPServer,
     ClaudeSkill,
+    AgentSkill,
     FunctionTool,
     HTTPTool,
     DynamicRunOptions,
@@ -78,6 +79,12 @@ class TestRenderPrompt:
             Return the top results.
         """, inp)
         assert result == "Search for AI trends in ko.\n\nReturn the top results."
+
+    def test_tool_refs_allow_hyphenated_agent_skill_names(self):
+        prompt, tools = parse_tool_refs("Roll with <roll-dice> and <web_search>.")
+
+        assert prompt == "Roll with and ."
+        assert tools == ["roll-dice", "web_search"]
 
     def test_triple_quoted_with_tools(self):
         """Triple-quoted strings with <tool> refs and {vars} work together."""
@@ -525,6 +532,51 @@ class TestCallLLM:
             call_kwargs = mock_call.call_args.kwargs
             assert "<pptx>" not in call_kwargs["user_prompt"]
             assert call_kwargs["tool_configs"] == [pptx_skill]
+
+    @pytest.mark.asyncio
+    async def test_call_llm_passes_agent_skill_from_hyphenated_angle_brackets(self, tmp_path):
+        """AgentSkill supports the standard hyphenated <skill-name> syntax."""
+        skill_dir = tmp_path / "code-review"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: code-review
+description: Review code.
+---
+
+Review carefully.
+""",
+            encoding="utf-8",
+        )
+        agent_skill = AgentSkill(path=str(skill_dir))
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(provider="openai", model="test-model"),
+            global_prompt="system",
+            tool_registry=ToolRegistry(),
+            global_tools=[agent_skill],
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx, flow_name="f", flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx, task_name="t", task_prompt="test",
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="You review code",
+            step_input={"diff": "patch"},
+        )
+
+        with patch("flowforge.execution.llm.call_llm_api", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = "reviewed"
+
+            result = await step_ctx.call_llm("Review this {diff}. <code-review>")
+
+            assert result == "reviewed"
+            call_kwargs = mock_call.call_args.kwargs
+            assert "<code-review>" not in call_kwargs["user_prompt"]
+            assert call_kwargs["tool_configs"] == [agent_skill]
 
     @pytest.mark.asyncio
     async def test_call_llm_no_tools(self):
@@ -1104,6 +1156,73 @@ class TestClaudeSkillTool:
             cmd = call_args[0][0]
             assert "/usr/local/bin/claude" in cmd
             assert "--prompt" in cmd
+
+
+class TestAgentSkillTool:
+    """Tests for local Agent Skills loaded from SKILL.md."""
+
+    def test_agent_skill_loads_skill_md_prompt(self, tmp_path):
+        from flowforge.execution.llm import _inject_agent_skill_prompts
+
+        skill_dir = tmp_path / "roll-dice"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: roll-dice
+description: Roll dice when the user asks for random dice results.
+---
+
+Use this marker in every answer: AGENT_SKILL_MARKER.
+""",
+            encoding="utf-8",
+        )
+
+        skill = AgentSkill(path=str(skill_dir))
+        prompt = _inject_agent_skill_prompts("system", [skill])
+
+        assert skill.name == "roll-dice"
+        assert "Activated Agent Skills" in prompt
+        assert "name=\"roll-dice\"" in prompt
+        assert "Roll dice when the user asks" in prompt
+        assert "AGENT_SKILL_MARKER" in prompt
+
+    @pytest.mark.asyncio
+    async def test_agent_skill_injected_for_openai_provider(self, tmp_path):
+        from flowforge.execution.llm import call_llm_api
+
+        skill_dir = tmp_path / "proof-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: proof-skill
+description: Prove local Agent Skill prompt injection.
+---
+
+Always include PROOF_SKILL_USED.
+""",
+            encoding="utf-8",
+        )
+
+        captured: dict[str, str] = {}
+
+        async def fake_openai(system_prompt, user_prompt, config, tools, **kwargs):
+            captured["system_prompt"] = system_prompt
+            captured["user_prompt"] = user_prompt
+            captured["tools"] = str(tools)
+            return "ok"
+
+        with patch("flowforge.execution.llm._call_openai", side_effect=fake_openai):
+            result = await call_llm_api(
+                system_prompt="system",
+                user_prompt="use the skill",
+                llm_config=LLMConfig(provider="openai", model="test"),
+                tool_configs=[AgentSkill(path=str(skill_dir))],
+            )
+
+        assert result == "ok"
+        assert "PROOF_SKILL_USED" in captured["system_prompt"]
+        assert captured["user_prompt"] == "use the skill"
+        assert captured["tools"] == "[]"
 
 
 class TestCallSkillContext:

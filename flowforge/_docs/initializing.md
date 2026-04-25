@@ -197,7 +197,7 @@ class MyAgent: ...
 |-----------|------|-------------|
 | `prompt` | `str` | 전역 시스템 프롬프트 |
 | `llm_config` | `LLMConfig` | 기본 LLM 설정 (모델, temperature 등) |
-| `tools` | `list[ToolConfig]` | 전역 도구 등록 (MCP, HTTP 등) |
+| `tools` | `list[ToolConfig]` | 전역 도구 등록 (MCP, HTTP, Claude Skill, Agent Skill 등) |
 | `doc` | `GlobalDoc` (auto) | AI 생성: 전체 에이전트 역할 요약 + 전체 구조 개요 |
 
 **Design Pattern**: Singleton + Registry

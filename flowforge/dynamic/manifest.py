@@ -258,7 +258,7 @@ def _import_file(path: Path, module_name: str) -> Any:
 
 
 def _tool_name(tool: Any) -> str:
-    from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill
+    from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill, AgentSkill
 
     if isinstance(tool, MCPServer):
         return tool.name
@@ -270,6 +270,8 @@ def _tool_name(tool: Any) -> str:
         return tool.name
     if isinstance(tool, ClaudeSkill):
         return tool.name or tool.skill_id
+    if isinstance(tool, AgentSkill):
+        return tool.name
     return ""
 
 

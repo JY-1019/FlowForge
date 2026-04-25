@@ -21,10 +21,10 @@ Inside a step function, use `ctx.call_llm(prompt)` to make an AI API call. The a
 
 ## Tool Types
 
-FlowForge provides four tool configurations:
+FlowForge provides five tool configurations:
 
 ```python
-from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill
+from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill, AgentSkill
 
 # MCP Server
 mcp = MCPServer(url="https://api.example.com/mcp", name="search", description="Web search")
@@ -40,11 +40,19 @@ http = HTTPTool(url="https://api.example.com/translate", name="translate", metho
 
 # Claude Agent Skill (Anthropic provider only)
 pptx = ClaudeSkill(name="pptx")
+
+# Local Agent Skills SKILL.md folder (provider-neutral)
+review = AgentSkill(path=".agents/skills/code-review")
 ```
 
 `ClaudeSkill` is provider-native: FlowForge does not execute it locally.
 When referenced as `<pptx>` in `ctx.call_llm()`, it is passed to Anthropic as
 `container.skills` with the required code execution beta tool.
+
+`AgentSkill` is provider-neutral. When referenced as `<code-review>`,
+FlowForge reads the local `SKILL.md` and injects the activated instructions
+into the model context. This follows the Agent Skills progressive-disclosure
+shape without relying on a provider-native Skills API.
 
 ---
 
@@ -61,6 +69,7 @@ Tools on `@global_config` are available to **every** flow, task, and step in the
         MCPServer(url="https://search.example.com/mcp", name="web_search"),
         MCPServer(url="https://db.example.com/mcp", name="db_search"),
         ClaudeSkill(name="pptx"),
+        AgentSkill(path=".agents/skills/code-review"),
     ]
 )
 class MyAgent:
@@ -143,6 +152,38 @@ class MyAgent:
 Claude Skills require Anthropic's Messages API skill support. FlowForge adds
 the required `code-execution-2025-08-25` and `skills-2025-10-02` beta flags
 for calls that include `ClaudeSkill`.
+
+### Local Agent Skill Example
+
+Create `.agents/skills/code-review/SKILL.md`:
+
+```markdown
+---
+name: code-review
+description: Review code changes for correctness, regressions, and missing tests.
+---
+
+Prioritize concrete bugs, behavior changes, and test gaps. Return concise
+findings first.
+```
+
+Register and use it:
+
+```python
+@global_config(
+    prompt="Engineering assistant",
+    llm_config=LLMConfig.for_openai(),
+    tools=[AgentSkill(path=".agents/skills/code-review")],
+)
+class MyAgent:
+    @flow(name="review", prompt="Review changes")
+    class ReviewFlow:
+        @task(name="review", prompt="Review")
+        class ReviewTask:
+            @step(order=1, prompt="Review with the local Agent Skill")
+            async def review(ctx):
+                return await ctx.call_llm("Review this patch. <code-review>")
+```
 
 ---
 

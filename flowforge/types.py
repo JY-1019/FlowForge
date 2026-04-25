@@ -181,7 +181,40 @@ class ClaudeSkill(BaseModel):
             self.name = self.skill_id
 
 
-ToolConfig = MCPServer | FunctionTool | HTTPTool | ClaudeSkill
+class AgentSkill(BaseModel):
+    """Local Agent Skills ``SKILL.md`` configuration.
+
+    ``AgentSkill`` supports the open Agent Skills folder format: a directory
+    containing a top-level ``SKILL.md`` with YAML frontmatter and Markdown
+    instructions.  Referencing the skill with ``<name>`` in ``ctx.call_llm()``
+    loads that ``SKILL.md`` into the model context.
+
+    Unlike ``ClaudeSkill``, this is provider-neutral and does not use a
+    provider-native Skills API.  It works by progressive prompt disclosure, so
+    it can be used with Anthropic, OpenAI, and Google providers.
+
+    Examples
+    --------
+    ``AgentSkill(path=".agents/skills/code-review")`` loads
+    ``.agents/skills/code-review/SKILL.md`` when the prompt includes
+    ``<code-review>``.
+    """
+
+    path: str
+    name: str = ""
+    description: str = ""
+    max_chars: int = 12000
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.name:
+            return
+        from pathlib import Path
+
+        path = Path(self.path)
+        self.name = path.parent.name if path.name == "SKILL.md" else path.name
+
+
+ToolConfig = MCPServer | FunctionTool | HTTPTool | ClaudeSkill | AgentSkill
 
 
 class DependencyPolicy(BaseModel):

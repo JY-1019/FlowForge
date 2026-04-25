@@ -24,6 +24,10 @@ Claude Agent Skills declared as ``ClaudeSkill`` are provider-native Anthropic
 capabilities.  They are selected with the same ``<name>`` syntax, but are
 attached to the request via ``container.skills`` instead of being executed by
 FlowForge's local tool loop.
+
+Open Agent Skills declared as ``AgentSkill`` are local ``SKILL.md`` folders.
+They are selected with ``<skill-name>`` and injected into the prompt as
+activated Skill instructions.  This path is provider-neutral.
 """
 from __future__ import annotations
 
@@ -33,6 +37,7 @@ import os
 import re
 import textwrap
 import time
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -140,8 +145,9 @@ def parse_tool_refs(prompt: str) -> tuple[str, list[str]]:
             seen.add(name)
         return ""  # remove marker from prompt
 
-    # Match <word_chars> but not HTML-like tags (e.g. </close> or <br/>).
-    cleaned = re.sub(r"<(\w+)>", _collect, prompt)
+    # Match Agent Skill/tool identifiers, including standard hyphenated skill
+    # names, but not HTML-like closing/self-closing tags.
+    cleaned = re.sub(r"<([A-Za-z0-9_][A-Za-z0-9_-]*)>", _collect, prompt)
     # Clean up extra whitespace left by marker removal.
     cleaned = re.sub(r"  +", " ", cleaned).strip()
 
@@ -201,6 +207,136 @@ def _split_claude_skill_configs(
         else:
             regular.append(tc)
     return regular, skills
+
+
+def _split_agent_skill_configs(
+    tool_configs: list[ToolConfig] | None,
+) -> tuple[list[ToolConfig], list[Any]]:
+    """Split provider-neutral local Agent Skills from other tool configs."""
+    if not tool_configs:
+        return [], []
+
+    from flowforge.types import AgentSkill
+
+    regular: list[ToolConfig] = []
+    skills: list[AgentSkill] = []
+    for tc in tool_configs:
+        if isinstance(tc, AgentSkill):
+            skills.append(tc)
+        else:
+            regular.append(tc)
+    return regular, skills
+
+
+def _split_skill_configs(
+    tool_configs: list[ToolConfig] | None,
+) -> tuple[list[ToolConfig], list[Any], list[Any]]:
+    """Return ``(regular_tools, claude_skills, agent_skills)``."""
+    non_agent, agent_skills = _split_agent_skill_configs(tool_configs)
+    regular, claude_skills = _split_claude_skill_configs(non_agent)
+    return regular, claude_skills, agent_skills
+
+
+def _parse_skill_frontmatter(markdown: str) -> tuple[dict[str, str], str]:
+    """Parse simple YAML frontmatter from a ``SKILL.md`` string."""
+    if not markdown.startswith("---"):
+        return {}, markdown.strip()
+
+    match = re.match(
+        r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)",
+        markdown,
+        re.DOTALL,
+    )
+    if not match:
+        return {}, markdown.strip()
+
+    frontmatter_text = match.group(1)
+    body = markdown[match.end():].strip()
+    metadata: dict[str, str] = {}
+    for line in frontmatter_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key in {"name", "description", "license", "compatibility", "allowed-tools"}:
+            metadata[key] = value
+    return metadata, body
+
+
+def _agent_skill_markdown_path(skill: Any) -> Path:
+    """Return the ``SKILL.md`` path for a local Agent Skill config."""
+    raw_path = Path(getattr(skill, "path", "")).expanduser()
+    path = raw_path if raw_path.is_absolute() else Path.cwd() / raw_path
+    if path.is_dir():
+        return path / "SKILL.md"
+    if path.name == "SKILL.md":
+        return path
+    return path / "SKILL.md"
+
+
+def _load_agent_skill_prompt(skill: Any) -> str:
+    """Load one local Agent Skill and format it for prompt activation."""
+    skill_md_path = _agent_skill_markdown_path(skill)
+    if not skill_md_path.is_file():
+        raise ValueError(f"AgentSkill SKILL.md not found: {skill_md_path}")
+
+    markdown = skill_md_path.read_text(encoding="utf-8")
+    metadata, body = _parse_skill_frontmatter(markdown)
+    name = (
+        getattr(skill, "name", "")
+        or metadata.get("name")
+        or skill_md_path.parent.name
+    )
+    description = (
+        getattr(skill, "description", "")
+        or metadata.get("description")
+        or "No description provided."
+    )
+    max_chars = max(0, int(getattr(skill, "max_chars", 12000) or 0))
+    if max_chars and len(body) > max_chars:
+        body = (
+            body[:max_chars].rstrip()
+            + "\n\n[truncated by FlowForge AgentSkill.max_chars]"
+        )
+
+    supporting_dirs = [
+        child.name
+        for child in skill_md_path.parent.iterdir()
+        if child.is_dir() and child.name in {"scripts", "references", "assets"}
+    ]
+    resource_line = ""
+    if supporting_dirs:
+        joined = ", ".join(f"{name}/" for name in supporting_dirs)
+        resource_line = f"\nSupporting directories: {joined}"
+
+    return (
+        f"<agent_skill name=\"{name}\">\n"
+        f"Source: {skill_md_path}\n"
+        f"Description: {description}"
+        f"{resource_line}\n\n"
+        f"{body}\n"
+        f"</agent_skill>"
+    )
+
+
+def _inject_agent_skill_prompts(system_prompt: str, skills: list[Any]) -> str:
+    """Append activated local Agent Skill instructions to the system prompt."""
+    if not skills:
+        return system_prompt
+
+    sections = "\n\n".join(_load_agent_skill_prompt(skill) for skill in skills)
+    activation_prompt = (
+        "Activated Agent Skills\n"
+        "The user prompt selected the following local Agent Skills. Follow each "
+        "Skill's instructions when relevant. Do not claim a Skill was available "
+        "unless it appears below.\n\n"
+        f"{sections}"
+    )
+    if system_prompt:
+        return f"{system_prompt}\n\n{activation_prompt}"
+    return activation_prompt
 
 
 def _claude_skill_to_container_skill(skill: Any) -> dict[str, Any]:
@@ -299,7 +435,7 @@ async def _build_executor(
 
 def _get_tool_name(tc: Any) -> str:
     """Extract a tool name from a ``ToolConfig`` instance."""
-    from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill
+    from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill, AgentSkill
 
     if isinstance(tc, MCPServer):
         return tc.name
@@ -309,6 +445,8 @@ def _get_tool_name(tc: Any) -> str:
         return tc.name or "http_tool"
     elif isinstance(tc, ClaudeSkill):
         return tc.name or tc.skill_id
+    elif isinstance(tc, AgentSkill):
+        return tc.name
     return ""
 
 
@@ -443,6 +581,8 @@ async def call_llm_api(
         LLM configuration (provider, model, temperature, etc.).
     tool_configs:
         Tool configs resolved from ``<tool_name>`` references in the prompt.
+        ``AgentSkill`` configs are loaded into the system prompt; executable
+        tools remain available through the tool-use loop.
     tool_registry:
         Global tool registry (used to look up ToolAdapter instances).
     output_schema:
@@ -456,11 +596,15 @@ async def call_llm_api(
         The LLM response — a ``dict`` when *output_schema* is set (parsed
         from the tool call), otherwise a plain text string.
     """
-    regular_tool_configs, claude_skill_configs = _split_claude_skill_configs(
-        tool_configs
-    )
+    (
+        regular_tool_configs,
+        claude_skill_configs,
+        agent_skill_configs,
+    ) = _split_skill_configs(tool_configs)
     if claude_skill_configs and llm_config.provider != "anthropic":
         raise ValueError("ClaudeSkill tools require LLMConfig(provider='anthropic').")
+    if agent_skill_configs:
+        system_prompt = _inject_agent_skill_prompts(system_prompt, agent_skill_configs)
 
     # Build executor and fetch real MCP schemas.
     executor, mcp_schemas = await _build_executor(regular_tool_configs)
@@ -568,9 +712,12 @@ async def stream_llm_api(
         async for chunk in ctx.call_llm("prompt", stream=True):
             print(chunk, end="", flush=True)
     """
-    _, claude_skill_configs = _split_claude_skill_configs(tool_configs)
+    non_agent_tool_configs, agent_skill_configs = _split_agent_skill_configs(tool_configs)
+    _, claude_skill_configs = _split_claude_skill_configs(non_agent_tool_configs)
     if claude_skill_configs:
         raise ValueError("ClaudeSkill tools are not supported with stream=True.")
+    if agent_skill_configs:
+        system_prompt = _inject_agent_skill_prompts(system_prompt, agent_skill_configs)
 
     if llm_config.provider == "anthropic":
         async for chunk in _stream_anthropic(system_prompt, user_prompt, llm_config):

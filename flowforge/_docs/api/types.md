@@ -121,9 +121,32 @@ custom = ClaudeSkill(
 
 ---
 
+## AgentSkill
+
+Provider-neutral local Agent Skill loaded from a standard `SKILL.md` folder.
+When selected with `<skill-name>` inside `ctx.call_llm()`, FlowForge reads the
+local `SKILL.md` and appends the activated Skill instructions to the model
+context. This works with Anthropic, OpenAI, and Google providers because it is
+prompt-based rather than provider-native.
+
+```python
+from flowforge import AgentSkill
+
+code_review = AgentSkill(path=".agents/skills/code-review")
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `path` | `str` | required | Skill directory or direct `SKILL.md` path |
+| `name` | `str` | directory name | FlowForge reference name used in `<name>` prompts |
+| `description` | `str` | `""` | Optional description override |
+| `max_chars` | `int` | `12000` | Maximum instruction body characters injected into the prompt |
+
+---
+
 ## ToolConfig (Union)
 
-`ToolConfig = MCPServer | FunctionTool | HTTPTool | ClaudeSkill`
+`ToolConfig = MCPServer | FunctionTool | HTTPTool | ClaudeSkill | AgentSkill`
 
 Used in `@global_config(tools=[...])`:
 
@@ -134,6 +157,7 @@ Used in `@global_config(tools=[...])`:
         MCPServer("https://search.api.com/mcp"),
         FunctionTool(name="compute", func=my_compute_fn, description="..."),
         ClaudeSkill(name="pptx"),
+        AgentSkill(path=".agents/skills/code-review"),
     ]
 )
 class MyAgent: ...
@@ -146,6 +170,14 @@ LLM tools:
 @step(order=1, prompt="Create a presentation")
 async def make_deck(ctx):
     return await ctx.call_llm("Create a deck from this report. <pptx>")
+```
+
+Use a local Agent Skill from a step:
+
+```python
+@step(order=1, prompt="Review code")
+async def review(ctx):
+    return await ctx.call_llm("Review this change. <code-review>")
 ```
 
 ---

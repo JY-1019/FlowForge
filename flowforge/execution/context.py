@@ -418,7 +418,7 @@ class StepContext:
         is not found, it is silently skipped (the LLM may still know about
         the tool from the global registry).
         """
-        from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill
+        from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill, AgentSkill
 
         merged = self.merged_tools
         result: list[ToolConfig] = []
@@ -433,6 +433,8 @@ class StepContext:
                     tc_name = tc.name
                 elif isinstance(tc, ClaudeSkill):
                     tc_name = tc.name or tc.skill_id
+                elif isinstance(tc, AgentSkill):
+                    tc_name = tc.name
                 if tc_name == name:
                     result.append(tc)
                     break

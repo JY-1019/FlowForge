@@ -173,6 +173,7 @@ Call the LLM with a templated user prompt.
 - `{field}` in the prompt is replaced with `ctx.input.field`
 - `<tool_name>` in the prompt includes that tool in the API call
 - `<skill_name>` works the same for `ClaudeSkill`; Anthropic requests receive `container.skills`
+- `<agent-skill>` works for local `AgentSkill`; FlowForge loads the matching `SKILL.md` into the model context
 - Returns the LLM response content
 
 ```python
