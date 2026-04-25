@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -38,6 +39,8 @@ from flowforge.types import LLMConfig
 
 ROOT_DIR = Path(__file__).resolve().parent
 ARTIFACT_DIR = ROOT_DIR / "_artifacts" / "claude_skill_pptx"
+FILES_API_BETA = "files-api-2025-04-14"
+FILE_ID_RE = re.compile(r"\bfile_[A-Za-z0-9]+\b")
 
 
 class DeckRequest(BaseModel):
@@ -51,6 +54,24 @@ class DeckRequest(BaseModel):
 def _llm_config_from_env() -> LLMConfig:
     model = os.getenv("FLOWFORGE_MODEL", "claude-sonnet-4-6").strip()
     return LLMConfig.for_claude(model=model, max_tokens=8192, temperature=0.2)
+
+
+def _extract_first_file_id(text: str) -> str:
+    match = FILE_ID_RE.search(text)
+    return match.group(0) if match else ""
+
+
+async def _download_anthropic_file(file_id: str, output_path: Path) -> None:
+    """Download a code-execution output file from Anthropic Files API."""
+    import anthropic
+
+    client = anthropic.AsyncAnthropic()
+    response = await client.beta.files.download(
+        file_id,
+        betas=[FILES_API_BETA],
+        timeout=120,
+    )
+    output_path.write_bytes(await response.read())
 
 
 @global_config(
@@ -131,20 +152,28 @@ async def main() -> None:
     )
 
     result = await engine.run(request)
+    result_text = str(result)
 
     response_path = ARTIFACT_DIR / "pptx_skill_response.txt"
-    response_path.write_text(str(result), encoding="utf-8")
+    response_path.write_text(result_text, encoding="utf-8")
+
+    file_id = _extract_first_file_id(result_text)
+    pptx_path = ARTIFACT_DIR / "claude_skill_deck.pptx"
+    if not file_id:
+        raise RuntimeError(
+            "Claude did not return a file_id for the generated deck. "
+            f"See the raw response at: {response_path}"
+        )
+
+    await _download_anthropic_file(file_id, pptx_path)
 
     print("=" * 72)
     print("Claude pptx Skill FlowForge example")
     print("=" * 72)
-    print(result)
+    print(result_text)
     print()
     print(f"Response saved to: {response_path}")
-    print(
-        "If the response includes a file_id, download the generated PPTX "
-        "with Anthropic's Files API."
-    )
+    print(f"PPTX downloaded to: {pptx_path}")
 
 
 if __name__ == "__main__":
