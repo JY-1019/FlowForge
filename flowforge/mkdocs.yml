@@ -53,6 +53,7 @@ nav:
     - Branch Dispatching: guides/branching.md
     - Nested Flows & Tasks: guides/nested-flows.md
     - Tools & LLM Calling: guides/tools-and-llm.md
+    - Dynamic Flow Generation: guides/dynamic-flow.md
     - Run Visualization: guides/visualization.md
   - API Reference:
     - Decorators: api/decorators.md

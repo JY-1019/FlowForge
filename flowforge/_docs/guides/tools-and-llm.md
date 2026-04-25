@@ -54,6 +54,18 @@ FlowForge reads the local `SKILL.md` and injects the activated instructions
 into the model context. This follows the Agent Skills progressive-disclosure
 shape without relying on a provider-native Skills API.
 
+### Choosing Skill Types
+
+| Type | Provider support | Best for | What FlowForge sends |
+|------|------------------|----------|----------------------|
+| `ClaudeSkill` | Anthropic only | Hosted Skills such as `pptx`, `xlsx`, `docx`, `pdf`, or Anthropic custom `skill_id`s | `container.skills` + required beta flags |
+| `AgentSkill` | Anthropic, OpenAI, Google | Local standard Agent Skills folders authored as `SKILL.md` | Activated Skill instructions appended to the system prompt |
+
+Use `ClaudeSkill` when you need Claude's native server-side Skill runtime,
+especially for document-generation Skills that create downloadable files.
+Use `AgentSkill` when users keep Skills locally and you want the same FlowForge
+API across providers.
+
 ---
 
 ## Registering Tools
@@ -153,6 +165,12 @@ Claude Skills require Anthropic's Messages API skill support. FlowForge adds
 the required `code-execution-2025-08-25` and `skills-2025-10-02` beta flags
 for calls that include `ClaudeSkill`.
 
+!!! note "Generated files"
+    Document Skills such as `pptx` can return server-side `file_id` values
+    instead of a local file path. FlowForge includes those IDs in the text
+    response so the caller can download the artifact through Anthropic's Files
+    API. See `examples/claude_skill_pptx_agent.py` for a full download flow.
+
 ### Local Agent Skill Example
 
 Create `.agents/skills/code-review/SKILL.md`:
@@ -184,6 +202,23 @@ class MyAgent:
             async def review(ctx):
                 return await ctx.call_llm("Review this patch. <code-review>")
 ```
+
+`AgentSkill(path=...)` accepts either the Skill directory or a direct
+`SKILL.md` path. If `name` is omitted, FlowForge uses the directory name, so
+hyphenated standard names such as `<code-review>` work naturally.
+
+### Custom Claude Skill Proof Example
+
+`examples/claude_skill_custom_text_agent.py` demonstrates a tiny custom Claude
+Skill that returns a marker directly in the Python process output:
+
+```text
+- marker: FLOWFORGE_CUSTOM_SKILL_USED
+- skill_name: flowforge-proof
+```
+
+This example is useful for checking that FlowForge is passing Skills into the
+Anthropic API correctly without dealing with file downloads.
 
 ---
 
@@ -262,6 +297,7 @@ async def research(ctx):
 
 **Rules:**
 - Multiple tools: `"Use <search> and <translate> to process"`
+- Hyphenated Agent Skill names: `"Review with <code-review>"`
 - Duplicate references are deduplicated
 - Unknown tool names are silently skipped
 - The `<...>` markers are removed from the final prompt sent to the LLM

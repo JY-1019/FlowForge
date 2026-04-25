@@ -72,7 +72,7 @@ options = DynamicRunOptions(
     # ── 기본 설정 ──
     enabled=True,
     project_root=".",
-    generated_dir="generated",
+    generated_dir="flowforge/generated",
 
     # ── 캐싱 / 영속화 ──
     persist_generated=True,
@@ -80,14 +80,21 @@ options = DynamicRunOptions(
 
     # ── 도구 설정 ──
     include_builtin_tools=True,
+    allow_tool_generation=False,
     allow_codegen_tool_use=False,
 
     # ── 셸 실행 제어 ──
-    allowed_shell_modes=["readonly"],
+    allowed_shell_modes=["readonly", "project_exec"],
+    shell_timeout_seconds=60,
     shell_output_max_chars=4000,
+
+    # ── MCP 도구 생성 보조 ──
+    mcp_server_commands={},
+    mcp_start_timeout_seconds=15,
 
     # ── 코드 생성 컨텍스트 ──
     project_context_max_chars=4000,
+    max_requirements=8,
 
     # ── 의존성 정책 ──
     dependency_policy=DependencyPolicy(
@@ -105,8 +112,8 @@ options = DynamicRunOptions(
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | `bool` | `True` | 동적 생성 기능 on/off. `False`이면 gap이 감지되어도 생성하지 않음 |
-| `project_root` | `str` | `""` | 프로젝트 루트 경로. 빈 문자열이면 `cwd()` 사용. 파일 도구의 샌드박스 경계 역할 |
-| `generated_dir` | `str` | `"generated"` | 생성된 코드 저장 디렉토리. `project_root` 내부여야 함 (보안 제한) |
+| `project_root` | `str \| None` | `None` | 프로젝트 루트 경로. `None`이면 `cwd()` 사용. 파일 도구의 샌드박스 경계 역할 |
+| `generated_dir` | `str` | `"flowforge/generated"` | 생성된 코드 저장 디렉토리. `project_root` 내부여야 함 (보안 제한) |
 
 #### 캐싱 / 영속화 (Manifest)
 
@@ -136,20 +143,30 @@ options = DynamicRunOptions(
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `include_builtin_tools` | `bool` | `True` | 내장 도구 팩(web, json, files, document) 활성화. [Builtin Tools](#builtin-tools) 참조 |
+| `allow_tool_generation` | `bool` | `False` | 필요한 경우 새 `FunctionTool` 코드 생성을 허용 |
 | `allow_codegen_tool_use` | `bool` | `False` | 생성된 코드 내에서 `tool_use` (LLM이 도구를 선택하는 방식) 허용 여부 |
 
 #### 셸 실행 제어
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `allowed_shell_modes` | `list[str]` | `["readonly"]` | 셸 도구 허용 모드. `"readonly"`: 읽기 전용 명령만, `"readwrite"`: 쓰기 포함, `"none"`: 셸 비활성화 |
+| `allowed_shell_modes` | `list[str]` | `["readonly", "project_exec"]` | 셸 도구 허용 모드. `"readonly"`, `"workspace_write"`, `"project_exec"`, `"install_dependency"` |
+| `shell_timeout_seconds` | `int` | `60` | 셸 명령 실행 타임아웃 |
 | `shell_output_max_chars` | `int` | `4000` | 셸 명령 출력의 최대 문자 수. 초과 시 잘림 |
+
+#### MCP 도구 생성 보조
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mcp_server_commands` | `dict[str, list[str]]` | `{}` | 동적 생성 중 사용할 MCP server command map |
+| `mcp_start_timeout_seconds` | `int` | `15` | MCP server 시작 대기 시간 |
 
 #### 코드 생성 컨텍스트
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `project_context_max_chars` | `int` | `4000` | 코드 생성 프롬프트에 포함되는 프로젝트 컨텍스트의 최대 문자 수 |
+| `max_requirements` | `int` | `8` | planner gap requirement 최대 개수 |
 
 #### 의존성 정책 (DependencyPolicy)
 
@@ -355,6 +372,10 @@ generated/
 
 ### 캐싱 라이프사이클
 
+`manifest.json`은 생성된 flow/tool의 인덱스다. FlowForge는 이를 통해
+프로세스 재시작 후에도 이미 생성한 코드를 다시 로드하고, 같은 flow를
+불필요하게 다시 만들지 않는다.
+
 ```
                                     ┌──────────────────────┐
                                     │   manifest.json      │
@@ -388,6 +409,19 @@ result2 = await engine.run("산 높이 Top 5", planning_mode="autonomous")
 2. manifest에 같은 이름의 flow가 기록되어 있는지
 
 둘 중 하나라도 해당하면 생성을 건너뛴다.
+
+이 체크는 dynamic generator가 같은 요청을 여러 번 받거나, 이전 실행에서
+생성된 flow가 이미 `auto_load_generated=True`로 로드된 경우 중복 생성을
+막기 위한 캐시 계층이다.
+
+### 옵션별 동작
+
+| Option | Behavior |
+|--------|----------|
+| `persist_generated=True` | 생성 코드를 파일로 저장하고 `manifest.json`에 기록 |
+| `persist_generated=False` | 현재 프로세스의 DAG에만 주입. 재시작 후 사라짐 |
+| `auto_load_generated=True` | `compile()` 시 manifest에 있는 flow/tool을 자동 import 후 DAG에 포함 |
+| `auto_load_generated=False` | 이전 생성물은 파일로 남아도 자동 로드하지 않음 |
 
 ---
 

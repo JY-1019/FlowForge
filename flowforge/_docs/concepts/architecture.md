@@ -116,7 +116,12 @@ Planner reports gap_detected / uncovered requirements
   → Normal execution continues
 ```
 
-Generated code passes through AST safety validation (blocks `os.system`, `subprocess`, `eval`, etc.) before execution. When `persist_generated=True`, flows are saved to disk and registered in `manifest.json` with file-lock protection.
+Generated code passes through AST safety validation (blocks `os.system`,
+`subprocess`, `eval`, etc.) before execution. When `persist_generated=True`,
+flows are saved to disk and registered in `manifest.json` with file-lock
+protection. On later compiles, `auto_load_generated=True` loads those records
+back into the DAG; before new generation, FlowForge checks both the current DAG
+and the manifest so existing generated flows are not recreated.
 
 See [Dynamic Flow Generation Guide](../guides/dynamic-flow.md) for details.
 

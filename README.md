@@ -214,6 +214,21 @@ class Agent:
                 return result
 ```
 
+FlowForge supports five tool families:
+
+| Tool | Use for | Runtime behavior |
+|------|---------|------------------|
+| `FunctionTool` | Local Python functions | FlowForge executes it in the tool-use loop |
+| `HTTPTool` | HTTP APIs | FlowForge calls the endpoint with `httpx` |
+| `MCPServer` | Remote MCP tools | FlowForge fetches MCP schemas and calls `tools/call` |
+| `ClaudeSkill` | Anthropic native Skills such as `pptx` | Sent to Claude as `container.skills` |
+| `AgentSkill` | Local standard `SKILL.md` folders | Loaded into the model context with `<skill-name>` |
+
+Use `ClaudeSkill` when you want Anthropic's native Skills API. Use
+`AgentSkill` when a user has a local Agent Skills folder and you want the same
+`tools=[...]` + `<skill-name>` workflow across Anthropic, OpenAI, and Google
+providers.
+
 ### Parallel Execution
 
 Nodes with the same `order` value run in parallel:
@@ -261,7 +276,7 @@ result = await engine.run(
 ```
 
 Key features:
-- **Manifest caching** — generated flows are saved and reused across runs
+- **Manifest caching** — generated flows are saved, loaded on compile, and skipped when already present
 - **14+ builtin tools** — web, files, PPT, CSV, DOCX, charts, PDF, markdown
 - **Auto artifact detection** — "PPT로 만들어줘" → automatically includes `pptx_create` tool
 - **AST safety validation** — blocks dangerous imports/calls before execution
@@ -284,6 +299,17 @@ flowforge viz ./agent.py --mermaid  # Print Mermaid diagram
 flowforge run ./agent.py --query "test"  # Execute the agent
 flowforge doc-generate ./agent.py  # Auto-generate node docs via LLM
 ```
+
+## Examples
+
+| File | Shows |
+|------|-------|
+| `examples/dynamic_bare_agent.py` | Zero-flow agent that generates missing flows at runtime |
+| `examples/dynamic_paper_report_agent.py` | Static pipeline plus dynamic upstream paper search/reporting |
+| `examples/claude_skill_custom_text_agent.py` | Custom Claude Skill proof that prints a marker immediately |
+| `examples/claude_skill_pptx_agent.py` | Anthropic `pptx` Skill, file ID extraction, and Files API download |
+| `examples/playwright_agent.py` | MCP browser tool integration |
+| `examples/enterprise_agent.py` | Larger nested flow/task composition |
 
 ## How It Works
 

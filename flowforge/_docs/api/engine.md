@@ -21,7 +21,15 @@ Converts a `@global_config`-decorated class into a `CompiledAgent`. Raises `Comp
 - The DAG has cycles (`CycleDetectedError`)
 - Step orders conflict (`OrderConflictError`)
 
-When `dynamic_options` is provided and the agent has `dynamic_flow=True`, the internal `_dynamic_generator` meta-flow is injected into the DAG. If `auto_load_generated=True`, previously generated flows are loaded from the manifest.
+When `dynamic_options` is provided and the agent has `dynamic_flow=True`, the
+internal `_dynamic_generator` meta-flow is injected into the DAG. If
+`auto_load_generated=True`, previously generated flows and tools are loaded
+from `manifest.json` during compile, before planning/running.
+
+The manifest also acts as a cache: before creating a new dynamic flow,
+FlowForge checks both the in-memory DAG and the persisted manifest. If a flow
+with the target name already exists, generation is skipped and the existing
+flow is reused.
 
 ---
 
