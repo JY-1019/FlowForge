@@ -34,6 +34,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from flowforge import ClaudeSkill, FlowForge, flow, global_config, step, task
+from flowforge.errors import ExecutionError
 from flowforge.types import LLMConfig
 
 
@@ -53,12 +54,23 @@ class DeckRequest(BaseModel):
 
 def _llm_config_from_env() -> LLMConfig:
     model = os.getenv("FLOWFORGE_MODEL", "claude-sonnet-4-6").strip()
-    return LLMConfig.for_claude(model=model, max_tokens=8192, temperature=0.2)
+    max_tokens = int(os.getenv("FLOWFORGE_MAX_TOKENS", "4096"))
+    return LLMConfig.for_claude(model=model, max_tokens=max_tokens, temperature=0.2)
 
 
 def _extract_first_file_id(text: str) -> str:
     match = FILE_ID_RE.search(text)
     return match.group(0) if match else ""
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    while current is not None:
+        text = f"{type(current).__name__}: {current}"
+        if "RateLimitError" in text or "rate_limit_error" in text:
+            return True
+        current = current.__cause__
+    return False
 
 
 async def _download_anthropic_file(file_id: str, output_path: Path) -> None:
@@ -124,9 +136,9 @@ class ClaudePptxAgent:
                     - Use the Claude pptx Skill to create the deck file.
                     - Actually create and export the .pptx file; do not stop after planning.
                     - Copy the final .pptx to $OUTPUT_DIR so the API returns a file_id.
-                    - Make the deck visually polished, not a plain bullet list.
+                    - Keep this demo deck compact and quick to generate.
+                    - Use a clean professional theme with simple shapes, not external images.
                     - Include a title slide, content slide(s), and a closing slide.
-                    - Use speaker notes with concise talking points.
                     - After creating the file, summarize what was created.
                     - Include any generated filename or file_id shown in the response.
 
@@ -151,7 +163,21 @@ async def main() -> None:
         slide_count=3,
     )
 
-    result = await engine.run(request)
+    try:
+        result = await engine.run(request)
+    except ExecutionError as exc:
+        if _is_rate_limit_error(exc):
+            raise SystemExit(
+                "Anthropic rate limit hit while running the pptx Skill.\n\n"
+                "The hosted pptx Skill reads substantial Skill instructions and "
+                "PowerPoint-generation docs, so it can consume a large share of "
+                "your model's input-token-per-minute quota.\n\n"
+                "Try again after the minute window resets, or run a smaller call:\n"
+                "  FLOWFORGE_MAX_TOKENS=2048 python examples/claude_skill_pptx_agent.py\n\n"
+                "You can also switch models if your workspace has a higher limit:\n"
+                "  FLOWFORGE_MODEL=<model-id> python examples/claude_skill_pptx_agent.py"
+            ) from exc
+        raise
     result_text = str(result)
 
     response_path = ARTIFACT_DIR / "pptx_skill_response.txt"
