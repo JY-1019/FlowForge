@@ -220,6 +220,42 @@ class T:
     async def c(ctx): ...
 ```
 
+### Dynamic Flow Generation
+
+Agent가 Agent를 만든다. 기존 DAG에 없는 기능을 LLM이 자동 생성:
+
+```python
+from flowforge import global_config, FlowForge, DynamicRunOptions
+
+@global_config(
+    prompt="다목적 AI 에이전트",
+    llm_config=LLMConfig.for_claude(),
+    dynamic_flow=True,  # 동적 생성 활성화
+)
+class MyAgent:
+    pass  # flow가 없어도 OK
+
+options = DynamicRunOptions(
+    project_root=".",
+    persist_generated=True,       # 생성 코드 저장
+    auto_load_generated=True,     # 다음 실행 시 재사용
+    include_builtin_tools=True,   # 내장 도구 (PPT, CSV, 차트 등)
+)
+
+engine = FlowForge.compile(MyAgent, dynamic_options=options)
+result = await engine.run(
+    "세계 Top 5 산 높이를 표로 정리해줘",
+    planning_mode="autonomous",
+)
+```
+
+Key features:
+- **Manifest caching** — generated flows are saved and reused across runs
+- **14+ builtin tools** — web, files, PPT, CSV, DOCX, charts, PDF, markdown
+- **Auto artifact detection** — "PPT로 만들어줘" → automatically includes `pptx_create` tool
+- **AST safety validation** — blocks dangerous imports/calls before execution
+- **Contract-first chaining** — generated flow output matches downstream input schema
+
 ### Compile-Time Validation
 
 Catch errors before runtime:
@@ -268,7 +304,8 @@ flowforge/
 ├── annotations/    # Decorators, metadata, validators
 ├── schema/         # DAG compiler, registry, resolver
 ├── execution/      # Async runners, context, LLM integration
-├── tools/          # MCP, HTTP, function tool adapters
+├── dynamic/        # Dynamic flow generation, manifest, meta-flow
+├── tools/          # MCP, HTTP, function tool adapters, builtin tools
 ├── planner/        # AI-driven path selection
 ├── viz/            # Mermaid & Graphviz rendering
 └── cli/            # Typer-based CLI
@@ -306,7 +343,7 @@ fresh git clone.
 |---------|-------------|
 | [Getting Started](flowforge/_docs/getting-started.md) | Installation, hello world, first run |
 | [Concepts](flowforge/_docs/concepts/) | Architecture, annotations, data flow, DAG compilation |
-| [Guides](flowforge/_docs/guides/) | First agent, branch dispatching, nested flows, tools & LLM, visualization |
+| [Guides](flowforge/_docs/guides/) | First agent, branch dispatching, nested flows, tools & LLM, visualization, dynamic flow generation |
 | [API Reference](flowforge/_docs/api/) | Decorators, types, engine, errors, CLI |
 
 You can also browse the docs directly on GitHub: [flowforge/_docs/](https://github.com/JY-1019/FlowForge/tree/main/flowforge/_docs)
