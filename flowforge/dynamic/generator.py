@@ -1352,7 +1352,19 @@ class DynamicFlowGenerator:
             return None
         if self._dynamic_options.allow_codegen_tool_use:
             return self._tool_configs
-        return None
+
+        from flowforge.types import AgentSkill, ClaudeSkill
+
+        prompt_only: list[ToolConfig] = []
+        for tool in self._tool_configs:
+            if isinstance(tool, AgentSkill):
+                prompt_only.append(tool)
+            elif (
+                isinstance(tool, ClaudeSkill)
+                and self._llm_config.provider == "anthropic"
+            ):
+                prompt_only.append(tool)
+        return prompt_only or None
 
     def _tool_names(self) -> list[str]:
         from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill, AgentSkill

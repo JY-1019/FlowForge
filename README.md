@@ -306,7 +306,7 @@ flowforge doc-generate ./agent.py  # Auto-generate node docs via LLM
 | File | Shows |
 |------|-------|
 | `examples/dynamic_bare_agent.py` | Zero-flow agent that generates missing flows at runtime |
-| `examples/dynamic_clone_coding_agent.py` | Zero-flow clone-coding agent that uses an Agent Skill, built-in web/file tools, and npm install under `~/test` |
+| `examples/dynamic_clone_coding_agent.py` | Zero-flow clone-coding agent that uses Anthropic's `frontend-design` Skill guidance as a local Agent Skill, a clone-coding Agent Skill, built-in web/file tools, and npm install under `~/test` |
 | `examples/dynamic_paper_report_agent.py` | Static pipeline plus dynamic upstream paper search/reporting |
 | `examples/claude_skill_custom_text_agent.py` | Custom Claude Skill proof that prints a marker immediately |
 | `examples/claude_skill_pptx_agent.py` | Anthropic `pptx` Skill, file ID extraction, and Files API download |

@@ -123,6 +123,11 @@ either place, generation is skipped and the existing flow is reused.
 | `allow_codegen_tool_use` | `bool` | `False` | Allow generated code to call `ctx.call_llm()` with tool references |
 | `generated_step_timeout_seconds` | `int` | `300` | Minimum timeout applied to every generated flow step when dynamic code is compiled or loaded from the manifest |
 
+`allow_codegen_tool_use=False` keeps executable tools out of the codegen LLM
+call. Prompt-only skills such as `ClaudeSkill` and `AgentSkill` may still be
+attached so generated code can follow their instructions without running tools
+during code generation.
+
 ### Shell Settings
 
 | Field | Type | Default | Description |
@@ -437,5 +442,7 @@ when they call `json.loads()` on model output.
 - `examples/dynamic_bare_agent.py` — zero static flows and zero static tools;
   everything is generated at runtime.
 - `examples/dynamic_clone_coding_agent.py` — zero static flows, a local
-  `AgentSkill`, built-in web/file/shell tools, and an npm-based frontend
-  project generated under `~/test`.
+  `AgentSkill`, Anthropic's `frontend-design` Skill guidance loaded as a
+  local Agent Skill for codegen,
+  built-in web/file/shell tools, and an npm-based frontend project generated
+  under `~/test`.

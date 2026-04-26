@@ -249,6 +249,10 @@ result = await engine.run(input_data, dynamic_options=options)
 | `max_requirements` | `int` | `8` | Maximum number of planner gap requirements |
 | `dependency_policy` | `DependencyPolicy` | default | Package installation policy |
 
+When `allow_codegen_tool_use=False`, executable tools are not passed to the
+code generation LLM. Prompt-only skills such as `ClaudeSkill` and `AgentSkill`
+may still be attached to guide code generation.
+
 **Caching behavior:**
 
 - `persist_generated=True` + `auto_load_generated=True` (default): generated flows are reused across processes

@@ -21,7 +21,7 @@ from flowforge.dynamic import meta_flow as dynamic_meta_flow
 from flowforge.planner import ExecutionPlan
 from flowforge.schema.compiler import add_flow_to_dag
 from flowforge.schema.dag import NodeType
-from flowforge.types import AgentSkill, FunctionTool, LLMConfig
+from flowforge.types import AgentSkill, ClaudeSkill, FunctionTool, LLMConfig
 from flowforge import DynamicRunOptions
 
 
@@ -487,6 +487,46 @@ class TestDynamicGeneratorPrompting:
             )
 
             assert mock_api.call_args.kwargs["tool_configs"] == [tool]
+
+    @pytest.mark.asyncio
+    async def test_codegen_includes_prompt_only_skills_by_default(self, tmp_path):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+
+        skill_dir = tmp_path / "skills" / "clone-coding"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: clone-coding\n"
+            "description: Clone-coding guidance.\n"
+            "---\n"
+            "# Clone Coding\n",
+            encoding="utf-8",
+        )
+        executable_tool = FunctionTool(
+            func=lambda: {"ok": True},
+            name="executable_tool",
+        )
+        claude_skill = ClaudeSkill(name="frontend-design")
+        agent_skill = AgentSkill(path=str(skill_dir))
+        generator = DynamicFlowGenerator(
+            llm_config=LLMConfig.for_claude(model="test"),
+            dag=FlowForge.compile(BasicAgent).dag,
+            tool_configs=[executable_tool, claude_skill, agent_skill],
+            dynamic_options=DynamicRunOptions(allow_codegen_tool_use=False),
+        )
+
+        with patch("flowforge.execution.llm.call_llm_api", new_callable=AsyncMock) as mock_api:
+            mock_api.return_value = "from flowforge import flow, task, step"
+            await generator.generate_flow_code(
+                flow_name="clone_flow",
+                flow_prompt="clone a frontend",
+                user_query="clone naver",
+            )
+
+            assert mock_api.call_args.kwargs["tool_configs"] == [
+                claude_skill,
+                agent_skill,
+            ]
 
     @pytest.mark.asyncio
     async def test_precomputed_gap_skips_gap_analysis(self):

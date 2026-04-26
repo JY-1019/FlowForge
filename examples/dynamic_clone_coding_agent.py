@@ -5,6 +5,7 @@ create the missing clone-coding flow at runtime. The generated flow is expected
 to use:
 
 - ``<clone-coding>``: a local Agent Skill created by this example
+- ``<frontend-design>``: Anthropic's frontend-design Skill guidance for codegen
 - ``web_fetch_url``: inspect the public target page when available
 - ``files_write_text``: write the generated frontend project
 - ``shell_install_dependency``: run ``npm install`` inside the project
@@ -33,7 +34,12 @@ from urllib.parse import urlparse
 
 from flowforge import DynamicRunOptions, FlowForge, global_config
 from flowforge.schema.dag import NodeType
-from flowforge.types import AgentSkill, DependencyPolicy, FunctionTool, LLMConfig
+from flowforge.types import (
+    AgentSkill,
+    DependencyPolicy,
+    FunctionTool,
+    LLMConfig,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -118,6 +124,48 @@ frontend implementation from a public URL.
 - Build responsive desktop and mobile layouts.
 - Prefer concrete UI structure over placeholder text.
 - Keep generated code self-contained and easy to run with `npm run dev`.
+""",
+        encoding="utf-8",
+    )
+    return skill_dir
+
+
+def _write_frontend_design_skill() -> Path:
+    """Create a local frontend-design Skill based on Anthropic's public Skill."""
+    skill_dir = ARTIFACT_DIR / "skills" / "frontend-design"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: frontend-design
+description: Guide production-grade frontend code generation with distinctive visual design quality.
+---
+
+# Frontend Design
+
+Use this skill when generating frontend code, web pages, dashboards, React
+components, HTML/CSS layouts, or any UI that should feel polished and specific
+instead of generic.
+
+## Code Generation Guidance
+
+1. Start from the product context, audience, and reference URL.
+2. Pick a clear visual direction that fits the reference brand or product.
+3. Build real working code, not a static mock description.
+4. Use cohesive design tokens for color, spacing, radius, shadows, and motion.
+5. Avoid generic AI-looking defaults: predictable centered layouts, overused
+   purple gradients, and interchangeable card grids.
+6. Make the first viewport recognizable and useful.
+7. Keep responsive behavior, accessibility, and build correctness intact.
+8. Prefer concrete component structure and maintainable CSS over one-off hacks.
+
+## Clone-Coding Notes
+
+- Preserve the reference page's information architecture and visual hierarchy.
+- Use original text and placeholder content only where appropriate; do not copy
+  private assets.
+- Translate brand cues into fresh code: layout rhythm, spacing, dominant color,
+  interaction shape, and density.
+- Generated files must build successfully with the selected frontend stack.
 """,
         encoding="utf-8",
     )
@@ -631,42 +679,57 @@ h1 {{
 """
 
 
-def _build_agent(skill_dir: Path, llm_config: LLMConfig) -> type:
+def _build_agent(
+    clone_skill_dir: Path,
+    frontend_skill_dir: Path,
+    llm_config: LLMConfig,
+) -> type:
+    tools = [
+        FunctionTool(
+            func=clone_coding_scaffold,
+            name="clone_coding_scaffold",
+            description=(
+                "Create a Vite React clone-coding scaffold under the given "
+                "project_name inside ~/test. Parameters: target_url, "
+                "project_name, optional html_excerpt. After this direct "
+                "tool call, run shell_install_dependency with npm install "
+                "and shell_project_exec with npm run build."
+            ),
+        ),
+        AgentSkill(
+            path=str(frontend_skill_dir),
+            name="frontend-design",
+            description=(
+                "Anthropic frontend-design Skill guidance for distinctive, "
+                "production-grade frontend interface code generation."
+            ),
+        ),
+        AgentSkill(
+            path=str(clone_skill_dir),
+            name="clone-coding",
+            description=(
+                "Reference-based frontend clone-coding workflow that "
+                "writes a Vite app, installs npm dependencies, and builds."
+            ),
+        ),
+    ]
+
     @global_config(
         prompt=(
             "You are an empty FlowForge agent. No static flow exists for app "
             "generation. In autonomous mode, create the missing dynamic flow "
-            "for clone-coding requests. Use the local <clone-coding> Agent "
-            "Skill for guidance. Prefer the direct clone_coding_scaffold tool "
+            "for clone-coding requests. During dynamic code generation, use "
+            "the <frontend-design> Skill guidance and the local "
+            "<clone-coding> Agent Skill for reference-based clone workflow "
+            "guidance. Prefer the direct clone_coding_scaffold tool "
             "to write project files, then call shell_install_dependency for "
             "npm install and shell_project_exec for npm run build. Do not use "
             "one large runtime ctx.call_llm call for file generation, install, "
-            "or build work. Add timeout_seconds=300 on npm install/build steps. "
-            "All generated frontend project files must stay under the "
-            "configured project root, which is ~/test by default."
+            "or build work. All generated frontend project files must stay "
+            "under the configured project root, which is ~/test by default."
         ),
         llm_config=llm_config,
-        tools=[
-            FunctionTool(
-                func=clone_coding_scaffold,
-                name="clone_coding_scaffold",
-                description=(
-                    "Create a Vite React clone-coding scaffold under the given "
-                    "project_name inside ~/test. Parameters: target_url, "
-                    "project_name, optional html_excerpt. After this direct "
-                    "tool call, run shell_install_dependency with npm install "
-                    "and shell_project_exec with npm run build."
-                ),
-            ),
-            AgentSkill(
-                path=str(skill_dir),
-                name="clone-coding",
-                description=(
-                    "Reference-based frontend clone-coding workflow that "
-                    "writes a Vite app, installs npm dependencies, and builds."
-                ),
-            )
-        ],
+        tools=tools,
         dynamic_flow=True,
         include_builtin_tools=True,
     )
@@ -688,13 +751,13 @@ def _build_request(target_url: str, project_name: str) -> dict[str, Any]:
     instructions = (
         "Create a clone-coding frontend project for the public reference URL. "
         "The FlowForge agent has no static clone-coding flow, so generate the "
-        "missing flow dynamically and then execute it. Use <clone-coding> for "
-        "guidance, prefer ctx.call_tool('clone_coding_scaffold', ...) for "
-        "writing files, then call shell_install_dependency with 'npm install' "
-        "and shell_project_exec with 'npm run build'. Put timeout_seconds=300 "
-        "on npm install/build steps. Do not use a runtime ctx.call_llm call to "
-        "write files, install dependencies, or run the build when direct tools "
-        "are available."
+        "missing flow dynamically and then execute it. Use <frontend-design> "
+        "during code generation, use <clone-coding> for clone workflow "
+        "guidance, prefer ctx.call_tool('clone_coding_scaffold', ...) "
+        "for writing files, then call shell_install_dependency with "
+        "'npm install' and shell_project_exec with 'npm run build'. Do not "
+        "use a runtime ctx.call_llm call to write files, install dependencies, "
+        "or run the build when direct tools are available."
     )
     return {
         "request": instructions,
@@ -702,6 +765,7 @@ def _build_request(target_url: str, project_name: str) -> dict[str, Any]:
         "project_name": project_name,
         "project_root": str(TARGET_ROOT),
         "required_tools": [
+            "frontend-design",
             "clone_coding_scaffold",
             "web_fetch_url",
             "shell_install_dependency",
@@ -758,9 +822,11 @@ async def main() -> None:
     project_name = _safe_project_name(args.project_name or _default_project_name(target_url))
 
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
-    skill_dir = _write_clone_skill()
+    clone_skill_dir = _write_clone_skill()
+    frontend_skill_dir = _write_frontend_design_skill()
     options = _dynamic_options(project_name)
-    agent = _build_agent(skill_dir, _llm_config_from_env())
+    llm_config = _llm_config_from_env()
+    agent = _build_agent(clone_skill_dir, frontend_skill_dir, llm_config)
     engine = FlowForge.compile(agent, dynamic_options=options)
     await engine.generate_docs(planning_only=True)
 
@@ -771,7 +837,10 @@ async def main() -> None:
     print(f"  Project root: {TARGET_ROOT}")
     print(f"  Project directory: {project_name}")
     print(f"  User flows before run: {_user_flow_names(engine) or '(none)'}")
-    print("  Tools: AgentSkill <clone-coding> + builtin web/files/shell tools")
+    print(
+        "  Tools: AgentSkill <frontend-design> + AgentSkill <clone-coding> "
+        "+ builtin web/files/shell tools"
+    )
     print()
 
     result, trace = await engine.run_traced(
