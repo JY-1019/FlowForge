@@ -887,7 +887,11 @@ class DynamicFlowGenerator:
             for attr_name in dir(module):
                 obj = getattr(module, attr_name)
                 if isinstance(obj, type) and hasattr(obj, _FLOW_ATTR):
-                    return getattr(obj, _FLOW_ATTR)
+                    meta = getattr(obj, _FLOW_ATTR)
+                    from flowforge.dynamic.defaults import apply_dynamic_defaults
+
+                    apply_dynamic_defaults(meta, self._dynamic_options)
+                    return meta
 
             raise CompileError(
                 "Generated code does not contain a @flow-decorated class."
@@ -1334,6 +1338,8 @@ class DynamicFlowGenerator:
             f"- persist_generated: {self._dynamic_options.persist_generated}",
             f"- allow_tool_generation: {self._dynamic_options.allow_tool_generation}",
             f"- allow_codegen_tool_use: {self._dynamic_options.allow_codegen_tool_use}",
+            "- generated_step_timeout_seconds: "
+            f"{self._dynamic_options.generated_step_timeout_seconds}",
             f"- allowed_shell_modes: {self._dynamic_options.allowed_shell_modes}",
             f"- dependency_install_allowed: {policy.allow_install}",
             f"- allowed_dependency_managers: {policy.allowed_managers}",

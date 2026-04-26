@@ -34,6 +34,8 @@ from __future__ import annotations
 
 from flowforge.annotations.decorators import flow, task, step
 
+_DYNAMIC_META_STEP_TIMEOUT_SECONDS = 300
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -235,6 +237,7 @@ class DynamicGeneratorFlow:
                 "Analyse the user query against the existing DAG to determine "
                 "if a new flow needs to be generated."
             ),
+            timeout_seconds=_DYNAMIC_META_STEP_TIMEOUT_SECONDS,
         )
         async def analyse_gap(ctx):
             return await _analyse_gap(ctx)
@@ -246,6 +249,7 @@ class DynamicGeneratorFlow:
                 "Do not scan project files; only summarize the missing flow, "
                 "available tools, downstream contract, and dynamic policy."
             ),
+            timeout_seconds=_DYNAMIC_META_STEP_TIMEOUT_SECONDS,
         )
         async def prepare_codegen(ctx):
             return await _prepare_codegen(ctx)
@@ -256,6 +260,7 @@ class DynamicGeneratorFlow:
                 "Generate FlowForge code, compile with retry loop, persist "
                 "to manifest, and inject the new flow into the live DAG."
             ),
+            timeout_seconds=_DYNAMIC_META_STEP_TIMEOUT_SECONDS,
         )
         async def generate_and_inject(ctx):
             return await _generate_and_inject(ctx)

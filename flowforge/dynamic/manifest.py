@@ -216,6 +216,9 @@ def load_generated_assets(global_meta: Any, options: DynamicRunOptions) -> None:
             logger.warning("failed to load generated flow %s: %s", record.name, exc)
             continue
         if flow_meta.name not in existing_flow_names:
+            from flowforge.dynamic.defaults import apply_dynamic_defaults
+
+            apply_dynamic_defaults(flow_meta, options)
             global_meta.flows.append(flow_meta)
             existing_flow_names.add(flow_meta.name)
 

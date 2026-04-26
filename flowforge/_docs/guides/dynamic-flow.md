@@ -67,6 +67,7 @@ options = DynamicRunOptions(
     include_builtin_tools=True,
     allow_tool_generation=False,
     allow_codegen_tool_use=False,
+    generated_step_timeout_seconds=300,
     allowed_shell_modes=["readonly", "project_exec"],
     shell_timeout_seconds=60,
     shell_output_max_chars=4000,
@@ -120,6 +121,7 @@ either place, generation is skipped and the existing flow is reused.
 | `include_builtin_tools` | `bool` | `True` | Enable the built-in tool pack for web, JSON, files, and document artifacts |
 | `allow_tool_generation` | `bool` | `False` | Allow generation of new `FunctionTool` code when needed |
 | `allow_codegen_tool_use` | `bool` | `False` | Allow generated code to call `ctx.call_llm()` with tool references |
+| `generated_step_timeout_seconds` | `int` | `300` | Minimum timeout applied to every generated flow step when dynamic code is compiled or loaded from the manifest |
 
 ### Shell Settings
 

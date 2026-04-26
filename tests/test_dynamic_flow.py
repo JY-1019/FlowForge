@@ -159,6 +159,18 @@ class TestDynamicFlowFlag:
         meta = getattr(DynamicAgent, _GLOBAL_ATTR)
         assert meta.dynamic_flow is True
 
+    def test_internal_dynamic_generator_steps_have_generous_timeout(self):
+        engine = FlowForge.compile(DynamicAgent)
+
+        for node_id in [
+            "global._dynamic_generator._generate_and_run.analyse_gap[1]",
+            "global._dynamic_generator._generate_and_run.prepare_codegen[2]",
+            "global._dynamic_generator._generate_and_run.generate_and_inject[3]",
+        ]:
+            node = engine.dag.get_node(node_id)
+            assert node is not None
+            assert node.meta.timeout_seconds == 300
+
 
 # ---------------------------------------------------------------------------
 # Test: CompiledAgent.add_flow()
@@ -529,7 +541,10 @@ class TestDynamicRunOptionsAndManifest:
     def test_compile_autoloads_generated_flow_manifest(self, tmp_path):
         from flowforge.dynamic.manifest import persist_flow_code
 
-        options = DynamicRunOptions(project_root=str(tmp_path))
+        options = DynamicRunOptions(
+            project_root=str(tmp_path),
+            generated_step_timeout_seconds=240,
+        )
         persist_flow_code(
             flow_name="persisted_flow",
             code="""
@@ -551,7 +566,9 @@ class PersistedFlow:
             AlphaFlow = AlphaFlow
 
         engine = FlowForge.compile(_Agent, dynamic_options=options)
-        assert engine.dag.get_node("global.persisted_flow") is not None
+        node = engine.dag.get_node("global.persisted_flow.main.run[1]")
+        assert node is not None
+        assert node.meta.timeout_seconds == 240
 
     def test_compile_autoloads_generated_tool_manifest(self, tmp_path):
         from flowforge.dynamic.manifest import persist_tool_code
@@ -1497,6 +1514,38 @@ class TestCodegenToolCatalog:
         # Should contain parameter info
         assert "Parameters:" in catalog
         assert "ctx.call_tool" in catalog
+
+    def test_compile_flow_code_applies_dynamic_step_timeout_default(self, tmp_path):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+
+        options = DynamicRunOptions(
+            project_root=str(tmp_path),
+            generated_step_timeout_seconds=240,
+        )
+        gen = DynamicFlowGenerator(
+            llm_config=LLMConfig(model="test"),
+            dag=FlowForge.compile(DynamicAgent).dag,
+            dynamic_options=options,
+        )
+
+        meta = gen.compile_flow_code("""
+from flowforge import flow, task, step
+
+@flow(name="timeout_flow", prompt="timeout")
+class TimeoutFlow:
+    @task(name="main", prompt="main")
+    class Main:
+        @step(order=1, prompt="implicit timeout")
+        async def implicit(ctx):
+            return {"ok": True}
+
+        @step(order=2, prompt="explicit timeout", timeout_seconds=500)
+        async def explicit(ctx):
+            return {"ok": True}
+""")
+
+        assert meta.tasks[0].steps[0].timeout_seconds == 240
+        assert meta.tasks[0].steps[1].timeout_seconds == 500
 
     def test_tool_catalog_shows_call_example(self, tmp_path):
         from flowforge.dynamic.generator import DynamicFlowGenerator

@@ -250,6 +250,7 @@ class DynamicRunOptions(BaseModel):
     include_builtin_tools: bool = True
     allow_tool_generation: bool = False
     allow_codegen_tool_use: bool = False
+    generated_step_timeout_seconds: int = 300
     allowed_shell_modes: list[
         Literal["readonly", "workspace_write", "project_exec", "install_dependency"]
     ] = Field(default_factory=lambda: ["readonly", "project_exec"])

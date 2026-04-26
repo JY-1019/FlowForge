@@ -221,6 +221,7 @@ options = DynamicRunOptions(
     persist_generated=True,
     auto_load_generated=True,
     include_builtin_tools=True,
+    generated_step_timeout_seconds=300,
     dependency_policy=DependencyPolicy(allow_install=True),
 )
 
@@ -238,6 +239,7 @@ result = await engine.run(input_data, dynamic_options=options)
 | `include_builtin_tools` | `bool` | `True` | Enable the built-in tool pack for web, JSON, files, and documents |
 | `allow_tool_generation` | `bool` | `False` | Allow generation of new `FunctionTool` code when needed |
 | `allow_codegen_tool_use` | `bool` | `False` | Allow generated code to use LLM tool selection |
+| `generated_step_timeout_seconds` | `int` | `300` | Minimum timeout applied to steps in generated dynamic flows |
 | `allowed_shell_modes` | `list[str]` | `["readonly", "project_exec"]` | Shell modes: `"readonly"`, `"workspace_write"`, `"project_exec"`, `"install_dependency"` |
 | `shell_timeout_seconds` | `int` | `60` | Shell execution timeout |
 | `shell_output_max_chars` | `int` | `4000` | Maximum captured shell output |
