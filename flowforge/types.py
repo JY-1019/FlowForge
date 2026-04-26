@@ -216,6 +216,12 @@ class AgentSkill(BaseModel):
 
 ToolConfig = MCPServer | FunctionTool | HTTPTool | ClaudeSkill | AgentSkill
 
+# Decorator-scoped tool declarations can either provide full tool configs or
+# refer to globally registered tools by name.  Name references are especially
+# useful for dynamically generated flows, which should not have to recreate
+# Python FunctionTool objects just to document and scope intended tool usage.
+ToolReference = ToolConfig | str
+
 
 class DependencyPolicy(BaseModel):
     """Policy for dependencies requested by dynamically generated tools.

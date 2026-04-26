@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from flowforge.types import BranchCondition, LLMConfig, ToolConfig
+    from flowforge.types import BranchCondition, LLMConfig, ToolReference
 
 # Type alias for loop condition callable: (output) -> bool
 # Returns True when the output is acceptable (stop looping).
@@ -122,7 +122,7 @@ class StepMeta:
     pass_criteria_max_retries: int = 3
 
     # Tools available to this step (merged with parent task/flow/global tools).
-    tools: list[ToolConfig] = field(default_factory=list)
+    tools: list[ToolReference] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Branch dispatcher fields (optional — only set when condition is given)
@@ -225,7 +225,7 @@ class TaskMeta:
     unique: bool = False
 
     # Tools available to this task and all its child steps/tasks.
-    tools: list[ToolConfig] = field(default_factory=list)
+    tools: list[ToolReference] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Error handling
@@ -375,7 +375,7 @@ class FlowMeta:
     unique: bool = False
 
     # Tools available to this flow and all its child tasks/steps/flows.
-    tools: list[ToolConfig] = field(default_factory=list)
+    tools: list[ToolReference] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Branch dispatcher fields (optional)
@@ -428,7 +428,7 @@ class GlobalMeta:
     prompt: str
     cls: type
     llm_config: LLMConfig = field(default=None)  # type: ignore[assignment]
-    tools: list[ToolConfig] = field(default_factory=list)
+    tools: list[ToolReference] = field(default_factory=list)
     flows: list[FlowMeta] = field(default_factory=list)
 
     # When True, the agent can dynamically generate new flows at runtime

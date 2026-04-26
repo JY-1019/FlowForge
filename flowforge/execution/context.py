@@ -45,11 +45,72 @@ from collections import OrderedDict
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from flowforge.types import LLMConfig, ToolConfig, DynamicRunOptions
+    from flowforge.types import LLMConfig, ToolConfig, ToolReference, DynamicRunOptions
     from flowforge.tools.registry import ToolRegistry
     from flowforge.doc.models import AnyDoc
     from flowforge.viz.run_trace import RunTracer, Checkpoint
     from flowforge.execution.memory import SessionMemory
+
+
+def _tool_ref_name(tool: "ToolReference") -> str:
+    """Return the public name for a ToolConfig or string tool reference."""
+    if isinstance(tool, str):
+        return tool
+
+    from flowforge.types import AgentSkill, ClaudeSkill, FunctionTool, HTTPTool, MCPServer
+
+    if isinstance(tool, MCPServer):
+        return tool.name
+    if isinstance(tool, FunctionTool):
+        return tool.name or (
+            tool.func.__name__ if hasattr(tool.func, "__name__") else ""
+        )
+    if isinstance(tool, HTTPTool):
+        return tool.name
+    if isinstance(tool, ClaudeSkill):
+        return tool.name or tool.skill_id
+    if isinstance(tool, AgentSkill):
+        return tool.name
+    return ""
+
+
+def _resolve_tool_references(
+    raw_tools: list["ToolReference"],
+) -> list["ToolConfig"]:
+    """Resolve string tool references against concrete configs in scope.
+
+    Generated flows often use ``tools=["web_fetch_url"]`` because they cannot
+    reconstruct the original ``FunctionTool`` object.  The concrete config is
+    still available from the parent/global tool chain; this helper de-dupes
+    and replaces matching string references with that config.
+    """
+    concrete_by_name: dict[str, ToolConfig] = {}
+    for tool in raw_tools:
+        if isinstance(tool, str):
+            continue
+        name = _tool_ref_name(tool)
+        if name:
+            concrete_by_name[name] = tool
+
+    merged: list[ToolConfig] = []
+    seen: set[str] = set()
+    for tool in raw_tools:
+        resolved = concrete_by_name.get(tool) if isinstance(tool, str) else tool
+        if resolved is None:
+            continue
+        name = _tool_ref_name(resolved)
+        if (
+            name
+            and not isinstance(tool, str)
+            and concrete_by_name.get(name) is not resolved
+        ):
+            continue
+        key = name or f"anon:{id(resolved)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(resolved)
+    return merged
 
 
 class GlobalContext:
@@ -96,7 +157,7 @@ class GlobalContext:
         tool_registry: ToolRegistry,
         env_vars: dict[str, str] | None = None,
         tracer: RunTracer | None = None,
-        global_tools: list[ToolConfig] | None = None,
+        global_tools: list[ToolReference] | None = None,
         session_memory: SessionMemory | None = None,
         dynamic_options: DynamicRunOptions | None = None,
     ) -> None:
@@ -114,8 +175,8 @@ class GlobalContext:
         # Used only at the top-level execution boundary; nested filtering
         # continues to use ``planned_node_ids``.
         self.planned_root_flow_ids: list[str] | None = None
-        # Raw ToolConfig list from @global_config for hierarchical merging.
-        self.global_tools: list[ToolConfig] = global_tools or []
+        # Raw tool configs / string refs from @global_config for hierarchy.
+        self.global_tools: list[ToolReference] = global_tools or []
         # Checkpoint for resume support — populated by engine when resume_from is set.
         self.checkpoint: Checkpoint | None = None
         # Session memory — persists across run() calls.
@@ -159,7 +220,7 @@ class FlowContext:
         flow_prompt: str,
         flow_input: Any = None,
         parent_flow_output: Any = None,
-        flow_tools: list[ToolConfig] | None = None,
+        flow_tools: list[ToolReference] | None = None,
     ) -> None:
         self.global_ctx          = global_ctx
         self.flow_name           = flow_name
@@ -169,7 +230,7 @@ class FlowContext:
         self.flow_state: dict[str, Any] = {}
         self.flow_doc = global_ctx.all_docs.get(f"global.{flow_name}")
         # Tools declared on this flow (not yet merged with parent).
-        self.flow_tools: list[ToolConfig] = flow_tools or []
+        self.flow_tools: list[ToolReference] = flow_tools or []
 
 
 class StepResults(OrderedDict):
@@ -242,7 +303,7 @@ class TaskContext:
         task_prompt: str,
         task_input: Any = None,
         parent_task_output: Any = None,
-        task_tools: list[ToolConfig] | None = None,
+        task_tools: list[ToolReference] | None = None,
     ) -> None:
         from flowforge.execution.memory import StepHistory
 
@@ -254,7 +315,7 @@ class TaskContext:
         # Canonically keyed by step order; also supports step-name lookups.
         self.step_results: StepResults = StepResults()
         # Tools declared on this task (not yet merged with parents).
-        self.task_tools: list[ToolConfig] = task_tools or []
+        self.task_tools: list[ToolReference] = task_tools or []
         # Step-level LLM conversation history within this task.
         self.step_history = StepHistory()
 
@@ -310,7 +371,7 @@ class StepContext:
         step_prompt: str,
         step_input: Any = None,
         order: int = 0,
-        step_tools: list[ToolConfig] | None = None,
+        step_tools: list[ToolReference] | None = None,
         output_schema: type | None = None,
     ) -> None:
         self.task_ctx      = task_ctx
@@ -326,7 +387,7 @@ class StepContext:
         self.selected_branch: str = ""
 
         # Tools declared on this step (not yet merged with parents).
-        self.step_tools: list[ToolConfig] = step_tools or []
+        self.step_tools: list[ToolReference] = step_tools or []
 
         # Output schema for structured LLM output (Pydantic BaseModel or None).
         self.output_schema: type | None = output_schema
@@ -399,7 +460,7 @@ class StepContext:
         Later levels can shadow earlier ones (same tool name = override).
         """
         # Collect in order: global → flow → task → step
-        all_tools: list[ToolConfig] = []
+        all_tools: list[ToolReference] = []
 
         # Global tools from GlobalMeta (stored in tool_registry's source configs)
         # We access them via the global_ctx since they were registered at compile.
@@ -409,7 +470,7 @@ class StepContext:
         all_tools.extend(self.flow_ctx.flow_tools)
         all_tools.extend(self.task_ctx.task_tools)
         all_tools.extend(self.step_tools)
-        return all_tools
+        return _resolve_tool_references(all_tools)
 
     def _resolve_tool_configs(self, tool_names: list[str]) -> list[ToolConfig]:
         """Resolve tool names referenced via ``<tool_name>`` in a prompt.
@@ -418,23 +479,10 @@ class StepContext:
         is not found, it is silently skipped (the LLM may still know about
         the tool from the global registry).
         """
-        from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill, AgentSkill
-
-        merged = self.merged_tools
         result: list[ToolConfig] = []
         for name in tool_names:
-            for tc in merged:
-                tc_name = ""
-                if isinstance(tc, MCPServer):
-                    tc_name = tc.name
-                elif isinstance(tc, FunctionTool):
-                    tc_name = tc.name or (tc.func.__name__ if hasattr(tc.func, '__name__') else "")
-                elif isinstance(tc, HTTPTool):
-                    tc_name = tc.name
-                elif isinstance(tc, ClaudeSkill):
-                    tc_name = tc.name or tc.skill_id
-                elif isinstance(tc, AgentSkill):
-                    tc_name = tc.name
+            for tc in self.merged_tools:
+                tc_name = _tool_ref_name(tc)
                 if tc_name == name:
                     result.append(tc)
                     break

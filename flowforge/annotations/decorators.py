@@ -85,7 +85,7 @@ from flowforge.annotations.validators import (
 from flowforge.errors import CompileError
 
 if TYPE_CHECKING:
-    from flowforge.types import BranchCondition, LLMConfig, ToolConfig
+    from flowforge.types import BranchCondition, LLMConfig, ToolReference
 
 # ---------------------------------------------------------------------------
 # Internal sentinel attribute names
@@ -115,7 +115,7 @@ def step(
     timeout_seconds: int = 60,
     unique: bool = False,
     approval: bool = False,
-    tools: list[ToolConfig] | None = None,
+    tools: list[ToolReference] | None = None,
     condition: BranchCondition | None = None,
     branches: dict[str, Callable[..., Any]] | None = None,
     fallback: Callable[..., Any] | None = None,
@@ -234,7 +234,7 @@ def task(
     output_schema: type | None = None,
     order: int | None = None,
     unique: bool = False,
-    tools: list[ToolConfig] | None = None,
+    tools: list[ToolReference] | None = None,
     on_error: str = "raise",
     max_loops: int = 1,
     loop_condition: Callable[..., bool] | None = None,
@@ -399,7 +399,7 @@ def flow(
     max_retries: int = 3,
     order: int | None = None,
     unique: bool = False,
-    tools: list[ToolConfig] | None = None,
+    tools: list[ToolReference] | None = None,
     condition: BranchCondition | None = None,
     branches: dict[str, type] | None = None,
     fallback: type | None = None,
@@ -552,7 +552,7 @@ def global_config(
     *,
     prompt: str,
     llm_config: LLMConfig | None = None,
-    tools: list[ToolConfig] | None = None,
+    tools: list[ToolReference] | None = None,
     dynamic_flow: bool = False,
     include_builtin_tools: bool = False,
 ) -> Callable[[type], type]:

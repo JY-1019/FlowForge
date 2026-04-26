@@ -168,9 +168,11 @@ Prioritize concrete bugs, behavior changes, and test gaps.
 
 ---
 
-## ToolConfig (Union)
+## ToolConfig And ToolReference
 
 `ToolConfig = MCPServer | FunctionTool | HTTPTool | ClaudeSkill | AgentSkill`
+
+`ToolReference = ToolConfig | str`
 
 Used in `@global_config(tools=[...])`:
 
@@ -186,6 +188,23 @@ Used in `@global_config(tools=[...])`:
 )
 class MyAgent: ...
 ```
+
+Child `@flow`, `@task`, and `@step` annotations can reference a globally
+registered tool by string name:
+
+```python
+@flow(name="fetch", prompt="Fetch public data", tools=["web_fetch_url"])
+class FetchFlow:
+    @task(name="load", prompt="Load URL through the web tool", tools=["web_fetch_url"])
+    class Load:
+        @step(order=1, prompt="Call the web_fetch_url tool", tools=["web_fetch_url"])
+        async def fetch(ctx):
+            return await ctx.call_tool("web_fetch_url", url=ctx.input["url"])
+```
+
+String references are resolved against concrete tool configs already present
+in the global/parent tool chain. Dynamic generated flows use this form to
+declare intended tool scope without rebuilding `FunctionTool` objects.
 
 Use a Claude Skill from a step with the same angle-bracket syntax as other
 LLM tools:

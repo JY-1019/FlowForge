@@ -353,6 +353,23 @@ Option behavior:
 When `include_builtin_tools=True`, generated flows can use a built-in tool
 pack.
 
+Generated flows are instructed to scope intended tools in decorators with
+string references, for example:
+
+```python
+@flow(name="clone_site", prompt="Clone a public site", tools=["web_fetch_url"])
+class CloneSite:
+    @task(name="inspect", prompt="Inspect the target page", tools=["web_fetch_url"])
+    class Inspect:
+        @step(order=1, prompt="Fetch the page with the web tool", tools=["web_fetch_url"])
+        async def fetch(ctx):
+            return await ctx.call_tool("web_fetch_url", url=ctx.input["target_url"])
+```
+
+For LLM-mediated tool use, generated steps must include the angle-bracket
+reference in the runtime prompt, such as
+`await ctx.call_llm("Inspect this page with <web_fetch_url>")`.
+
 ### Utility Tools
 
 | Tool | Description | Gate |

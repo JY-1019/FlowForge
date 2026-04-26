@@ -302,6 +302,70 @@ class TestToolMerging:
         assert len(merged) == 1
         assert merged[0].name == "shared_tool"
 
+    def test_string_tool_refs_resolve_to_global_configs(self):
+        """Generated flows can scope tools by name without recreating configs."""
+        search_tool = FunctionTool(
+            func=lambda query: {"query": query},
+            name="web_search",
+        )
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+            global_tools=[search_tool],
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx,
+            flow_name="f",
+            flow_prompt="test",
+            flow_tools=["web_search"],
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx,
+            task_name="t",
+            task_prompt="test",
+            task_tools=["web_search"],
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="test",
+            step_tools=["web_search"],
+        )
+
+        assert step_ctx.merged_tools == [search_tool]
+        assert step_ctx._resolve_tool_configs(["web_search"]) == [search_tool]
+
+    def test_later_tool_configs_shadow_same_name_refs(self):
+        """Lower hierarchy levels override same-name configs before refs resolve."""
+        global_tool = FunctionTool(func=lambda: "global", name="shared")
+        step_tool = FunctionTool(func=lambda: "step", name="shared")
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+            global_tools=[global_tool],
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx,
+            flow_name="f",
+            flow_prompt="test",
+            flow_tools=["shared"],
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx,
+            task_name="t",
+            task_prompt="test",
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="test",
+            step_tools=[step_tool, "shared"],
+        )
+
+        assert step_ctx.merged_tools == [step_tool]
+
     def test_step_results_alias_exposes_task_results(self):
         """StepContext.step_results aliases the enclosing task accumulator."""
         global_ctx = GlobalContext(
@@ -425,6 +489,39 @@ class TestCompileWithTools:
 
         engine = FlowForge.compile(ToolAgent)
         assert engine.dag is not None
+
+    def test_compile_with_named_tool_refs_in_annotations(self):
+        """Annotation tools may reference globally registered tools by name."""
+        global_tool = FunctionTool(
+            func=lambda url: {"ok": True, "url": url},
+            name="web_fetch_url",
+        )
+
+        @global_config(prompt="agent", tools=[global_tool])
+        class NamedToolAgent:
+            @flow(
+                name="pipeline",
+                prompt="pipeline",
+                tools=["web_fetch_url"],
+            )
+            class Pipeline:
+                @task(
+                    name="process",
+                    prompt="process with scoped web tool",
+                    tools=["web_fetch_url"],
+                )
+                class Process:
+                    @step(
+                        order=1,
+                        prompt="fetch with scoped web tool",
+                        tools=["web_fetch_url"],
+                    )
+                    async def execute(ctx):
+                        return await ctx.call_tool("web_fetch_url", url="https://example.com")
+
+        engine = FlowForge.compile(NamedToolAgent)
+        flow_meta = engine.dag.get_node("global.pipeline").meta
+        assert flow_meta.tools == ["web_fetch_url"]
 
     @pytest.mark.asyncio
     async def test_run_with_tools_passed_to_context(self):

@@ -17,6 +17,23 @@ FlowForge supports **hierarchical tool registration**: tools declared at a highe
 
 Inside a step function, use `ctx.call_llm(prompt)` to make an AI API call. The annotation's `prompt` becomes the **system prompt**, and the argument to `call_llm()` becomes the **user prompt**.
 
+Child annotations may also reference globally registered tools by name:
+
+```python
+@global_config(tools=[FunctionTool(func=fetch_url, name="web_fetch_url")])
+class Agent:
+    @flow(name="clone", prompt="Clone a public page", tools=["web_fetch_url"])
+    class Clone:
+        @task(name="inspect", prompt="Inspect the target page", tools=["web_fetch_url"])
+        class Inspect:
+            @step(order=1, prompt="Fetch the page with the web tool", tools=["web_fetch_url"])
+            async def fetch(ctx):
+                return await ctx.call_tool("web_fetch_url", url=ctx.input["url"])
+```
+
+This name-reference form is intended for generated flows and scoped prompts;
+the actual tool config still lives at `@global_config`.
+
 ---
 
 ## Tool Types
@@ -106,6 +123,9 @@ class DataPipeline:
             # ctx.merged_tools includes "validator" from the parent flow
             ...
 ```
+
+If `validator` was already registered globally, the flow can scope it by name
+instead: `tools=["validator"]`.
 
 ### Task Level
 

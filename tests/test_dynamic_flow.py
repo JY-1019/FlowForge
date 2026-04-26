@@ -457,6 +457,7 @@ class TestDynamicGeneratorPrompting:
             assert "Available tools:" in user_prompt
             assert "fetch_hf_trending_papers" in user_prompt
             assert "Fetch top trending papers" in user_prompt
+            assert 'Decorator scope: tools=["fetch_hf_trending_papers"]' in user_prompt
             assert "Code generation context prepared" in user_prompt
             assert "pyproject uses pytest" in user_prompt
             assert call_kwargs["tool_configs"] is None
@@ -527,6 +528,98 @@ class TestDynamicGeneratorPrompting:
                 claude_skill,
                 agent_skill,
             ]
+
+    @pytest.mark.asyncio
+    async def test_codegen_system_requires_prompts_and_tool_refs(self):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+
+        tool = FunctionTool(
+            func=lambda url: {"ok": True, "url": url},
+            name="web_fetch_url",
+            description="Fetch a public web page.",
+        )
+        generator = DynamicFlowGenerator(
+            llm_config=LLMConfig(model="test"),
+            dag=FlowForge.compile(BasicAgent).dag,
+            tool_configs=[tool],
+        )
+
+        with patch("flowforge.execution.llm.call_llm_api", new_callable=AsyncMock) as mock_api:
+            mock_api.return_value = "from flowforge import flow, task, step"
+            await generator.generate_flow_code(
+                flow_name="clone_site",
+                flow_prompt="clone a public site",
+                user_query={
+                    "target_url": "https://example.com",
+                    "required_tools": ["web_fetch_url"],
+                },
+            )
+
+            system_prompt = mock_api.call_args.kwargs["system_prompt"]
+            context_prompt = generator.build_code_generation_context(
+                flow_name="clone_site",
+                flow_prompt="clone a public site",
+                user_query="clone https://example.com",
+            )
+
+        assert "Every generated `@flow`, `@task`, and `@step` MUST have" in system_prompt
+        assert 'tools=["web_fetch_url"]' in system_prompt
+        assert "<tool_name>" in system_prompt
+        assert "Give every @task and @step a specific prompt" in context_prompt
+        assert 'tools=["tool_name"]' in context_prompt
+
+    @pytest.mark.asyncio
+    async def test_generate_and_compile_retries_missing_required_tool_usage(self):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+
+        tool = FunctionTool(
+            func=lambda url: {"ok": True, "url": url},
+            name="web_fetch_url",
+            description="Fetch a public web page.",
+        )
+        generator = DynamicFlowGenerator(
+            llm_config=LLMConfig(model="test"),
+            dag=FlowForge.compile(BasicAgent).dag,
+            tool_configs=[tool],
+        )
+
+        bad_code = '''
+from flowforge import flow, task, step
+
+@flow(name="fetch_page", prompt="Fetch a public page")
+class FetchPageFlow:
+    @task(name="fetch", prompt="Fetch the page")
+    class FetchTask:
+        @step(order=1, prompt="Return a placeholder")
+        async def fetch(ctx):
+            return {"ok": True}
+'''
+        fixed_code = '''
+from flowforge import flow, task, step
+
+@flow(name="fetch_page", prompt="Fetch a public page", tools=["web_fetch_url"])
+class FetchPageFlow:
+    @task(name="fetch", prompt="Fetch the page with the web tool", tools=["web_fetch_url"])
+    class FetchTask:
+        @step(order=1, prompt="Call web_fetch_url for the target URL", tools=["web_fetch_url"])
+        async def fetch(ctx):
+            target_url = ctx.input.get("target_url", "https://example.com")
+            return await ctx.call_tool("web_fetch_url", url=target_url)
+'''
+        with patch("flowforge.execution.llm.call_llm_api", new_callable=AsyncMock) as mock_api:
+            mock_api.side_effect = [bad_code, fixed_code]
+            meta, code = await generator.generate_and_compile(
+                flow_name="fetch_page",
+                flow_prompt="Fetch a public page",
+                user_query={
+                    "target_url": "https://example.com",
+                    "required_tools": ["web_fetch_url"],
+                },
+            )
+
+        assert meta.name == "fetch_page"
+        assert code == fixed_code.strip()
+        assert mock_api.await_count == 2
 
     @pytest.mark.asyncio
     async def test_precomputed_gap_skips_gap_analysis(self):

@@ -202,17 +202,23 @@ from flowforge.types import AgentSkill, ClaudeSkill, FunctionTool, MCPServer
     ],
 )
 class Agent:
-    @flow(name="f", prompt="...", tools=[FunctionTool(func=calculate, name="calculator")])
+    @flow(name="f", prompt="...", tools=["calculator"])
     class F:
         @task(name="t", prompt="...")
         class T:
-            @step(order=1, prompt="Use {query} to find answers")
+            @step(order=1, prompt="Use the calculator tool to solve the query",
+                  tools=["calculator", "pptx", "code-review"])
             async def solve(ctx):
                 result = await ctx.call_llm("Solve: {query} <calculator>")
                 deck = await ctx.call_llm("Turn the result into slides. <pptx>")
                 review = await ctx.call_llm("Review the solution. <code-review>")
                 return result
 ```
+
+Child annotations can list string tool references such as
+`tools=["calculator"]`; FlowForge resolves them against globally registered
+tool configs at runtime. This is useful for dynamic generated flows because
+they can declare intended tools without recreating `FunctionTool` objects.
 
 FlowForge supports five tool families:
 

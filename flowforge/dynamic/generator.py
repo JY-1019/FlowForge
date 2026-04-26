@@ -338,6 +338,26 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
     8. flow name must be: {flow_name}
     9. Include input handling via `ctx.input` (dict or Pydantic model)
 
+    PROMPT AND TOOL SCOPING:
+    10. Every generated `@flow`, `@task`, and `@step` MUST have a concrete,
+        non-placeholder `prompt`. Do not use vague prompts like "main",
+        "process", "description", "step", or "do work".
+    11. The annotation prompt is the system/developer instruction for that
+        node. Put stable role, constraints, and expected behaviour there.
+        Put request-specific runtime details inside the function body as the
+        user prompt passed to `ctx.call_llm(...)`.
+    12. When a flow/task/step is expected to use tools, declare the intended
+        tool names in the decorator with string references, e.g.
+        `@task(name="fetch", prompt="Fetch the target page with the web tool",
+        tools=["web_fetch_url"])`. Generated code SHOULD NOT recreate
+        FunctionTool/HTTPTool/MCP objects; use string names for scoped refs.
+    13. If a step uses a tool deterministically, declare it on the `@step`
+        and call it directly with `await ctx.call_tool("tool_name", ...)`.
+        If a step lets the LLM use a tool or Agent Skill, declare it on the
+        `@step` and include `<tool_name>` in the `ctx.call_llm(...)` prompt.
+        A tool listed only in "Available tools" but never referenced in
+        generated code is not considered used.
+
     TOOL USAGE — TWO METHODS:
     There are two ways to use available tools in generated code:
 
@@ -346,7 +366,8 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
       which tool to call with which parameters. The tool is called directly
       as a Python function — no LLM reasoning overhead.
       ```python
-      @step(order=1, prompt="fetch data from URL")
+      @step(order=1, prompt="Fetch the URL through the sandboxed web tool",
+            tools=["web_fetch_url"])
       async def fetch(ctx):
           result = await ctx.call_tool("web_fetch_url", url="https://...", timeout_seconds=30)
           return result
@@ -357,7 +378,8 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
       which parameters to pass, or to interpret the results. The `<tool_name>`
       syntax makes the tool available to the LLM as a callable tool.
       ```python
-      @step(order=1, prompt="search and analyse papers")
+      @step(order=1, prompt="Search and analyse papers with the web tool",
+            tools=["web_fetch_url"])
       async def search(ctx):
           return await ctx.call_llm(
               "Search for papers about {{query}} using <web_fetch_url> "
@@ -366,42 +388,44 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
       ```
 
     TOOL SELECTION STRATEGY:
-    10. FIRST check the "Available tools" list in the user message. If a
+    14. FIRST check the "Available tools" list in the user message. If a
         builtin tool already covers the capability you need (e.g. web_fetch_url
         for HTTP GET, pptx_create for PowerPoint, csv_write for CSV, etc.),
         USE IT via ctx.call_tool() or <tool_name>. Do NOT re-implement what
         a tool already does.
-    11. If NO existing tool covers the need AND the dynamic policy allows
+    15. If NO existing tool covers the need AND the dynamic policy allows
         tool generation, write lightweight Python code in the step body.
         Prefer stdlib modules. Do NOT import blocked modules (subprocess,
         shutil, ctypes, socket).
-    12. For file I/O, ALWAYS prefer builtin tools (files_read_text,
+    16. For file I/O, ALWAYS prefer builtin tools (files_read_text,
         files_write_text, csv_read, csv_write, pptx_create, docx_create,
         markdown_write, chart_create, pdf_read_text) over raw `open()` calls.
         These tools enforce project_root sandboxing.
-    13. For web requests, ALWAYS use the `web_fetch_url` tool instead of
+    17. For web requests, ALWAYS use the `web_fetch_url` tool instead of
         writing urllib/httpx/requests code directly.
-    14. For Python package installation, use `pip_install` when the dependency
+    18. For Python package installation, use `pip_install` when the dependency
         policy allows it. For project package-manager installs such as
         `npm install`, use `shell_install_dependency` when that shell mode is
         available.
-    15. Use builtin runtime tools (python_import_check, shell_*) only when the
+    19. Use builtin runtime tools (python_import_check, shell_*) only when the
         generated flow's actual job needs them. Do NOT add project inspection
         or test-running steps unless explicitly requested.
-    16. If package-manager commands, build commands, browser automation, or
+    20. If package-manager commands, build commands, browser automation, or
         broad file generation may take longer than the default step timeout,
         declare an explicit timeout on that step, e.g.
-        `@step(order=2, timeout_seconds=300, prompt="install dependencies")`.
-    17. Do NOT wrap deterministic file writes, package installation, or build
+        `@step(order=2, timeout_seconds=300,
+        prompt="Install npm dependencies through the shell install tool",
+        tools=["shell_install_dependency"])`.
+    21. Do NOT wrap deterministic file writes, package installation, or build
         commands in one large `ctx.call_llm()` call when direct tools are
         available. Split them into direct `ctx.call_tool()` steps.
-    18. If a tool returns structured JSON needed by downstream flows, instruct
+    22. If a tool returns structured JSON needed by downstream flows, instruct
         the model to return ONLY that JSON payload without extra commentary
-    19. When you need earlier step outputs, use `ctx.previous_results` or
+    23. When you need earlier step outputs, use `ctx.previous_results` or
         `ctx.step_results` instead of inventing new context fields
-    20. Generate ONLY the missing flow named {flow_name}; do NOT recreate
+    24. Generate ONLY the missing flow named {flow_name}; do NOT recreate
         downstream capabilities that other existing flows already cover
-    21. Do NOT reference existing flows via `<flow_name>` tool syntax.
+    25. Do NOT reference existing flows via `<flow_name>` tool syntax.
         Flows are composed by the planner/engine, not called as tools.
 
     OUTPUT CONTRACT (hard requirement):
@@ -427,18 +451,23 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
     from flowforge import flow, task, step
     import json
 
-    @flow(name="{flow_name}", prompt="{flow_prompt}")
+    @flow(name="{flow_name}", prompt="{flow_prompt}", tools=["web_fetch_url"])
     class {class_name}:
-        @task(name="main_task", prompt="description")
+        @task(name="main_task",
+              prompt="Fetch source data with web_fetch_url, then analyse it",
+              tools=["web_fetch_url"])
         class MainTask:
-            @step(order=1, prompt="fetch data")
+            @step(order=1,
+                  prompt="Fetch JSON data through the sandboxed web tool",
+                  tools=["web_fetch_url"])
             async def fetch_data(ctx):
                 result = await ctx.call_tool("web_fetch_url", url="https://api.example.com/data")
                 if not result.get("ok"):
                     return {{"error": result.get("error", "fetch failed")}}
                 return json.loads(result["body"])
 
-            @step(order=2, prompt="analyse and summarise the data")
+            @step(order=2,
+                  prompt="Analyse fetched data and return a concise summary")
             async def analyse(ctx):
                 data = ctx.previous_results.get(1)
                 return await ctx.call_llm(
@@ -452,9 +481,9 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
 
     @flow(name="sub_process", prompt="a sub-process")
     class SubProcessFlow:
-        @task(name="sub_task", prompt="sub task")
+        @task(name="sub_task", prompt="Perform the sub-process work")
         class SubTask:
-            @step(order=1, prompt="sub step")
+            @step(order=1, prompt="Complete the sub-process step")
             async def sub_step(ctx):
                 return await ctx.call_llm("do sub work on {{field}}")
 
@@ -464,9 +493,9 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
         SubProcessFlow = SubProcessFlow
 
         # Direct task — sibling to the child flow
-        @task(name="finalize", prompt="finalize after sub-process")
+        @task(name="finalize", prompt="Finalize the result after sub-process output")
         class FinalizeTask:
-            @step(order=1, prompt="wrap up")
+            @step(order=1, prompt="Summarize sub-process output into the final response")
             async def wrap_up(ctx):
                 return await ctx.call_llm("summarize results from {{field}}")
     ```
@@ -951,6 +980,11 @@ class DynamicFlowGenerator:
                 )
                 if compatibility_error is not None:
                     raise CompileError(compatibility_error)
+                tool_usage_error = self.check_required_tool_usage(
+                    code, user_query,
+                )
+                if tool_usage_error is not None:
+                    raise CompileError(tool_usage_error)
                 logger.info(
                     "flow '%s' compiled successfully on attempt %d",
                     flow_name, attempt + 1,
@@ -1149,6 +1183,8 @@ class DynamicFlowGenerator:
                 f"Fix this FlowForge code. The user wanted: {user_query}"
                 f"{contract_hint}"
                 f"{self._format_project_context(project_context)}"
+                f"\n\nAvailable tools:\n{self._format_tool_catalog()}"
+                f"\n\nDynamic policy:\n{self._format_dynamic_policy()}"
             ),
             llm_config=self._llm_config,
             tool_configs=self._codegen_tool_configs(),
@@ -1193,6 +1229,52 @@ class DynamicFlowGenerator:
                   "top-level keys match the downstream input contract exactly."
             )
         return None
+
+    def check_required_tool_usage(
+        self,
+        code: str,
+        user_query: str | Any,
+    ) -> str | None:
+        """Validate required tool declarations and runtime usage.
+
+        Dynamic examples can pass ``{"required_tools": [...]}`` in the user
+        query.  When present, generated code must record those tools in
+        decorator ``tools=[...]`` scopes.  Executable tools must also be used
+        at runtime via ``ctx.call_tool("name", ...)`` or LLM-mediated
+        ``ctx.call_llm("... <name> ...")``.
+        """
+        required = _extract_required_tools(user_query)
+        if not required:
+            return None
+
+        scoped, runtime_used = _collect_generated_tool_usage(code)
+        missing_scope = [name for name in required if name not in scoped]
+
+        prompt_only = self._prompt_only_tool_names()
+        runtime_required = [name for name in required if name not in prompt_only]
+        missing_runtime = [
+            name for name in runtime_required
+            if name not in runtime_used
+        ]
+
+        messages: list[str] = []
+        if missing_scope:
+            messages.append(
+                "Required tools are missing from decorator tools=[...] scopes: "
+                + ", ".join(missing_scope)
+            )
+        if missing_runtime:
+            messages.append(
+                "Required executable tools are not invoked at runtime via "
+                "ctx.call_tool(...) or ctx.call_llm(... <tool> ...): "
+                + ", ".join(missing_runtime)
+            )
+        if not messages:
+            return None
+        return (
+            "Generated flow did not satisfy required tool usage. "
+            + " ".join(messages)
+        )
 
     def _format_tool_catalog(self) -> str:
         """Return a detailed list of available tools with parameters.
@@ -1242,6 +1324,7 @@ class DynamicFlowGenerator:
                 continue
             desc = description or "No description provided."
             entry = f"- {name} ({kind}): {desc}"
+            entry += f"\n    Decorator scope: tools=[\"{name}\"]"
             if params_info:
                 entry += f"\n    Parameters: {params_info}"
                 entry += f"\n    Call: await ctx.call_tool(\"{name}\", {_format_call_example(tool.func)})"
@@ -1294,9 +1377,11 @@ class DynamicFlowGenerator:
             f"- Missing flow purpose: {flow_prompt}",
             f"- User request/scope: {user_query}",
             "- Prefer one @flow with one @task and 1-3 @step functions.",
+            "- Give every @task and @step a specific prompt; avoid placeholder prompts.",
+            "- Put intended tool names in decorator tools=[\"tool_name\"] as string references.",
             "- Use Python code for small deterministic shaping only.",
             "- Use ctx.call_tool(name, **kwargs) for DIRECT tool calls (deterministic).",
-            "- Use ctx.call_llm('instruction <tool_name>') when LLM reasoning is needed.",
+            "- Use ctx.call_llm('instruction <tool_name>') when LLM reasoning is needed; the angle-bracket name is required for LLM-mediated tools.",
             "- ALWAYS prefer existing builtin tools over writing custom code.",
             "- If a domain tool exists for external data, prefer it over raw HTTP code.",
         ]
@@ -1386,6 +1471,21 @@ class DynamicFlowGenerator:
                 name = tool.name
             if name:
                 names.append(name)
+        return names
+
+    def _prompt_only_tool_names(self) -> set[str]:
+        from flowforge.types import AgentSkill, ClaudeSkill
+
+        names: set[str] = set()
+        for tool in self._tool_configs:
+            if isinstance(tool, ClaudeSkill):
+                name = tool.name or tool.skill_id
+            elif isinstance(tool, AgentSkill):
+                name = tool.name
+            else:
+                continue
+            if name:
+                names.add(name)
         return names
 
     def _format_project_context(self, project_context: str | None) -> str:
@@ -1563,6 +1663,103 @@ def _format_artifact_instructions(artifacts: list[dict[str, str]]) -> str:
         "'bullets' keys.",
     ])
     return "\n".join(lines)
+
+
+def _extract_required_tools(user_query: str | Any) -> list[str]:
+    """Extract ordered unique ``required_tools`` names from a user query."""
+    raw: Any = None
+    if isinstance(user_query, dict):
+        raw = user_query.get("required_tools")
+    elif hasattr(user_query, "model_dump"):
+        try:
+            dumped = user_query.model_dump()
+            raw = dumped.get("required_tools") if isinstance(dumped, dict) else None
+        except Exception:
+            raw = None
+
+    if not isinstance(raw, list):
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _collect_generated_tool_usage(code: str) -> tuple[set[str], set[str]]:
+    """Return (decorator-scoped names, runtime-used names) from source code."""
+    import re
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return set(), set()
+
+    scoped: set[str] = set()
+    runtime_used: set[str] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                if _call_name(decorator.func) not in {"flow", "task", "step"}:
+                    continue
+                for keyword in decorator.keywords:
+                    if keyword.arg == "tools":
+                        scoped.update(_literal_string_items(keyword.value))
+        elif isinstance(node, ast.Call):
+            call_name = _call_name(node.func)
+            if call_name == "call_tool" and node.args:
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    runtime_used.add(first.value)
+            elif call_name == "call_llm":
+                for text in _literal_strings_in(node):
+                    runtime_used.update(
+                        match.group(1)
+                        for match in re.finditer(
+                            r"<([A-Za-z0-9_][A-Za-z0-9_-]*)>",
+                            text,
+                        )
+                    )
+
+    return scoped, runtime_used
+
+
+def _literal_string_items(node: ast.AST) -> set[str]:
+    """Collect string constants from a literal list/tuple/set expression."""
+    if not isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return set()
+    values: set[str] = set()
+    for item in node.elts:
+        if isinstance(item, ast.Constant) and isinstance(item.value, str):
+            values.add(item.value)
+    return values
+
+
+def _literal_strings_in(node: ast.AST) -> list[str]:
+    """Collect literal string fragments under an AST node."""
+    strings: list[str] = []
+    for child in ast.walk(node):
+        if isinstance(child, ast.Constant) and isinstance(child.value, str):
+            strings.append(child.value)
+    return strings
+
+
+def _call_name(func: ast.AST) -> str:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
 
 
 def _format_func_params(func: Any) -> str:
