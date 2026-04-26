@@ -381,8 +381,10 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
         These tools enforce project_root sandboxing.
     13. For web requests, ALWAYS use the `web_fetch_url` tool instead of
         writing urllib/httpx/requests code directly.
-    14. For package installation, use `pip_install` tool when the dependency
-        policy allows it.
+    14. For Python package installation, use `pip_install` when the dependency
+        policy allows it. For project package-manager installs such as
+        `npm install`, use `shell_install_dependency` when that shell mode is
+        available.
     15. Use builtin runtime tools (python_import_check, shell_*) only when the
         generated flow's actual job needs them. Do NOT add project inspection
         or test-running steps unless explicitly requested.
@@ -1232,7 +1234,7 @@ class DynamicFlowGenerator:
             if params_info:
                 entry += f"\n    Parameters: {params_info}"
                 entry += f"\n    Call: await ctx.call_tool(\"{name}\", {_format_call_example(tool.func)})"
-            elif kind == "claude-skill":
+            elif kind in {"claude-skill", "agent-skill"}:
                 entry += f"\n    Call: await ctx.call_llm(\"instruction <{name}>\")"
             lines.append(entry)
 

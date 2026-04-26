@@ -21,7 +21,7 @@ from flowforge.dynamic import meta_flow as dynamic_meta_flow
 from flowforge.planner import ExecutionPlan
 from flowforge.schema.compiler import add_flow_to_dag
 from flowforge.schema.dag import NodeType
-from flowforge.types import FunctionTool, LLMConfig
+from flowforge.types import AgentSkill, FunctionTool, LLMConfig
 from flowforge import DynamicRunOptions
 
 
@@ -1493,6 +1493,31 @@ class TestCodegenToolCatalog:
         assert 'call_tool("pptx_create"' in catalog
         assert "path=..." in catalog
         assert "slides=..." in catalog
+
+    def test_tool_catalog_shows_agent_skill_call_example(self, tmp_path):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+
+        skill_dir = tmp_path / "skills" / "clone-coding"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: clone-coding\n"
+            "description: Clone-coding guidance.\n"
+            "---\n"
+            "# Clone Coding\n",
+            encoding="utf-8",
+        )
+
+        gen = DynamicFlowGenerator(
+            llm_config=LLMConfig(model="test"),
+            dag=FlowForge.compile(DynamicAgent).dag,
+            tool_configs=[AgentSkill(path=str(skill_dir))],
+        )
+
+        catalog = gen._format_tool_catalog()
+
+        assert "clone-coding (agent-skill)" in catalog
+        assert 'ctx.call_llm("instruction <clone-coding>")' in catalog
 
     def test_build_context_classifies_document_tools(self, tmp_path):
         from flowforge.dynamic.generator import DynamicFlowGenerator

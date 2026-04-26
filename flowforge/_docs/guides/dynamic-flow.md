@@ -354,6 +354,10 @@ pack.
 | `python_import_check` | Check whether a Python module can be imported | Always available |
 | `web_fetch_url` | Fetch text from a URL | Always available |
 | `json_select_fields` | Select fields from JSON | Always available |
+| `shell_readonly` | Run read-only shell inspection commands | `allowed_shell_modes` includes `"readonly"` |
+| `shell_project_exec` | Run project commands such as `npm run build` or `python -m pytest` | `allowed_shell_modes` includes `"project_exec"` |
+| `shell_workspace_write` | Run limited workspace-writing commands such as `mkdir`, `touch`, `cp`, and `mv` | `allowed_shell_modes` includes `"workspace_write"` |
+| `shell_install_dependency` | Run dependency installation commands such as `npm install`, `pnpm add`, `yarn add`, or `python -m pip install` | `allowed_shell_modes` includes `"install_dependency"` and `DependencyPolicy.allow_install=True` |
 
 ### File Tools
 
@@ -430,3 +434,6 @@ when they call `json.loads()` on model output.
   dynamic upstream paper search.
 - `examples/dynamic_bare_agent.py` — zero static flows and zero static tools;
   everything is generated at runtime.
+- `examples/dynamic_clone_coding_agent.py` — zero static flows, a local
+  `AgentSkill`, built-in web/file/shell tools, and an npm-based frontend
+  project generated under `~/test`.
