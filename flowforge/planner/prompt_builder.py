@@ -114,7 +114,8 @@ class PromptBuilder:
 
             lines.append(f"{indent}{route_path}  — {summary}{caps_str}{pre_str}")
 
-        parts.append("## Available Routes (Flow hierarchy)\n" + "\n".join(lines))
+        routes_text = "\n".join(lines) if lines else "(no user-defined flows available)"
+        parts.append("## Available Routes (Flow hierarchy)\n" + routes_text)
 
         # 3. User request
         if hasattr(user_request, "model_dump"):
@@ -134,6 +135,10 @@ class PromptBuilder:
             "- Include `requirements[]` with one entry per ordered requirement; "
             "mark whether each is covered by an existing route, needs a new "
             "flow, or needs a new tool/dependency.\n"
+            "- If there are no available user-defined routes that can satisfy "
+            "the request, set `routes` to [], set `gap_detected` to true, and "
+            "fill `suggested_flow_name` plus `suggested_flow_prompt` at the "
+            "top level.\n"
             "- If some routes can run now but a missing flow is still required to fully satisfy the request, "
             "return the runnable routes AND report the missing flow as a gap.\n"
             "- When reporting a gap, ALSO set `downstream_flow_route` to the "

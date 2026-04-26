@@ -1442,13 +1442,14 @@ def _run_shell_command(
 ) -> dict[str, Any]:
     project_root = Path(options.project_root or Path.cwd()).expanduser().resolve()
     run_cwd = _resolve_cwd(project_root, cwd)
-    timeout = timeout_seconds or options.shell_timeout_seconds
+    timeout = _coerce_timeout(timeout_seconds, options.shell_timeout_seconds)
 
     error = _validate_command(command, mode, options)
     if error:
         return {
             "ok": False,
             "returncode": 126,
+            "exit_code": 126,
             "stdout": "",
             "stderr": error,
             "command": command,
@@ -1468,6 +1469,7 @@ def _run_shell_command(
     return {
         "ok": completed.returncode == 0,
         "returncode": completed.returncode,
+        "exit_code": completed.returncode,
         "stdout": _trim_output(completed.stdout, max_output),
         "stderr": _trim_output(completed.stderr, max_output),
         "truncated": (
@@ -1486,6 +1488,15 @@ def _trim_output(text: str, max_chars: int) -> str:
         f"[truncated to last {max_chars} chars]\n"
         + text[-max_chars:]
     )
+
+
+def _coerce_timeout(value: Any, default: int) -> float:
+    if value is None:
+        return float(default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _resolve_cwd(project_root: Path, cwd: str | None) -> Path:

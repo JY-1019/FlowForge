@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, TYPE_CHECKING
 
 from flowforge.execution.context import GlobalContext
@@ -431,12 +432,51 @@ class ExecutionEngine:
             }
         # gap_detected=True but missing flow name/prompt → cannot generate.
         if metadata.get("gap_detected"):
+            flow_name = self._synthesise_flow_name(input_data, metadata)
+            flow_prompt = self._synthesise_flow_prompt(input_data, metadata)
             _logger.warning(
                 "gap_detected=True but suggested_flow_name or "
-                "suggested_flow_prompt is missing — skipping dynamic generation"
+                "suggested_flow_prompt is missing — synthesizing dynamic "
+                "flow payload %r",
+                flow_name,
             )
-            return None
+            return {
+                "user_query": str(input_data),
+                "gap_analysis": {
+                    "covered": False,
+                    "reason": metadata.get("reason", ""),
+                    "suggested_flow_name": flow_name,
+                    "suggested_flow_prompt": flow_prompt,
+                },
+                "downstream_flow_route": metadata.get("downstream_flow_route", ""),
+            }
         return input_data
+
+    @staticmethod
+    def _synthesise_flow_name(input_data: Any, metadata: dict[str, Any]) -> str:
+        text = str(metadata.get("reason") or input_data or "dynamic flow")
+        words = re.findall(r"[a-zA-Z][a-zA-Z0-9]+", text.lower())
+        stop_words = {
+            "the", "and", "for", "with", "that", "this", "from", "into",
+            "must", "should", "using", "use", "need", "needs", "request",
+            "project", "create", "generate", "flowforge",
+        }
+        useful = [word for word in words if word not in stop_words]
+        stem = "_".join(useful[:5]) or "dynamic_generated"
+        if not stem.startswith("dynamic_"):
+            stem = f"dynamic_{stem}"
+        return stem[:80].strip("_") or "dynamic_generated"
+
+    @staticmethod
+    def _synthesise_flow_prompt(input_data: Any, metadata: dict[str, Any]) -> str:
+        reason = str(metadata.get("reason") or "").strip()
+        request = str(input_data)
+        if reason:
+            return (
+                f"Dynamically satisfy the missing capability: {reason}. "
+                f"User request: {request[:600]}"
+            )
+        return f"Dynamically satisfy this user request: {request[:700]}"
 
     def _build_dynamic_inputs(
         self,

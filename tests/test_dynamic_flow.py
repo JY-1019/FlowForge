@@ -68,6 +68,11 @@ class DynamicAgent:
     AlphaFlow = AlphaFlow
 
 
+@global_config(prompt="empty dynamic agent", dynamic_flow=True)
+class EmptyDynamicAgent:
+    pass
+
+
 # Custom _dynamic_generator flow for precedence test
 @flow(name="_dynamic_generator", prompt="my custom generator")
 class CustomGeneratorFlow:
@@ -858,6 +863,26 @@ class TestSchemaContract:
         assert payload["downstream_flow_route"] == "paper_pipeline_with_schema"
         assert payload["gap_analysis"]["suggested_flow_name"] == "fetch_trending_papers"
 
+    def test_build_dynamic_input_synthesizes_missing_gap_fields(self):
+        engine = FlowForge.compile(EmptyDynamicAgent)
+
+        class _Plan:
+            metadata = {
+                "gap_detected": True,
+                "reason": "Need a clone coding flow for a frontend project.",
+                "suggested_flow_name": "",
+                "suggested_flow_prompt": "",
+                "downstream_flow_route": "",
+            }
+
+        payload = engine._engine._build_dynamic_input(
+            "Create a Naver clone project", _Plan(),
+        )
+
+        assert isinstance(payload, dict)
+        assert payload["gap_analysis"]["suggested_flow_name"].startswith("dynamic_")
+        assert "clone coding flow" in payload["gap_analysis"]["suggested_flow_prompt"]
+
     @pytest.mark.asyncio
     async def test_meta_flow_analyse_gap_propagates_downstream_route(self):
         engine = FlowForge.compile(SchemaAwareAgent)
@@ -1518,6 +1543,69 @@ class TestCodegenToolCatalog:
 
         assert "clone-coding (agent-skill)" in catalog
         assert 'ctx.call_llm("instruction <clone-coding>")' in catalog
+
+    def test_planner_promotes_requirement_gap_metadata(self):
+        from flowforge.planner.llm_planner import LLMPlanner
+
+        data = {
+            "routes": [],
+            "gap_detected": True,
+            "reason": "",
+            "suggested_flow_name": "",
+            "suggested_flow_prompt": "",
+            "requirements": [
+                {
+                    "description": "Need clone coding",
+                    "covered": False,
+                    "needs_flow": True,
+                    "suggested_flow_name": "clone_coding",
+                    "suggested_flow_prompt": "Create a clone coding frontend.",
+                }
+            ],
+        }
+
+        promoted = LLMPlanner._promote_gap_from_requirements(data)
+
+        assert promoted["suggested_flow_name"] == "clone_coding"
+        assert promoted["suggested_flow_prompt"] == "Create a clone coding frontend."
+
+    def test_prompt_builder_marks_empty_route_tree(self):
+        from flowforge.planner.prompt_builder import PromptBuilder
+
+        engine = FlowForge.compile(EmptyDynamicAgent)
+        prompt = PromptBuilder().build(
+            "Create a clone coding frontend",
+            engine.dag,
+            {},
+            global_prompt="empty dynamic agent",
+        )
+
+        assert "(no user-defined flows available)" in prompt
+        assert "fill `suggested_flow_name` plus `suggested_flow_prompt`" in prompt
+
+    def test_strip_markdown_fences_extracts_prefaced_code(self):
+        from flowforge.dynamic.generator import _strip_markdown_fences
+
+        text = "Here is the code:\n```python\nfrom flowforge import flow\n```"
+
+        assert _strip_markdown_fences(text) == "from flowforge import flow"
+
+    def test_builtin_shell_tools_accept_string_timeout(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(
+            project_root=str(tmp_path),
+            allowed_shell_modes=["readonly"],
+        )
+        tool = next(
+            item for item in create_builtin_tool_pack(options)
+            if item.name == "shell_readonly"
+        )
+
+        result = tool.func("pwd", timeout_seconds="5")
+
+        assert result["ok"] is True
+        assert result["exit_code"] == result["returncode"] == 0
 
     def test_build_context_classifies_document_tools(self, tmp_path):
         from flowforge.dynamic.generator import DynamicFlowGenerator

@@ -388,13 +388,20 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
     15. Use builtin runtime tools (python_import_check, shell_*) only when the
         generated flow's actual job needs them. Do NOT add project inspection
         or test-running steps unless explicitly requested.
-    16. If a tool returns structured JSON needed by downstream flows, instruct
+    16. If package-manager commands, build commands, browser automation, or
+        broad file generation may take longer than the default step timeout,
+        declare an explicit timeout on that step, e.g.
+        `@step(order=2, timeout_seconds=300, prompt="install dependencies")`.
+    17. Do NOT wrap deterministic file writes, package installation, or build
+        commands in one large `ctx.call_llm()` call when direct tools are
+        available. Split them into direct `ctx.call_tool()` steps.
+    18. If a tool returns structured JSON needed by downstream flows, instruct
         the model to return ONLY that JSON payload without extra commentary
-    17. When you need earlier step outputs, use `ctx.previous_results` or
+    19. When you need earlier step outputs, use `ctx.previous_results` or
         `ctx.step_results` instead of inventing new context fields
-    18. Generate ONLY the missing flow named {flow_name}; do NOT recreate
+    20. Generate ONLY the missing flow named {flow_name}; do NOT recreate
         downstream capabilities that other existing flows already cover
-    19. Do NOT reference existing flows via `<flow_name>` tool syntax.
+    21. Do NOT reference existing flows via `<flow_name>` tool syntax.
         Flows are composed by the planner/engine, not called as tools.
 
     OUTPUT CONTRACT (hard requirement):
@@ -1585,7 +1592,24 @@ def _format_call_example(func: Any) -> str:
 
 def _strip_markdown_fences(text: str) -> str:
     """Remove ```python ... ``` fences if the LLM wrapped the code."""
+    import re
+
     text = text.strip()
+    fenced = re.search(r"```(?:python)?\s*(.*?)```", text, flags=re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+
+    starts = [
+        idx for idx in (
+            text.find("from flowforge import"),
+            text.find("@flow("),
+            text.find("@flow\n"),
+        )
+        if idx >= 0
+    ]
+    if starts:
+        text = text[min(starts):]
+
     if text.startswith("```python"):
         text = text[len("```python"):]
     elif text.startswith("```"):

@@ -154,6 +154,7 @@ class LLMPlanner(AbstractPlanner):
         )
         try:
             data = await self._call_llm(prompt, llm_config)
+            data = self._promote_gap_from_requirements(data)
             routes = data.get("routes", [])
             rationale = data.get("rationale", "")
             # Expand route paths → full node-ID sets via resolve_route.
@@ -214,6 +215,36 @@ class LLMPlanner(AbstractPlanner):
             if node.id in all_ids
         ]
         return ordered
+
+    @staticmethod
+    def _promote_gap_from_requirements(data: dict[str, Any]) -> dict[str, Any]:
+        """Use requirement-level gap metadata when top-level fields are empty."""
+        if not data.get("gap_detected"):
+            return data
+        if data.get("suggested_flow_name") and data.get("suggested_flow_prompt"):
+            return data
+
+        requirements = data.get("requirements") or []
+        for requirement in requirements:
+            if not isinstance(requirement, dict):
+                continue
+            if requirement.get("covered", False):
+                continue
+            flow_name = requirement.get("suggested_flow_name")
+            flow_prompt = requirement.get("suggested_flow_prompt")
+            if not flow_name or not flow_prompt:
+                continue
+
+            data = dict(data)
+            data["suggested_flow_name"] = flow_name
+            data["suggested_flow_prompt"] = flow_prompt
+            data.setdefault("reason", requirement.get("description", ""))
+            if not data.get("downstream_flow_route"):
+                data["downstream_flow_route"] = requirement.get(
+                    "downstream_flow_route", ""
+                )
+            return data
+        return data
 
     async def _call_llm(
         self,
