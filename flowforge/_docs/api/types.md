@@ -53,6 +53,7 @@ mcp = MCPServer(
     url="https://api.example.com/mcp",
     name="example_api",
     description="Example MCP server",
+    headers={"Authorization": "Bearer ..."},  # optional
 )
 ```
 
@@ -263,8 +264,13 @@ result = await engine.run(input_data, dynamic_options=options)
 | `shell_timeout_seconds` | `int` | `60` | Shell execution timeout |
 | `shell_output_max_chars` | `int` | `4000` | Maximum captured shell output |
 | `mcp_server_commands` | `dict[str, list[str]]` | `{}` | MCP server command map available during dynamic generation |
+| `mcp_server_urls` | `dict[str, str]` | `{}` | MCP server endpoint URLs keyed by server name |
+| `mcp_server_tools` | `dict[str, list[str]]` | `{}` | Known MCP tool names keyed by server name |
+| `mcp_server_headers` | `dict[str, dict[str, str]]` | `{}` | Optional MCP request headers keyed by server name |
 | `mcp_start_timeout_seconds` | `int` | `15` | MCP server startup timeout |
 | `project_context_max_chars` | `int` | `4000` | Maximum project context characters included in codegen prompts |
+| `codegen_tool_catalog_max_tools` | `int` | `12` | Maximum relevant tools included in codegen prompts |
+| `codegen_tool_catalog_max_chars` | `int` | `6000` | Maximum characters for the codegen tool catalog |
 | `max_requirements` | `int` | `8` | Maximum number of planner gap requirements |
 | `dependency_policy` | `DependencyPolicy` | default | Package installation policy |
 

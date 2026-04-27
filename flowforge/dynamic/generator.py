@@ -428,6 +428,23 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
     25. Do NOT reference existing flows via `<flow_name>` tool syntax.
         Flows are composed by the planner/engine, not called as tools.
 
+    MCP SERVER FLOW PATTERN:
+    26. If the request asks to use a declared MCP server (for example
+        Playwright, Figma, or another paid/commercial MCP service), generate
+        explicit setup steps instead of assuming the tool already exists:
+        a. If Dynamic policy lists a server command for that server, call
+           `await ctx.call_tool("mcp_start_server", server_name="...")`.
+        b. Register the server's known tool names with
+           `await ctx.call_tool("mcp_register_server", server_name="...",
+           tool_names="tool_a,tool_b")`. If only a remote/local URL is
+           declared, skip start and register directly.
+        c. Later steps can scope those newly registered tool names with
+           `tools=["tool_a"]` and use them through
+           `ctx.call_llm("... <tool_a>")`.
+    27. For browser automation, prefer concise MCP interactions and focused
+        tool names over broad page dumps. For design-context MCPs such as
+        Figma, fetch only the relevant node/file context needed for the task.
+
     OUTPUT CONTRACT (hard requirement):
     - The final step of this flow MUST return a plain Python ``dict`` whose
       shape matches the JSON Schema supplied in the user message under the
@@ -674,8 +691,6 @@ class DynamicFlowGenerator:
             class_name=class_name,
         )
 
-        tool_catalog = self._format_tool_catalog()
-
         contract_block = ""
         if downstream_contract:
             pretty = json.dumps(downstream_contract, ensure_ascii=False, indent=2)
@@ -696,6 +711,10 @@ class DynamicFlowGenerator:
         artifacts = detect_output_artifacts(
             str(user_query),
             available_tools=self._tool_names(),
+        )
+        tool_catalog = self._format_tool_catalog(
+            user_query=user_query,
+            artifacts=artifacts,
         )
         artifact_block = _format_artifact_instructions(artifacts)
 
@@ -1276,7 +1295,11 @@ class DynamicFlowGenerator:
             + " ".join(messages)
         )
 
-    def _format_tool_catalog(self) -> str:
+    def _format_tool_catalog(
+        self,
+        user_query: str | Any | None = None,
+        artifacts: list[dict[str, str]] | None = None,
+    ) -> str:
         """Return a detailed list of available tools with parameters.
 
         For ``FunctionTool`` entries the catalog includes parameter names,
@@ -1290,7 +1313,11 @@ class DynamicFlowGenerator:
         import inspect
 
         lines: list[str] = []
-        for tool in self._tool_configs:
+        selected_tools, omitted = self._select_tool_configs_for_codegen(
+            user_query=user_query,
+            artifacts=artifacts,
+        )
+        for tool in selected_tools:
             name = ""
             description = ""
             kind = "tool"
@@ -1332,7 +1359,104 @@ class DynamicFlowGenerator:
                 entry += f"\n    Call: await ctx.call_llm(\"instruction <{name}>\")"
             lines.append(entry)
 
-        return "\n".join(lines) if lines else "(no named tools available)"
+        text = "\n".join(lines) if lines else "(no named tools available)"
+        if omitted:
+            text += (
+                "\n- ... "
+                f"{omitted} lower-relevance tool(s) omitted from this compact "
+                "catalog to save tokens. Add them to required_tools to force inclusion."
+            )
+
+        max_chars = 0
+        if self._dynamic_options is not None:
+            max_chars = self._dynamic_options.codegen_tool_catalog_max_chars
+        if max_chars > 0 and len(text) > max_chars:
+            text = (
+                text[:max_chars].rstrip()
+                + "\n...[tool catalog truncated by codegen_tool_catalog_max_chars]"
+            )
+        return text
+
+    def _select_tool_configs_for_codegen(
+        self,
+        user_query: str | Any | None = None,
+        artifacts: list[dict[str, str]] | None = None,
+    ) -> tuple[list[ToolConfig], int]:
+        """Select the most relevant tools for codegen to reduce prompt size."""
+        if not user_query or self._dynamic_options is None:
+            return list(self._tool_configs), 0
+
+        max_tools = self._dynamic_options.codegen_tool_catalog_max_tools
+        if max_tools <= 0 or len(self._tool_configs) <= max_tools:
+            return list(self._tool_configs), 0
+
+        required = set(_extract_required_tools(user_query))
+        required.update(
+            art.get("tool", "")
+            for art in (artifacts or [])
+            if art.get("tool")
+        )
+
+        query_text = str(user_query).lower()
+        query_tokens = {
+            token
+            for token in _word_tokens(query_text)
+            if len(token) >= 3
+        }
+        wants_mcp = any(
+            term in query_text
+            for term in ("mcp", "figma", "playwright", "browser", "design")
+        )
+
+        scored: list[tuple[int, int, ToolConfig]] = []
+        for index, tool in enumerate(self._tool_configs):
+            name = _tool_config_name(tool)
+            desc = getattr(tool, "description", "") or ""
+            haystack = f"{name} {desc}".lower()
+
+            score = 0
+            if name in required:
+                score += 1000
+            if name in self._prompt_only_tool_names():
+                score += 450
+            if name in {"mcp_start_server", "mcp_register_server"} and wants_mcp:
+                score += 420
+            if name in {"web_fetch_url", "files_write_text", "json_select_fields"}:
+                score += 120
+            if name in {"files_read_text", "files_list_dir"}:
+                score += 80
+            for token in query_tokens:
+                if token in haystack:
+                    score += 25
+            if name.startswith("shell_") and any(
+                term in query_text for term in ("install", "build", "npm", "pnpm", "yarn")
+            ):
+                score += 150
+            if name in {"pptx_create", "markdown_write", "csv_write", "docx_create"}:
+                if any(term in query_text for term in ("ppt", "deck", "markdown", "csv", "docx", "report")):
+                    score += 120
+
+            scored.append((score, -index, tool))
+
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        selected = [tool for score, _, tool in scored if score > 0][:max_tools]
+        if len(selected) < min(max_tools, 4):
+            selected_names = {_tool_config_name(tool) for tool in selected}
+            for _, _, tool in scored:
+                name = _tool_config_name(tool)
+                if name in selected_names:
+                    continue
+                selected.append(tool)
+                selected_names.add(name)
+                if len(selected) >= min(max_tools, 4):
+                    break
+
+        selected_names = {_tool_config_name(tool) for tool in selected}
+        omitted = len([
+            tool for tool in self._tool_configs
+            if _tool_config_name(tool) not in selected_names
+        ])
+        return selected, omitted
 
     def build_code_generation_context(
         self,
@@ -1430,6 +1554,18 @@ class DynamicFlowGenerator:
             f"- allowed_dependency_managers: {policy.allowed_managers}",
             f"- allowed_packages: {policy.allowed_packages or '(not restricted)'}",
             f"- denied_packages: {policy.denied_packages or '(none)'}",
+            "- mcp_server_commands: "
+            f"{list(self._dynamic_options.mcp_server_commands.keys()) or '(none)'}",
+            "- mcp_server_urls: "
+            f"{self._dynamic_options.mcp_server_urls or '(none)'}",
+            "- mcp_server_tools: "
+            f"{self._dynamic_options.mcp_server_tools or '(none)'}",
+            "- mcp_server_headers: "
+            f"{list(self._dynamic_options.mcp_server_headers.keys()) or '(none)'}",
+            "- codegen_tool_catalog_max_tools: "
+            f"{self._dynamic_options.codegen_tool_catalog_max_tools}",
+            "- codegen_tool_catalog_max_chars: "
+            f"{self._dynamic_options.codegen_tool_catalog_max_chars}",
         ])
 
     def _codegen_tool_configs(self) -> list[ToolConfig] | None:
@@ -1732,6 +1868,34 @@ def _collect_generated_tool_usage(code: str) -> tuple[set[str], set[str]]:
                     )
 
     return scoped, runtime_used
+
+
+def _tool_config_name(tool: Any) -> str:
+    """Return the FlowForge reference name for a ToolConfig-like object."""
+    from flowforge.types import AgentSkill, ClaudeSkill, FunctionTool, HTTPTool, MCPServer
+
+    if isinstance(tool, MCPServer):
+        return tool.name
+    if isinstance(tool, FunctionTool):
+        return tool.name or (
+            tool.func.__name__ if hasattr(tool.func, "__name__") else ""
+        )
+    if isinstance(tool, HTTPTool):
+        return tool.name
+    if isinstance(tool, ClaudeSkill):
+        return tool.name or tool.skill_id
+    if isinstance(tool, AgentSkill):
+        return tool.name
+    return ""
+
+
+def _word_tokens(text: str) -> set[str]:
+    import re
+
+    return {
+        match.group(0)
+        for match in re.finditer(r"[a-zA-Z0-9_-]+", text.lower())
+    }
 
 
 def _literal_string_items(node: ast.AST) -> set[str]:

@@ -423,10 +423,25 @@ FlowForge communicates with MCP servers using the **Streamable HTTP transport** 
 
 ```bash
 # Example: Start Playwright MCP server
-npx @anthropic/mcp-playwright --port 3847
+npx @playwright/mcp@latest --port 8931
 
 # The MCPServer config points to the server endpoint
-MCPServer(url="http://localhost:3847/mcp", name="browser_navigate")
+MCPServer(url="http://localhost:8931/mcp", name="browser_navigate")
+```
+
+Dynamic flows can also register MCP tools at runtime when the server is
+declared in `DynamicRunOptions`:
+
+```python
+options = DynamicRunOptions(
+    mcp_server_commands={"playwright": ["npx", "-y", "@playwright/mcp@latest", "--port", "8931"]},
+    mcp_server_urls={"playwright": "http://localhost:8931/mcp"},
+    mcp_server_tools={"playwright": ["browser_navigate", "browser_snapshot"]},
+)
+
+await ctx.call_tool("mcp_start_server", server_name="playwright")
+await ctx.call_tool("mcp_register_server", server_name="playwright")
+result = await ctx.call_llm("Open the target URL. <browser_navigate>")
 ```
 
 ### FunctionTool in the Loop

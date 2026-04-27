@@ -132,6 +132,7 @@ class MCPServer(BaseModel):
     url: str
     name: str = ""
     description: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
 
 
 class FunctionTool(BaseModel):
@@ -263,7 +264,105 @@ class DynamicRunOptions(BaseModel):
     shell_timeout_seconds: int = 60
     shell_output_max_chars: int = 4000
     mcp_server_commands: dict[str, list[str]] = Field(default_factory=dict)
+    mcp_server_urls: dict[str, str] = Field(default_factory=dict)
+    mcp_server_tools: dict[str, list[str]] = Field(default_factory=dict)
+    mcp_server_headers: dict[str, dict[str, str]] = Field(default_factory=dict)
     mcp_start_timeout_seconds: int = 15
     project_context_max_chars: int = 4000
+    codegen_tool_catalog_max_tools: int = 12
+    codegen_tool_catalog_max_chars: int = 6000
     max_requirements: int = 8
     dependency_policy: DependencyPolicy = Field(default_factory=DependencyPolicy)
+
+    @classmethod
+    def for_playwright_mcp(
+        cls,
+        *,
+        project_root: str | None = None,
+        port: int = 8931,
+        command: list[str] | None = None,
+        tools: list[str] | None = None,
+        **kwargs: Any,
+    ) -> "DynamicRunOptions":
+        """Return options preconfigured for the official Playwright MCP server."""
+        data = dict(kwargs)
+        commands = dict(data.pop("mcp_server_commands", {}) or {})
+        urls = dict(data.pop("mcp_server_urls", {}) or {})
+        server_tools = dict(data.pop("mcp_server_tools", {}) or {})
+
+        commands.setdefault(
+            "playwright",
+            command or ["npx", "-y", "@playwright/mcp@latest", "--port", str(port)],
+        )
+        urls.setdefault("playwright", f"http://localhost:{port}/mcp")
+        server_tools.setdefault(
+            "playwright",
+            tools or [
+                "browser_navigate",
+                "browser_snapshot",
+                "browser_click",
+                "browser_evaluate",
+            ],
+        )
+
+        data.setdefault("include_builtin_tools", True)
+        data.setdefault(
+            "allowed_shell_modes",
+            ["readonly", "project_exec", "install_dependency"],
+        )
+        data.setdefault("codegen_tool_catalog_max_tools", 8)
+        data.setdefault("codegen_tool_catalog_max_chars", 4500)
+        return cls(
+            project_root=project_root,
+            mcp_server_commands=commands,
+            mcp_server_urls=urls,
+            mcp_server_tools=server_tools,
+            **data,
+        )
+
+    @classmethod
+    def for_figma_mcp(
+        cls,
+        *,
+        project_root: str | None = None,
+        url: str = "https://mcp.figma.com/mcp",
+        authorization: str = "",
+        headers: dict[str, str] | None = None,
+        tools: list[str] | None = None,
+        **kwargs: Any,
+    ) -> "DynamicRunOptions":
+        """Return options preconfigured for Figma's remote MCP endpoint."""
+        data = dict(kwargs)
+        urls = dict(data.pop("mcp_server_urls", {}) or {})
+        server_tools = dict(data.pop("mcp_server_tools", {}) or {})
+        server_headers = dict(data.pop("mcp_server_headers", {}) or {})
+
+        urls.setdefault("figma", url)
+        server_tools.setdefault(
+            "figma",
+            tools or [
+                "get_design_context",
+                "get_variable_defs",
+                "get_metadata",
+                "get_screenshot",
+                "create_design_system_rules",
+                "whoami",
+            ],
+        )
+        merged_headers = dict(headers or {})
+        if authorization:
+            merged_headers.setdefault("Authorization", authorization)
+        if merged_headers:
+            server_headers.setdefault("figma", merged_headers)
+
+        data.setdefault("include_builtin_tools", True)
+        data.setdefault("allowed_shell_modes", ["readonly", "project_exec"])
+        data.setdefault("codegen_tool_catalog_max_tools", 8)
+        data.setdefault("codegen_tool_catalog_max_chars", 4500)
+        return cls(
+            project_root=project_root,
+            mcp_server_urls=urls,
+            mcp_server_tools=server_tools,
+            mcp_server_headers=server_headers,
+            **data,
+        )

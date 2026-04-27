@@ -284,7 +284,9 @@ result = await engine.run(
 
 Key features:
 - **Manifest caching** — generated flows are saved, loaded on compile, and skipped when already present
+- **Compact codegen context** — only relevant tools and project context are sent to the code generator by default
 - **14+ builtin tools** — web, files, PPT, CSV, DOCX, charts, PDF, markdown
+- **Dynamic MCP setup** — generated flows can start declared MCP servers and register their tools for later `<tool>` use
 - **Auto artifact detection** — "make a PPT" → automatically includes `pptx_create`
 - **AST safety validation** — blocks dangerous imports/calls before execution
 - **Contract-first chaining** — generated flow output matches downstream input schema
@@ -313,6 +315,7 @@ flowforge doc-generate ./agent.py  # Auto-generate node docs via LLM
 |------|-------|
 | `examples/dynamic_bare_agent.py` | Zero-flow agent that generates missing flows at runtime |
 | `examples/dynamic_clone_coding_agent.py` | Zero-flow clone-coding agent that uses Anthropic's `frontend-design` Skill guidance as a local Agent Skill, a clone-coding Agent Skill, built-in web/file tools, and npm install under `~/test` |
+| `examples/dynamic_skill_mcp_agent.py` | Zero-flow agent showing Agent Skill guidance, optional Claude `pptx` Skill use, compact dynamic codegen, and Playwright/Figma MCP server registration |
 | `examples/dynamic_paper_report_agent.py` | Static pipeline plus dynamic upstream paper search/reporting |
 | `examples/claude_skill_custom_text_agent.py` | Custom Claude Skill proof that prints a marker immediately |
 | `examples/claude_skill_pptx_agent.py` | Anthropic `pptx` Skill, file ID extraction, and Files API download |

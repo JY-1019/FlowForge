@@ -517,9 +517,16 @@ class StepContext:
 
         for tc in self.merged_tools:
             if isinstance(tc, _FT) and tc.name == tool_name:
+                call_kwargs = dict(kwargs)
+                try:
+                    sig = inspect.signature(tc.func)
+                    if "ctx" in sig.parameters and "ctx" not in call_kwargs:
+                        call_kwargs["ctx"] = self
+                except (TypeError, ValueError):
+                    pass
                 if inspect.iscoroutinefunction(tc.func):
-                    return await tc.func(**kwargs)
-                return tc.func(**kwargs)
+                    return await tc.func(**call_kwargs)
+                return tc.func(**call_kwargs)
         available = [
             tc.name for tc in self.merged_tools if isinstance(tc, _FT)
         ]

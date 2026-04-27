@@ -851,6 +851,21 @@ class TestToolExecutor:
         assert executor.has_tool("my_func")
         assert not executor.has_tool("unknown")
 
+    def test_mcp_headers_merge_config_and_session(self):
+        from flowforge.execution.tool_executor import ToolExecutor
+
+        executor = ToolExecutor([])
+        executor._mcp_sessions["http://localhost/mcp"] = "session-1"
+
+        headers = executor._mcp_headers(
+            "http://localhost/mcp",
+            {"Authorization": "Bearer test"},
+        )
+
+        assert headers["Authorization"] == "Bearer test"
+        assert headers["Mcp-Session-Id"] == "session-1"
+        assert "application/json" in headers["Content-Type"]
+
     @pytest.mark.asyncio
     async def test_execute_function_tool_async(self):
         from flowforge.execution.tool_executor import ToolExecutor
@@ -1080,6 +1095,7 @@ class TestBuiltinShellTools:
 
         assert "python_import_check" in names
         assert "mcp_start_server" in names
+        assert "mcp_register_server" in names
 
     def test_readonly_shell_tool_runs_allowlisted_command(self, tmp_path):
         from flowforge.tools.builtin import create_builtin_tool_pack
@@ -1138,6 +1154,51 @@ class TestBuiltinShellTools:
         result = tool.func("browser")
         assert result["ok"] is False
         assert "not declared" in result["stderr"]
+
+    @pytest.mark.asyncio
+    async def test_mcp_register_server_adds_runtime_mcp_tools(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(
+            project_root=str(tmp_path),
+            mcp_server_urls={"browser": "http://localhost:3847/mcp"},
+            mcp_server_tools={"browser": ["browser_navigate", "browser_snapshot"]},
+            mcp_server_headers={"browser": {"Authorization": "Bearer token"}},
+        )
+        tools = create_builtin_tool_pack(options)
+        register_tool = next(
+            item for item in tools
+            if item.name == "mcp_register_server"
+        )
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+            global_tools=tools,
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx,
+            flow_name="f",
+            flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx,
+            task_name="t",
+            task_prompt="test",
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="test",
+        )
+
+        result = await step_ctx.call_tool("mcp_register_server", server_name="browser")
+
+        assert result["ok"] is True
+        assert result["registered_tools"] == ["browser_navigate", "browser_snapshot"]
+        resolved = step_ctx._resolve_tool_configs(["browser_navigate"])
+        assert len(resolved) == 1
+        assert resolved[0].url == "http://localhost:3847/mcp"
+        assert resolved[0].headers == {"Authorization": "Bearer token"}
 
     def test_install_tool_respects_dependency_policy(self, tmp_path):
         from flowforge.tools.builtin import create_builtin_tool_pack

@@ -1726,6 +1726,89 @@ class TimeoutFlow:
         assert "clone-coding (agent-skill)" in catalog
         assert 'ctx.call_llm("instruction <clone-coding>")' in catalog
 
+    def test_tool_catalog_compacts_to_relevant_tools(self, tmp_path):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(
+            project_root=str(tmp_path),
+            codegen_tool_catalog_max_tools=4,
+        )
+        tools = create_builtin_tool_pack(options)
+        gen = DynamicFlowGenerator(
+            llm_config=LLMConfig(model="test"),
+            dag=FlowForge.compile(DynamicAgent).dag,
+            tool_configs=tools,
+            dynamic_options=options,
+        )
+
+        catalog = gen._format_tool_catalog(
+            user_query={
+                "request": "create a ppt deck",
+                "required_tools": ["pptx_create"],
+            },
+            artifacts=[{"tool": "pptx_create"}],
+        )
+
+        assert "pptx_create" in catalog
+        assert "lower-relevance tool(s) omitted" in catalog
+        assert catalog.count("\n- ") <= 5
+
+    def test_dynamic_policy_lists_declared_mcp_servers(self, tmp_path):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+
+        options = DynamicRunOptions(
+            project_root=str(tmp_path),
+            mcp_server_commands={"playwright": ["npx", "-y", "@playwright/mcp"]},
+            mcp_server_urls={"playwright": "http://localhost:3847/mcp"},
+            mcp_server_tools={"playwright": ["browser_navigate"]},
+        )
+        gen = DynamicFlowGenerator(
+            llm_config=LLMConfig(model="test"),
+            dag=FlowForge.compile(DynamicAgent).dag,
+            dynamic_options=options,
+        )
+
+        policy = gen._format_dynamic_policy()
+
+        assert "playwright" in policy
+        assert "browser_navigate" in policy
+        assert "codegen_tool_catalog_max_tools" in policy
+
+    def test_playwright_mcp_options_helper_sets_runtime_defaults(self, tmp_path):
+        options = DynamicRunOptions.for_playwright_mcp(
+            project_root=str(tmp_path),
+            port=9999,
+        )
+
+        assert options.project_root == str(tmp_path)
+        assert options.mcp_server_commands["playwright"] == [
+            "npx",
+            "-y",
+            "@playwright/mcp@latest",
+            "--port",
+            "9999",
+        ]
+        assert options.mcp_server_urls["playwright"] == "http://localhost:9999/mcp"
+        assert "browser_navigate" in options.mcp_server_tools["playwright"]
+        assert "install_dependency" in options.allowed_shell_modes
+        assert options.codegen_tool_catalog_max_tools == 8
+
+    def test_figma_mcp_options_helper_sets_remote_defaults(self, tmp_path):
+        options = DynamicRunOptions.for_figma_mcp(
+            project_root=str(tmp_path),
+            authorization="Bearer test-token",
+        )
+
+        assert options.project_root == str(tmp_path)
+        assert options.mcp_server_urls["figma"] == "https://mcp.figma.com/mcp"
+        assert "get_design_context" in options.mcp_server_tools["figma"]
+        assert options.mcp_server_headers["figma"] == {
+            "Authorization": "Bearer test-token",
+        }
+        assert options.allowed_shell_modes == ["readonly", "project_exec"]
+        assert options.codegen_tool_catalog_max_chars == 4500
+
     def test_planner_promotes_requirement_gap_metadata(self):
         from flowforge.planner.llm_planner import LLMPlanner
 

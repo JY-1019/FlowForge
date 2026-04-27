@@ -49,6 +49,15 @@ def create_builtin_tool_pack(options: DynamicRunOptions) -> list[FunctionTool]:
             "Start an MCP server command declared in DynamicRunOptions."
         ),
     ))
+    tools.append(FunctionTool(
+        func=_make_mcp_register_tool(options),
+        name="mcp_register_server",
+        description=(
+            "Register one or more MCP tool names from a declared MCP server "
+            "URL into the current FlowForge run so later steps can use them "
+            "with <tool_name> in ctx.call_llm()."
+        ),
+    ))
 
     tools.append(FunctionTool(
         func=_make_pip_install_tool(options),
@@ -1398,10 +1407,88 @@ def _make_mcp_start_tool(options: DynamicRunOptions):
             "pid": proc.pid,
             "command": command,
             "cwd": str(run_cwd),
+            "url": options.mcp_server_urls.get(server_name, ""),
             "stderr": "" if running else "MCP server command exited immediately.",
         }
 
     _tool.__name__ = "builtin_mcp_start_server"
+    return _tool
+
+
+def _make_mcp_register_tool(options: DynamicRunOptions):
+    def _tool(
+        server_name: str,
+        tool_names: str = "",
+        url: str = "",
+        description: str = "",
+        ctx: Any = None,
+    ) -> dict[str, Any]:
+        if ctx is None:
+            return {
+                "ok": False,
+                "server_name": server_name,
+                "stderr": "mcp_register_server must be called via ctx.call_tool().",
+            }
+
+        endpoint = url or options.mcp_server_urls.get(server_name, "")
+        if not endpoint:
+            return {
+                "ok": False,
+                "server_name": server_name,
+                "stderr": (
+                    "MCP server URL is not declared. Pass url=... or set "
+                    "DynamicRunOptions.mcp_server_urls[server_name]."
+                ),
+            }
+
+        declared = options.mcp_server_tools.get(server_name, [])
+        raw_names = tool_names or ",".join(declared)
+        names = [
+            item.strip()
+            for item in raw_names.replace("\n", ",").split(",")
+            if item.strip()
+        ]
+        if not names:
+            return {
+                "ok": False,
+                "server_name": server_name,
+                "url": endpoint,
+                "stderr": (
+                    "No MCP tool names were provided. Pass tool_names as a "
+                    "comma-separated string or set DynamicRunOptions.mcp_server_tools."
+                ),
+            }
+
+        from flowforge.types import MCPServer
+
+        registered: list[str] = []
+        existing = {
+            getattr(tool, "name", "")
+            for tool in getattr(ctx.global_ctx, "global_tools", [])
+        }
+        for name in names:
+            if name in existing:
+                registered.append(name)
+                continue
+            ctx.global_ctx.global_tools.append(
+                MCPServer(
+                    url=endpoint,
+                    name=name,
+                    description=description or f"{server_name} MCP tool: {name}",
+                    headers=options.mcp_server_headers.get(server_name, {}),
+                )
+            )
+            existing.add(name)
+            registered.append(name)
+
+        return {
+            "ok": True,
+            "server_name": server_name,
+            "url": endpoint,
+            "registered_tools": registered,
+        }
+
+    _tool.__name__ = "builtin_mcp_register_server"
     return _tool
 
 

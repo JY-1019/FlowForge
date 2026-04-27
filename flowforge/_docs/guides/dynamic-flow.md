@@ -72,8 +72,13 @@ options = DynamicRunOptions(
     shell_timeout_seconds=60,
     shell_output_max_chars=4000,
     mcp_server_commands={},
+    mcp_server_urls={},
+    mcp_server_tools={},
+    mcp_server_headers={},
     mcp_start_timeout_seconds=15,
     project_context_max_chars=4000,
+    codegen_tool_catalog_max_tools=12,
+    codegen_tool_catalog_max_chars=6000,
     max_requirements=8,
     dependency_policy=DependencyPolicy(
         allow_install=False,
@@ -141,14 +146,40 @@ during code generation.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `mcp_server_commands` | `dict[str, list[str]]` | `{}` | Named MCP server commands available during generation |
+| `mcp_server_urls` | `dict[str, str]` | `{}` | MCP server name to Streamable HTTP endpoint URL |
+| `mcp_server_tools` | `dict[str, list[str]]` | `{}` | Known tool names exposed by each MCP server for dynamic registration |
+| `mcp_server_headers` | `dict[str, dict[str, str]]` | `{}` | Optional headers per MCP server, for authenticated gateways |
 | `mcp_start_timeout_seconds` | `int` | `15` | Timeout for starting MCP servers |
+
+Dynamic flows can start and register declared MCP servers:
+
+```python
+result = await ctx.call_tool("mcp_start_server", server_name="playwright")
+registered = await ctx.call_tool("mcp_register_server", server_name="playwright")
+```
+
+After registration, later steps can scope the newly registered MCP tool names
+with `tools=["browser_navigate"]` and expose them to the LLM with
+`ctx.call_llm("Navigate to the target. <browser_navigate>")`.
+
+For remote MCP services such as Figma, declare `mcp_server_urls` and
+`mcp_server_tools` without `mcp_server_commands`. The generated flow can call
+`mcp_register_server` directly and then use tools such as
+`get_design_context`, `get_variable_defs`, or `get_metadata`.
 
 ### Codegen Context
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `project_context_max_chars` | `int` | `4000` | Maximum project context included in the generation prompt |
+| `codegen_tool_catalog_max_tools` | `int` | `12` | Maximum relevant tools shown in the codegen catalog. `<=0` disables selection |
+| `codegen_tool_catalog_max_chars` | `int` | `6000` | Maximum characters for the codegen tool catalog. `<=0` disables truncation |
 | `max_requirements` | `int` | `8` | Maximum planner requirements considered for generation |
+
+The generator builds a compact tool catalog from `required_tools`, artifact
+detection, query keywords, Agent Skills, Claude Skills, and declared MCP server
+metadata. This keeps token use low while still forcing required tools into the
+prompt.
 
 ### DependencyPolicy
 
@@ -463,3 +494,6 @@ when they call `json.loads()` on model output.
   local Agent Skill for codegen,
   built-in web/file/shell tools, and an npm-based frontend project generated
   under `~/test`.
+- `examples/dynamic_skill_mcp_agent.py` — zero static flows, Agent Skill
+  guidance, optional Claude `pptx` Skill usage, compact tool catalog settings,
+  and dynamic MCP server registration for Playwright or Figma.
