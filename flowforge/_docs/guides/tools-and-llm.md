@@ -444,6 +444,11 @@ await ctx.call_tool("mcp_register_server", server_name="playwright")
 result = await ctx.call_llm("Open the target URL. <browser_navigate>")
 ```
 
+If the generated flow calls `mcp_register_server` first, FlowForge still checks
+the declared endpoint. When a command exists and the endpoint is down,
+registration starts the MCP server automatically before adding the MCP tool
+configs to the current run.
+
 ### FunctionTool in the Loop
 
 Python functions also participate in the tool-use loop:

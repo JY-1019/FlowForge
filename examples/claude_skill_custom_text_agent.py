@@ -21,10 +21,12 @@ Prerequisites:
 Run:
 
     python examples/claude_skill_custom_text_agent.py
+    python examples/claude_skill_custom_text_agent.py --topic "FlowForge tools"
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 from pathlib import Path
@@ -40,7 +42,7 @@ from flowforge.types import LLMConfig
 
 ROOT_DIR = Path(__file__).resolve().parent
 ARTIFACT_DIR = ROOT_DIR / "_artifacts" / "claude_skill_custom_text"
-SKILL_SOURCE_DIR = ARTIFACT_DIR / "flowforge-proof"
+SKILL_SOURCE_DIR = ROOT_DIR / "skills" / "flowforge-proof"
 SKILL_ID_PATH = ARTIFACT_DIR / "skill_id.txt"
 PROOF_MARKER = "FLOWFORGE_CUSTOM_SKILL_USED"
 
@@ -67,10 +69,8 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
     return False
 
 
-def _write_skill_source() -> None:
-    SKILL_SOURCE_DIR.mkdir(parents=True, exist_ok=True)
-    (SKILL_SOURCE_DIR / "SKILL.md").write_text(
-        f"""---
+def _skill_source_text() -> str:
+    return f"""---
 name: flowforge-proof
 description: Plain-text verification Skill for proving FlowForge can invoke a custom Claude Skill.
 ---
@@ -91,12 +91,19 @@ Then add:
 
 - input_summary: one short sentence about the user's topic
 - proof: one short sentence saying this marker came from the Skill instructions
-""",
-        encoding="utf-8",
-    )
+"""
+
+
+def _ensure_skill_source() -> None:
+    SKILL_SOURCE_DIR.mkdir(parents=True, exist_ok=True)
+    skill_md = SKILL_SOURCE_DIR / "SKILL.md"
+    if not skill_md.exists():
+        skill_md.write_text(_skill_source_text(), encoding="utf-8")
 
 
 def _ensure_custom_skill_id() -> str:
+    _ensure_skill_source()
+
     from_env = os.getenv("FLOWFORGE_CUSTOM_SKILL_ID", "").strip()
     if from_env:
         return from_env
@@ -106,7 +113,6 @@ def _ensure_custom_skill_id() -> str:
         if cached:
             return cached
 
-    _write_skill_source()
     client = anthropic.Anthropic()
     skill = client.beta.skills.create(
         display_title="FlowForge Proof",
@@ -169,6 +175,14 @@ def build_agent(skill_id: str):
 
 
 async def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--topic",
+        default="FlowForge annotation tools can carry Claude Skills",
+        help="Topic sent to the custom Claude Skill proof.",
+    )
+    args = parser.parse_args()
+
     if not os.getenv("ANTHROPIC_API_KEY"):
         raise SystemExit(
             "ANTHROPIC_API_KEY is required to run this example.\n"
@@ -181,7 +195,7 @@ async def main() -> None:
         skill_id = _ensure_custom_skill_id()
         engine = FlowForge.compile(build_agent(skill_id))
         result = await engine.run(
-            ProofRequest(topic="FlowForge annotation tools can carry Claude Skills")
+            ProofRequest(topic=args.topic)
         )
     except ExecutionError as exc:
         if _is_rate_limit_error(exc):

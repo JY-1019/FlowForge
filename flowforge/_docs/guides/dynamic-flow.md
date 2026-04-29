@@ -158,6 +158,11 @@ result = await ctx.call_tool("mcp_start_server", server_name="playwright")
 registered = await ctx.call_tool("mcp_register_server", server_name="playwright")
 ```
 
+`mcp_register_server` is also defensive: when a command is declared for the
+server and the endpoint is not reachable yet, it starts the server before
+registering the declared tool names. That lets generated flows recover even
+when the MCP server was not already running.
+
 After registration, later steps can scope the newly registered MCP tool names
 with `tools=["browser_navigate"]` and expose them to the LLM with
 `ctx.call_llm("Navigate to the target. <browser_navigate>")`.
@@ -232,32 +237,33 @@ In autonomous mode, the planner decomposes the user request into requirements:
 Each uncovered requirement can trigger `_dynamic_generator`, unless the target
 flow already exists in the DAG or manifest.
 
-### 2. The Meta-Flow Builds A Brief
+### 2. The Meta-Flow Pipeline
 
 The internal `_dynamic_generator` flow is built with normal FlowForge
-decorators:
+decorators and runs a five-phase pipeline:
 
 ```text
 _dynamic_generator
-└─ task: generate_dynamic_flow
-   ├─ step[1] analyse_gap
-   ├─ step[2] prepare_codegen
-   └─ step[3] generate_and_inject
+└─ task: _generate_and_run
+   ├─ step[1] analyse_gap        — confirm the query is not covered
+   ├─ step[2] plan_workflow      — design single-responsibility steps
+   ├─ step[3] select_capability  — pick mode + tool names per step
+   ├─ step[4] mcp_provision      — persist auto-provisioned MCP specs
+   └─ step[5] synthesise_inject  — synthesise FlowForge code, compile, inject
 ```
 
-The brief includes:
-
-- the uncovered requirement;
-- the current DAG summary;
-- downstream contract information when a generated upstream flow must feed an
-  existing downstream flow;
-- available tools and their parameter schemas;
-- safety and style constraints for generated code.
+Each phase is an isolated LLM-driven decision with generous response budgets so
+that long agent runs do not truncate. The five available capability modes are
+`llm_only`, `builtin_tool`, `claude_skill`, `agent_skill`, and `mcp`. Tool names
+are validated against the registered catalog before code synthesis runs, and
+unknown selections are retried with structured feedback.
 
 ### 3. Code Is Generated And Validated
 
-`DynamicFlowGenerator` asks the LLM to produce FlowForge decorator code. Before
-execution, the generated code must pass AST safety validation.
+`DynamicFlowGenerator.generate_compile_and_persist_from_plan()` asks the LLM to
+translate the plan + capability selection into FlowForge decorator code. The
+generated code must pass AST safety validation, contract compatibility,
+tool-reference validity, and required-tool usage checks.
 
 Blocked examples include:
 
@@ -265,18 +271,22 @@ Blocked examples include:
 - imports such as `socket` and `multiprocessing`;
 - dynamic execution with `eval`, `exec`, or `compile`.
 
-If compilation fails, FlowForge can feed the error back to the LLM and retry.
+If compilation fails, FlowForge feeds the error back to the LLM and retries.
 
-### 4. The Flow Is Injected
+### 4. MCP Servers Are Provisioned
+
+For every step whose capability is `mode="mcp"`, a JSON record is written under
+`<generated_dir>/_artifact/mcp/<server>.json` with the URL, command, declared
+tool names, and the steps that use it. When `persist_generated=True` the same
+record is appended to `manifest.json` under `mcp_servers`, so operators can see
+which servers the dynamic generator chose without re-running the meta-flow.
+
+### 5. The Flow Is Injected And Replanned
 
 After validation and compilation, the generated flow is injected into the DAG.
 If `persist_generated=True`, the source is also written to disk and registered
-in `manifest.json`.
-
-### 5. Planning Runs Again
-
-The engine replans with the generated flow now present. Normal execution then
-continues with the selected route.
+in `manifest.json`. The engine then replans with the generated flow now
+present, and normal execution continues with the selected route.
 
 ---
 
@@ -489,11 +499,11 @@ when they call `json.loads()` on model output.
   dynamic upstream paper search.
 - `examples/dynamic_bare_agent.py` — zero static flows and zero static tools;
   everything is generated at runtime.
-- `examples/dynamic_clone_coding_agent.py` — zero static flows, a local
-  `AgentSkill`, Anthropic's `frontend-design` Skill guidance loaded as a
-  local Agent Skill for codegen,
-  built-in web/file/shell tools, and an npm-based frontend project generated
-  under `~/test`.
+- `examples/dynamic_docx_report_agent.py` — zero static flows and zero
+  preregistered tools or Skills; the dynamic generator must rely on built-in
+  tools (notably `docx_create`) to author and persist a `.docx` report under
+  `~/test/docx_reports`.  Generated flows are persisted to and reloaded from
+  the manifest by default.
 - `examples/dynamic_skill_mcp_agent.py` — zero static flows, Agent Skill
   guidance, optional Claude `pptx` Skill usage, compact tool catalog settings,
   and dynamic MCP server registration for Playwright or Figma.
