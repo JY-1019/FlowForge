@@ -150,6 +150,52 @@ def _build_request(target_url: str) -> dict[str, Any]:
     }
 
 
+def _fallback_flow_code() -> str:
+    return '''
+from flowforge import flow, task, step
+
+@flow(name="dynamic_skill_mcp_probe", prompt="Register Playwright MCP, inspect a page with Skills, and write a markdown brief.")
+class DynamicSkillMcpProbeFlow:
+    @task(name="brief", prompt="Register declared browser tools and write a compact markdown brief.")
+    class BriefTask:
+        @step(order=1, prompt="Register Playwright MCP tools and write a compact brief.", tools=["mcp_register_server", "markdown_write"], timeout_seconds=60)
+        async def write(ctx):
+            raw = ctx.input
+            if hasattr(raw, "model_dump"):
+                raw = raw.model_dump()
+            params = raw if isinstance(raw, dict) else {}
+            target_url = params.get("target_url", "https://example.com")
+            registered = await ctx.call_tool(
+                "mcp_register_server",
+                server_name="playwright",
+                tool_names="browser_navigate,browser_snapshot",
+            )
+            content = (
+                "# Dynamic Skill + MCP demo brief\\n\\n"
+                f"- target_url: {target_url}\\n"
+                f"- registered_ok: {registered.get('ok')}\\n"
+                f"- registered_tools: {', '.join(registered.get('registered_tools', []))}\\n"
+                "- note: fallback flow used because live dynamic generation can exceed the demo timeout.\\n"
+            )
+            written = await ctx.call_tool(
+                "markdown_write",
+                path="reports/dynamic_skill_mcp_probe.md",
+                content=content,
+            )
+            if not written.get("ok"):
+                raise RuntimeError(written.get("error", "markdown_write failed"))
+            return {
+                "target_url": target_url,
+                "registered_tools": registered.get("registered_tools", []),
+                "artifact_path": written.get("path"),
+                "notes": [
+                    registered.get("error")
+                    or "MCP registration attempted"
+                ],
+            }
+'''.strip()
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -181,14 +227,22 @@ async def main() -> None:
 
     request = _build_request(args.target)
 
-    flow_meta, generated_code = await generator.generate_and_compile(
-        flow_name="dynamic_skill_mcp_probe",
-        flow_prompt=(
-            "Register Playwright MCP, inspect a page with Skills, "
-            "and write a markdown brief."
-        ),
-        user_query=request,
-    )
+    try:
+        flow_meta, generated_code = await asyncio.wait_for(
+            generator.generate_and_compile(
+                flow_name="dynamic_skill_mcp_probe",
+                flow_prompt=(
+                    "Register Playwright MCP, inspect a page with Skills, "
+                    "and write a markdown brief."
+                ),
+                user_query=request,
+            ),
+            timeout=int(os.getenv("FLOWFORGE_DYNAMIC_MCP_CODEGEN_TIMEOUT", "10")),
+        )
+    except TimeoutError:
+        generated_code = _fallback_flow_code()
+        flow_meta = generator.compile_flow_code(generated_code)
+
     engine.add_flow(flow_meta.cls)
     result = await engine.run(request, route="dynamic_skill_mcp_probe")
 

@@ -1494,7 +1494,7 @@ class TestClaudeSkillTool:
             call_args = mock_run.call_args
             cmd = call_args[0][0]
             assert "/usr/local/bin/claude" in cmd
-            assert "--prompt" in cmd
+            assert "/commit fix bug" in cmd
 
 
 class TestAgentSkillTool:

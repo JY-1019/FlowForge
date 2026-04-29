@@ -643,11 +643,10 @@ class StepContext:
         # Build the full prompt with skill invocation
         full_prompt = f"/{skill_name} {prompt}"
 
-        cmd = [claude_bin, "--print", "--no-input"]
+        cmd = [claude_bin, "--print"]
         if model:
             cmd.extend(["--model", model])
-        cmd.extend(["--max-tokens", str(max_tokens)])
-        cmd.extend(["--prompt", full_prompt])
+        cmd.append(full_prompt)
 
         # Determine working directory
         run_cwd = cwd

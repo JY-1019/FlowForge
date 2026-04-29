@@ -34,6 +34,9 @@ import json
 import logging
 import os
 import re
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -264,9 +267,11 @@ def _llm_config_from_env() -> LLMConfig:
 def _dynamic_options(
     *,
     generated_dir: str = GENERATED_DIR,
-    auto_load_generated: bool = True,
+    auto_load_generated: bool | None = None,
 ) -> DynamicRunOptions:
     """Options tuned for examples: fast generation, persisted generated files."""
+    if auto_load_generated is None:
+        auto_load_generated = os.getenv("FLOWFORGE_PAPER_AUTOLOAD", "0") == "1"
     return DynamicRunOptions(
         project_root=str(ROOT_DIR.parent),
         generated_dir=generated_dir,
@@ -338,6 +343,86 @@ class PresentationArtifact(BaseModel):
     slide_count: int
     source_url: str
     generated_at: str
+
+
+# ---------------------------------------------------------------------------
+# Stable upstream fetcher
+# ---------------------------------------------------------------------------
+
+@flow(
+    name="arxiv_paper_fetcher",
+    prompt=(
+        "Fetch the latest AI papers from arXiv and return the PaperPayload "
+        "schema consumed by the report pipeline."
+    ),
+)
+class ArxivPaperFetcher:
+    @task(name="fetch_arxiv", prompt="Fetch and validate recent arXiv AI papers")
+    class FetchArxivTask:
+        @step(
+            order=1,
+            prompt="Call the arXiv Atom API and parse the top three entries.",
+            output_schema=PaperPayload,
+        )
+        async def fetch(ctx):
+            query = urllib.parse.urlencode({
+                "search_query": "cat:cs.AI OR cat:cs.LG",
+                "start": 0,
+                "max_results": 3,
+                "sortBy": "submittedDate",
+                "sortOrder": "descending",
+            })
+            url = f"{ARXIV_API_URL}?{query}"
+            with urllib.request.urlopen(url, timeout=20) as response:
+                body = response.read()
+
+            root = ET.fromstring(body)
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            papers: list[dict[str, Any]] = []
+            for rank, entry in enumerate(root.findall("atom:entry", ns), start=1):
+                title = " ".join(
+                    (entry.findtext("atom:title", default="", namespaces=ns) or "")
+                    .split()
+                )
+                summary = " ".join(
+                    (entry.findtext("atom:summary", default="", namespaces=ns) or "")
+                    .split()
+                )
+                authors = [
+                    author.findtext("atom:name", default="", namespaces=ns) or ""
+                    for author in entry.findall("atom:author", ns)
+                ]
+                links = entry.findall("atom:link", ns)
+                abstract_url = entry.findtext("atom:id", default="", namespaces=ns) or ""
+                pdf_url = ""
+                for link in links:
+                    if link.attrib.get("title") == "pdf":
+                        pdf_url = link.attrib.get("href", "")
+                        break
+
+                if not title or "arxiv.org/abs/" not in abstract_url:
+                    raise RuntimeError(f"Invalid arXiv entry at rank {rank}: {title}")
+
+                papers.append({
+                    "rank": rank,
+                    "title": title,
+                    "authors": [author for author in authors if author],
+                    "published": entry.findtext(
+                        "atom:published", default="", namespaces=ns,
+                    ) or "",
+                    "abstract_url": abstract_url,
+                    "pdf_url": pdf_url,
+                    "summary_snippet": summary,
+                })
+
+            if len(papers) < 3:
+                raise RuntimeError(f"Expected 3 arXiv papers, got {len(papers)}")
+
+            return PaperPayload(
+                papers=[Paper.model_validate(paper) for paper in papers],
+                source_url=url,
+                fetched_at=datetime.now(timezone.utc).isoformat(),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +639,7 @@ class PaperReportPipeline:
     dynamic_flow=True,
 )
 class DynamicPaperReportAgent:
+    ArxivPaperFetcher = ArxivPaperFetcher
     PaperReportPipeline = PaperReportPipeline
 
 
