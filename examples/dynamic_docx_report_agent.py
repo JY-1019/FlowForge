@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 
 from flowforge import DynamicRunOptions, FlowForge, global_config
-from flowforge.types import LLMConfig
+from flowforge.types import DependencyPolicy, LLMConfig
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -79,6 +79,10 @@ async def main() -> None:
         include_builtin_tools=True,
         allow_codegen_tool_use=False,
         shell_output_max_chars=int(os.getenv("FLOWFORGE_DOCX_FETCH_CHARS", "50000")),
+        dependency_policy=DependencyPolicy(
+            allow_install=True,
+            allowed_packages=["python-docx"],
+        ),
     )
 
     engine = FlowForge.compile(DynamicDocxReportAgent, dynamic_options=options)

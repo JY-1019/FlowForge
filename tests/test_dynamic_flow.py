@@ -1799,6 +1799,54 @@ class TestBuiltinUtilityTools:
         assert result["ok"] is False
         assert "python-docx" in result["error"]
 
+    def test_docx_create_auto_installs_when_policy_allows(self, tmp_path):
+        from flowforge.tools.builtin import _make_docx_create_tool
+        from flowforge.types import DependencyPolicy
+        from unittest.mock import patch
+        import builtins
+
+        options = DynamicRunOptions(
+            project_root=str(tmp_path),
+            dependency_policy=DependencyPolicy(
+                allow_install=True,
+                allowed_packages=["python-docx"],
+            ),
+        )
+        tool = _make_docx_create_tool(tmp_path, options)
+        original_import = builtins.__import__
+        import_calls = {"docx": 0}
+        install_calls = []
+
+        def mock_import(name, *args, **kwargs):
+            if name == "docx" and import_calls["docx"] == 0:
+                import_calls["docx"] += 1
+                raise ImportError("No module named 'docx'")
+            return original_import(name, *args, **kwargs)
+
+        def fake_make_pip_install_tool(_options):
+            def install(packages):
+                install_calls.append(packages)
+                return {"ok": True, "packages": [packages]}
+
+            return install
+
+        with (
+            patch("builtins.__import__", side_effect=mock_import),
+            patch(
+                "flowforge.tools.builtin._make_pip_install_tool",
+                side_effect=fake_make_pip_install_tool,
+            ),
+        ):
+            result = tool(
+                path="test.docx",
+                content='[{"type": "paragraph", "text": "Hello"}]',
+            )
+
+        assert result["ok"] is True
+        assert result["installed_dependency"] is True
+        assert install_calls == ["python-docx"]
+        assert (tmp_path / "test.docx").exists()
+
     def test_chart_create_missing_package(self, tmp_path):
         from flowforge.tools.builtin import _make_chart_create_tool
         from unittest.mock import patch

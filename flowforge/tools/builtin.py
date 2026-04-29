@@ -427,14 +427,15 @@ def _create_document_tools(options: DynamicRunOptions) -> list[FunctionTool]:
             ),
         ),
         FunctionTool(
-            func=_make_docx_create_tool(project_root),
+            func=_make_docx_create_tool(project_root, options),
             name="docx_create",
             description=(
                 "Create a Word (.docx) document from structured content. "
                 "Accepts a list of content blocks, each with 'type' "
                 "('heading', 'paragraph', 'bullets') and 'text' or 'items'. "
-                "Requires the 'python-docx' package (use pip_install to "
-                "install if missing). Path must be relative to the project root."
+                "Requires python-docx; auto-installs it when "
+                "DependencyPolicy.allow_install=True. Path must be relative "
+                "to the project root."
             ),
         ),
         FunctionTool(
@@ -1229,7 +1230,10 @@ def _make_csv_write_tool(project_root: Path):
     return _tool
 
 
-def _make_docx_create_tool(project_root: Path):
+def _make_docx_create_tool(
+    project_root: Path,
+    options: DynamicRunOptions | None = None,
+):
     def _tool(path: str, content: str) -> dict[str, Any]:
         import json as _json
 
@@ -1246,17 +1250,42 @@ def _make_docx_create_tool(project_root: Path):
         if not isinstance(blocks, list):
             return {"ok": False, "error": "content must be a JSON array of block objects"}
 
+        install_attempt: dict[str, Any] | None = None
         try:
             from docx import Document
         except ImportError:
-            return {
-                "ok": False,
-                "error": (
-                    "The 'python-docx' package is not installed. "
-                    "Use the pip_install tool to install it first: "
-                    "pip_install(packages='python-docx')"
-                ),
-            }
+            if options is not None and options.dependency_policy.allow_install:
+                install_attempt = _make_pip_install_tool(options)("python-docx")
+                if install_attempt.get("ok"):
+                    try:
+                        from docx import Document
+                    except ImportError as exc:
+                        return {
+                            "ok": False,
+                            "error": (
+                                "python-docx installation reported success, "
+                                f"but importing docx still failed: {exc}"
+                            ),
+                            "install_attempt": install_attempt,
+                        }
+                else:
+                    return {
+                        "ok": False,
+                        "error": (
+                            "The 'python-docx' package is not installed, and "
+                            f"automatic installation failed: {install_attempt.get('error') or install_attempt.get('stderr')}"
+                        ),
+                        "install_attempt": install_attempt,
+                    }
+            else:
+                return {
+                    "ok": False,
+                    "error": (
+                        "The 'python-docx' package is not installed. "
+                        "Enable DependencyPolicy(allow_install=True) or use "
+                        "pip_install(packages='python-docx') before docx_create."
+                    ),
+                }
 
         try:
             doc = Document()
@@ -1291,6 +1320,7 @@ def _make_docx_create_tool(project_root: Path):
                 "path": path,
                 "block_count": len(blocks),
                 "size": resolved.stat().st_size,
+                "installed_dependency": bool(install_attempt),
             }
         except Exception as e:
             return {"ok": False, "error": f"Failed to create DOCX: {e}"}
