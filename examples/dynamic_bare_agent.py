@@ -1,13 +1,14 @@
-"""Bare agent — zero flows, zero tools, everything generated at runtime.
+"""Bare agent — zero static flows, zero tools, dynamic flow reuse enabled.
 
 This is the simplest possible dynamic flow example.  The agent has:
 - No ``@flow`` classes
 - No ``FunctionTool`` registrations
 - No external API dependencies
 
-When the user sends a request, the planner finds nothing in the DAG,
-reports a gap, and the ``_dynamic_generator`` meta-flow creates the
-required flow(s) from scratch using only ``ctx.call_llm()``.
+When no persisted generated flow exists, the planner reports a gap and the
+``_dynamic_generator`` meta-flow creates the required flow.  On later runs,
+the manifest-loaded generated flow is reused so the example remains stable
+even when the planning LLM is temporarily unavailable.
 
 Run:
 
@@ -48,7 +49,7 @@ def _dynamic_options() -> DynamicRunOptions:
     return DynamicRunOptions(
         project_root=str(ROOT_DIR.parent),
         generated_dir=GENERATED_DIR,
-        auto_load_generated=False,
+        auto_load_generated=True,
         persist_generated=True,
         include_builtin_tools=False,
         allow_codegen_tool_use=False,
@@ -94,7 +95,7 @@ async def main() -> None:
     await engine.generate_docs(planning_only=True)
 
     print("=" * 50)
-    print("Bare Agent — zero flows, zero tools")
+    print("Bare Agent — zero static flows, zero tools")
     print("=" * 50)
     print(f"  User flows: {_user_flow_names(engine) or '(none)'}")
     print(f"  Tools: (none)")
