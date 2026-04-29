@@ -27,6 +27,8 @@ from typing import Any, TYPE_CHECKING
 
 from pydantic import BaseModel, Field, field_validator
 
+from flowforge.errors import PlannerError
+
 if TYPE_CHECKING:
     from flowforge.dynamic.plan import WorkflowPlan
     from flowforge.types import DynamicRunOptions, LLMConfig, ToolConfig
@@ -317,100 +319,6 @@ def _validate_selection(
     return None
 
 
-def _tool_names_for_mode(
-    catalog: dict[str, list[dict[str, str]]],
-    mode: str,
-) -> set[str]:
-    return {entry["name"] for entry in catalog.get(mode, []) if entry.get("name")}
-
-
-def heuristic_capability_selection(
-    *,
-    plan: "WorkflowPlan",
-    tool_configs: list["ToolConfig"],
-    dynamic_options: Any = None,
-) -> CapabilitySelection:
-    """Pick conservative capabilities when the selector LLM is unavailable."""
-
-    catalog = _classify_tool_configs(tool_configs)
-    builtin_names = _tool_names_for_mode(catalog, "builtin_tool")
-    mcp_options = _mcp_options_summary(dynamic_options)
-
-    selections: list[StepCapability] = []
-    for step in plan.steps:
-        text = f"{step.name} {step.purpose}".lower()
-        mode = "llm_only"
-        tool_names: list[str] = []
-        rationale = "Heuristic fallback uses LLM-only reasoning."
-
-        if (
-            "web_fetch_url" in builtin_names
-            and any(
-                term in text
-                for term in (
-                    "fetch", "http", "web", "url", "api", "crawl",
-                    "scrape", "download", "source data", "external source",
-                )
-            )
-        ):
-            mode = "builtin_tool"
-            tool_names = ["web_fetch_url"]
-            rationale = "Heuristic fallback selected the registered web fetch tool."
-        elif (
-            "files_write_text" in builtin_names
-            and any(
-                term in text
-                for term in ("write", "save", "persist", "create file")
-            )
-        ):
-            mode = "builtin_tool"
-            tool_names = ["files_write_text"]
-            rationale = "Heuristic fallback selected the registered file writer."
-        elif (
-            "files_read_text" in builtin_names
-            and any(term in text for term in ("read back", "read text"))
-        ):
-            mode = "builtin_tool"
-            tool_names = ["files_read_text"]
-            rationale = "Heuristic fallback selected the registered text reader."
-        elif (
-            "files_list_dir" in builtin_names
-            and any(term in text for term in ("verify", "exists", "directory"))
-        ):
-            mode = "builtin_tool"
-            tool_names = ["files_list_dir"]
-            rationale = "Heuristic fallback selected the registered directory lister."
-        elif step.needs_llm_reasoning:
-            rationale = "The planned step requires generative reasoning."
-        elif mcp_options and any(term in text for term in ("browser", "figma")):
-            server_name, tools = next(iter(mcp_options.items()))
-            if tools:
-                mode = "mcp"
-                tool_names = [tools[0]]
-                rationale = "Heuristic fallback selected a declared MCP capability."
-                selections.append(
-                    StepCapability(
-                        step_name=step.name,
-                        mode=mode,
-                        tool_names=tool_names,
-                        mcp_server_name=server_name,
-                        rationale=rationale,
-                    )
-                )
-                continue
-
-        selections.append(
-            StepCapability(
-                step_name=step.name,
-                mode=mode,
-                tool_names=tool_names,
-                rationale=rationale,
-            )
-        )
-
-    return CapabilitySelection(selections=selections)
-
-
 # ---------------------------------------------------------------------------
 # LLM driver
 # ---------------------------------------------------------------------------
@@ -544,24 +452,13 @@ async def select_capabilities(
                 "Fix the listed issues and resubmit."
             )
 
-        try:
-            raw = await call_with_tool(
-                prompt=prompt,
-                tool_schema=_CAPABILITY_TOOL_SCHEMA,
-                llm_config=llm_config,
-                system_prompt=_CAPABILITY_SYSTEM,
-                max_tokens=_CAPABILITY_MAX_TOKENS,
-            )
-        except Exception as exc:
-            logger.warning(
-                "capability selection LLM failed; using heuristic fallback: %s",
-                exc,
-            )
-            return heuristic_capability_selection(
-                plan=plan,
-                tool_configs=tool_configs,
-                dynamic_options=dynamic_options,
-            )
+        raw = await call_with_tool(
+            prompt=prompt,
+            tool_schema=_CAPABILITY_TOOL_SCHEMA,
+            llm_config=llm_config,
+            system_prompt=_CAPABILITY_SYSTEM,
+            max_tokens=_CAPABILITY_MAX_TOKENS,
+        )
         try:
             selection = CapabilitySelection.model_validate(raw)
         except Exception as exc:
@@ -588,16 +485,9 @@ async def select_capabilities(
             attempt + 1, err,
         )
 
-    logger.warning(
-        "capability selection validation failed after %d attempts; "
-        "using heuristic fallback. last error: %s",
-        _CAPABILITY_RETRIES + 1,
-        last_error,
-    )
-    return heuristic_capability_selection(
-        plan=plan,
-        tool_configs=tool_configs,
-        dynamic_options=dynamic_options,
+    raise PlannerError(
+        "capability selection validation failed after "
+        f"{_CAPABILITY_RETRIES + 1} attempts: {last_error}"
     )
 
 
@@ -605,6 +495,5 @@ __all__ = [
     "CapabilityMode",
     "StepCapability",
     "CapabilitySelection",
-    "heuristic_capability_selection",
     "select_capabilities",
 ]

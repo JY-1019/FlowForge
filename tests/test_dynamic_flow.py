@@ -428,7 +428,7 @@ class TestHelpers:
         assert _sanitise_name("valid_name") == "valid_name"
 
     @pytest.mark.asyncio
-    async def test_gap_analysis_uses_heuristic_when_llm_fails(self):
+    async def test_gap_analysis_raises_when_llm_fails(self):
         from flowforge.dynamic.generator import DynamicFlowGenerator
 
         engine = FlowForge.compile(BasicAgent)
@@ -442,13 +442,10 @@ class TestHelpers:
             new_callable=AsyncMock,
         ) as mock_call:
             mock_call.side_effect = TimeoutError("network timeout")
-            result = await generator.analyse_gap(
-                "세계에서 가장 높은 산 Top 5를 표로 정리해줘"
-            )
-
-        assert result["covered"] is False
-        assert result["suggested_flow_name"] == "top5_highest_mountains_table"
-        assert "heuristic" in result["reason"].lower()
+            with pytest.raises(TimeoutError):
+                await generator.analyse_gap(
+                    "세계에서 가장 높은 산 Top 5를 표로 정리해줘"
+                )
 
 
 class TestDynamicGeneratorPrompting:
@@ -1846,6 +1843,40 @@ class TestBuiltinUtilityTools:
         assert result["installed_dependency"] is True
         assert install_calls == ["python-docx"]
         assert (tmp_path / "test.docx").exists()
+
+    def test_docx_create_skips_json_ld_metadata(self, tmp_path):
+        from flowforge.tools.builtin import _make_docx_create_tool
+        import json
+
+        docx = pytest.importorskip("docx")
+        tool = _make_docx_create_tool(tmp_path)
+        json_ld = {
+            "@context": "https://schema.org",
+            "@type": "NewsArticle",
+            "headline": "Metadata should not appear",
+        }
+
+        result = tool(
+            path="test.docx",
+            content=json.dumps([
+                {"type": "heading", "level": 1, "text": "Clean report"},
+                {"type": "paragraph", "text": "Useful summary"},
+                {"type": "paragraph", "text": json.dumps(json_ld)},
+                {"@context": "https://schema.org", "@type": "WebPage"},
+                {"type": "bullets", "items": ["Visible item", json_ld]},
+            ]),
+        )
+
+        assert result["ok"] is True
+        assert result["skipped_metadata_count"] == 3
+
+        document = docx.Document(str(tmp_path / "test.docx"))
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        assert "Clean report" in text
+        assert "Useful summary" in text
+        assert "Visible item" in text
+        assert "@context" not in text
+        assert "Metadata should not appear" not in text
 
     def test_chart_create_missing_package(self, tmp_path):
         from flowforge.tools.builtin import _make_chart_create_tool

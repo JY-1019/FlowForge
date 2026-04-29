@@ -6,12 +6,13 @@ Covers:
 - Max retries exhausted → last result accepted
 - Passed on first attempt → no retries
 - Feedback history is accessible via ctx.pass_criteria_feedback
-- Judge failure (exception) → result accepted gracefully
+- Judge failure (exception) → execution fails
 """
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from flowforge import global_config, flow, task, step, FlowForge
+from flowforge.errors import ExecutionError
 from flowforge.execution.runner import _parse_judge_response
 
 
@@ -146,8 +147,8 @@ class TestPassCriteriaIntegration:
         assert result["attempt"] == 4
 
     @pytest.mark.asyncio
-    async def test_judge_exception_accepts_result(self):
-        """If judge LLM call fails, the result is accepted gracefully."""
+    async def test_judge_exception_fails_execution(self):
+        """If judge LLM call fails, the step fails instead of accepting output."""
         _reset()
 
         async def mock_judge(**kwargs):
@@ -155,10 +156,12 @@ class TestPassCriteriaIntegration:
 
         with patch("flowforge.execution.llm.call_llm_api", side_effect=mock_judge):
             engine = FlowForge.compile(CriteriaAgent)
-            result = await engine.run(None)
+            with pytest.raises(ExecutionError):
+                await engine.run(None)
 
-        assert _criteria_call_count == 1  # only ran once, judge failed → accepted
-        assert result["attempt"] == 1
+        # The enclosing flow still applies its normal retry policy, but the
+        # judge failure is never accepted as a valid step result.
+        assert _criteria_call_count == 4
 
 
 # Agent without pass_criteria — should work normally.

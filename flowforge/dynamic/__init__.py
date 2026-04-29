@@ -13,7 +13,6 @@ Public API
 from flowforge.dynamic.capability import (
     CapabilitySelection,
     StepCapability,
-    heuristic_capability_selection,
     select_capabilities,
 )
 from flowforge.dynamic.generator import DynamicFlowGenerator, detect_output_artifacts
@@ -32,7 +31,6 @@ from flowforge.dynamic.plan import (
     PlannedBranch,
     PlannedStep,
     WorkflowPlan,
-    heuristic_workflow_plan,
     plan_workflow,
 )
 
@@ -48,8 +46,6 @@ __all__ = [
     "StepCapability",
     "WorkflowPlan",
     "detect_output_artifacts",
-    "heuristic_capability_selection",
-    "heuristic_workflow_plan",
     "load_manifest",
     "plan_workflow",
     "provision_mcp_servers",

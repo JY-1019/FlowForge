@@ -7,8 +7,7 @@ This is the simplest possible dynamic flow example.  The agent has:
 
 When no persisted generated flow exists, the planner reports a gap and the
 ``_dynamic_generator`` meta-flow creates the required flow.  On later runs,
-the manifest-loaded generated flow is reused so the example remains stable
-even when the planning LLM is temporarily unavailable.
+the manifest-loaded generated flow is reused directly.
 
 Run:
 

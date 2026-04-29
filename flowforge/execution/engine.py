@@ -8,6 +8,7 @@ from typing import Any, TYPE_CHECKING
 from flowforge.execution.context import GlobalContext
 from flowforge.execution.memory import SessionMemory
 from flowforge.execution.runner import FlowRunner
+from flowforge.errors import PlannerError
 from flowforge.schema.dag import FlowForgeDAG, NodeType
 from flowforge.annotations.metadata import GlobalMeta
 from flowforge.viz.run_trace import RunTracer, RunTrace
@@ -173,89 +174,82 @@ class ExecutionEngine:
 
         # ── AI Planning (autonomous / hybrid) ──────────────────────────────
         elif planning_mode != "deterministic" and self._docs:
-            try:
-                plan = await self._plan_with_llm(input_data, planning_mode)
-                planned_node_ids, planned_root_flow_ids, user_flow_ids = (
-                    self._extract_plan_selection(plan)
-                )
+            plan = await self._plan_with_llm(input_data, planning_mode)
+            planned_node_ids, planned_root_flow_ids, user_flow_ids = (
+                self._extract_plan_selection(plan)
+            )
 
+            _logger.info(
+                "planner selected %d nodes (%d user flows) for mode=%s, "
+                "rationale: %s, flows: %s",
+                len(planned_node_ids), len(user_flow_ids), planning_mode,
+                plan.rationale, user_flow_ids,
+            )
+
+            # ── Dynamic flow: support full gaps and partial gaps ─────────
+            gap_detected = bool(plan.metadata.get("gap_detected", False))
+            if (
+                (gap_detected or not user_flow_ids)
+                and self._global_meta.dynamic_flow
+                and run_dynamic_options.enabled
+                and self._compiled_agent is not None
+            ):
                 _logger.info(
-                    "planner selected %d nodes (%d user flows) for mode=%s, "
-                    "rationale: %s, flows: %s",
-                    len(planned_node_ids), len(user_flow_ids), planning_mode,
-                    plan.rationale, user_flow_ids,
+                    "planner reported %s — triggering dynamic flow generation",
+                    "partial gap" if gap_detected else "no matching user flows",
                 )
-
-                # ── Dynamic flow: support full gaps and partial gaps ─────
-                gap_detected = bool(plan.metadata.get("gap_detected", False))
-                if (
-                    (gap_detected or not user_flow_ids)
-                    and self._global_meta.dynamic_flow
-                    and run_dynamic_options.enabled
-                    and self._compiled_agent is not None
-                ):
-                    _logger.info(
-                        "planner reported %s — triggering dynamic flow "
-                        "generation",
-                        "partial gap" if gap_detected else "no matching user flows",
+                dynamic_results: list[dict[str, Any]] = []
+                dynamic_payloads = self._build_dynamic_inputs(
+                    input_data, plan, run_dynamic_options,
+                )
+                if not dynamic_payloads:
+                    raise PlannerError(
+                        "planner requested dynamic generation, but no valid "
+                        "dynamic payloads could be built"
                     )
-                    dynamic_results: list[dict[str, Any]] = []
-                    dynamic_payloads = self._build_dynamic_inputs(
-                        input_data, plan, run_dynamic_options,
-                    )
-                    if not dynamic_payloads:
-                        _logger.warning(
-                            "no valid dynamic payloads could be built — "
-                            "falling back to deterministic execution"
+                for dynamic_input in dynamic_payloads:
+                    try:
+                        dynamic_result = await self._execute_dynamic_generator(
+                            global_ctx,
+                            dynamic_input,
                         )
-                    for dynamic_input in dynamic_payloads:
-                        try:
-                            dynamic_result = await self._execute_dynamic_generator(
-                                global_ctx,
-                                dynamic_input,
-                            )
-                        except Exception as dynamic_exc:
-                            dynamic_result = {
-                                "success": False,
-                                "injected": False,
-                                "reason": str(dynamic_exc),
-                                "error": str(dynamic_exc),
-                            }
-                        dynamic_results.append(dynamic_result)
+                    except Exception as dynamic_exc:
+                        dynamic_result = {
+                            "success": False,
+                            "injected": False,
+                            "reason": str(dynamic_exc),
+                            "error": str(dynamic_exc),
+                        }
+                    dynamic_results.append(dynamic_result)
 
-                        if not dynamic_result.get("success", False):
-                            current_output = dynamic_result
-                            self._set_last_dynamic_generation(dynamic_result)
-                            self.memory.record_run(
-                                input_data=input_data,
-                                output_data=current_output,
-                                route=route,
-                                planning_mode=planning_mode,
-                            )
-                            run_trace = (
-                                tracer.finish_run(current_output) if tracer else RunTrace()
-                            )
-                            return current_output, run_trace
+                    if not dynamic_result.get("success", False):
+                        current_output = dynamic_result
+                        self._set_last_dynamic_generation(dynamic_result)
+                        self.memory.record_run(
+                            input_data=input_data,
+                            output_data=current_output,
+                            route=route,
+                            planning_mode=planning_mode,
+                        )
+                        run_trace = (
+                            tracer.finish_run(current_output) if tracer else RunTrace()
+                        )
+                        return current_output, run_trace
 
-                    last_dynamic = (
-                        dynamic_results[0]
-                        if len(dynamic_results) == 1
-                        else {"success": True, "generated": dynamic_results}
-                    )
-                    self._set_last_dynamic_generation(last_dynamic)
+                last_dynamic = (
+                    dynamic_results[0]
+                    if len(dynamic_results) == 1
+                    else {"success": True, "generated": dynamic_results}
+                )
+                self._set_last_dynamic_generation(last_dynamic)
 
-                    replanned = await self._plan_with_llm(input_data, planning_mode)
-                    planned_node_ids, planned_root_flow_ids, user_flow_ids = (
-                        self._extract_plan_selection(replanned)
-                    )
-                    _logger.info(
-                        "replanned after dynamic injection: %d nodes, roots=%s",
-                        len(planned_node_ids), planned_root_flow_ids,
-                    )
-
-            except Exception as e:
-                _logger.warning(
-                    "planning failed (%s), falling back to deterministic order", e
+                replanned = await self._plan_with_llm(input_data, planning_mode)
+                planned_node_ids, planned_root_flow_ids, user_flow_ids = (
+                    self._extract_plan_selection(replanned)
+                )
+                _logger.info(
+                    "replanned after dynamic injection: %d nodes, roots=%s",
+                    len(planned_node_ids), planned_root_flow_ids,
                 )
 
         global_ctx.planned_node_ids = planned_node_ids
@@ -485,7 +479,7 @@ class ExecutionEngine:
 
     @staticmethod
     def _order_dynamic_bridge_flows(root_flows: list[Any]) -> list[Any]:
-        """Honor generated-flow bridge metadata during fallback execution."""
+        """Honor generated-flow bridge metadata during bridge execution."""
 
         ordered = list(root_flows)
         for node in list(ordered):

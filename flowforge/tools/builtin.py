@@ -444,6 +444,9 @@ def _create_document_tools(options: DynamicRunOptions) -> list[FunctionTool]:
             description=(
                 "Write a Markdown (.md) file. Accepts the markdown content "
                 "as a string. Path must be relative to the project root. "
+                "For FlowForge run reports, keep content concise and prefer "
+                "the executed path or summary over a full DAG Mermaid dump "
+                "unless the user explicitly asks for the full DAG. "
                 "No external dependencies required."
             ),
         ),
@@ -1230,6 +1233,52 @@ def _make_csv_write_tool(project_root: Path):
     return _tool
 
 
+def _is_docx_json_ld_metadata(value: Any) -> bool:
+    """Return True for schema.org/JSON-LD blobs that should not become prose."""
+    import json as _json
+
+    if isinstance(value, dict):
+        if "@context" in value or "@type" in value:
+            return True
+        graph = value.get("@graph")
+        return isinstance(graph, list) and any(
+            _is_docx_json_ld_metadata(item) for item in graph
+        )
+
+    if isinstance(value, list):
+        return bool(value) and all(_is_docx_json_ld_metadata(item) for item in value)
+
+    if not isinstance(value, str):
+        return False
+
+    text = value.strip()
+    if not text:
+        return False
+
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3:
+            text = "\n".join(lines[1:-1]).strip()
+
+    try:
+        parsed = _json.loads(text)
+    except (_json.JSONDecodeError, TypeError):
+        probe = text[:2000]
+        return (
+            probe.startswith(("{", "["))
+            and '"@context"' in probe
+            and ('"@type"' in probe or '"@graph"' in probe)
+        )
+
+    return _is_docx_json_ld_metadata(parsed)
+
+
+def _docx_text_or_none(value: Any) -> str | None:
+    if value is None or _is_docx_json_ld_metadata(value):
+        return None
+    return str(value)
+
+
 def _make_docx_create_tool(
     project_root: Path,
     options: DynamicRunOptions | None = None,
@@ -1289,29 +1338,59 @@ def _make_docx_create_tool(
 
         try:
             doc = Document()
+            skipped_metadata_count = 0
             for block in blocks:
+                if not isinstance(block, dict):
+                    if _is_docx_json_ld_metadata(block):
+                        skipped_metadata_count += 1
+                        continue
+                    return {
+                        "ok": False,
+                        "error": "content must be a JSON array of block objects",
+                    }
+
+                if _is_docx_json_ld_metadata(block):
+                    skipped_metadata_count += 1
+                    continue
+
                 block_type = block.get("type", "paragraph")
                 if block_type == "heading":
                     level = block.get("level", 1)
-                    doc.add_heading(block.get("text", ""), level=level)
+                    text = _docx_text_or_none(block.get("text"))
+                    if text is not None:
+                        doc.add_heading(text, level=level)
+                    else:
+                        skipped_metadata_count += 1
                 elif block_type == "paragraph":
-                    doc.add_paragraph(block.get("text", ""))
+                    text = _docx_text_or_none(block.get("text"))
+                    if text is not None:
+                        doc.add_paragraph(text)
+                    else:
+                        skipped_metadata_count += 1
                 elif block_type == "bullets":
                     for item in block.get("items", []):
-                        doc.add_paragraph(str(item), style="List Bullet")
+                        text = _docx_text_or_none(item)
+                        if text is not None:
+                            doc.add_paragraph(text, style="List Bullet")
+                        else:
+                            skipped_metadata_count += 1
                 elif block_type == "table":
                     rows_data = block.get("rows", [])
                     headers = block.get("headers", [])
                     if headers:
-                        table = doc.add_table(rows=1, cols=len(headers))
+                        table_headers = [
+                            _docx_text_or_none(header) or ""
+                            for header in headers
+                        ]
+                        table = doc.add_table(rows=1, cols=len(table_headers))
                         table.style = "Table Grid"
-                        for i, h in enumerate(headers):
-                            table.rows[0].cells[i].text = str(h)
+                        for i, h in enumerate(table_headers):
+                            table.rows[0].cells[i].text = h
                         for row_data in rows_data:
                             row = table.add_row()
                             for i, val in enumerate(row_data):
-                                if i < len(headers):
-                                    row.cells[i].text = str(val)
+                                if i < len(table_headers):
+                                    row.cells[i].text = _docx_text_or_none(val) or ""
 
             resolved.parent.mkdir(parents=True, exist_ok=True)
             doc.save(str(resolved))
@@ -1319,6 +1398,7 @@ def _make_docx_create_tool(
                 "ok": True,
                 "path": path,
                 "block_count": len(blocks),
+                "skipped_metadata_count": skipped_metadata_count,
                 "size": resolved.stat().st_size,
                 "installed_dependency": bool(install_attempt),
             }

@@ -1338,19 +1338,15 @@ async def main():
     print(f"  (Task/Step {len(all_nodes) - all_flow_count - 1}개는 건너뜀 — Planner에 불필요)")
     print(f"  병렬 LLM 호출 (concurrency=5)로 속도 최적화 중...")
     t0 = time.perf_counter()
-    try:
-        docs = await engine.generate_docs(planning_only=True)
-        elapsed = (time.perf_counter() - t0) * 1000
-        print(f"  doc 생성 완료: {len(docs)}개 노드, 소요시간: {elapsed:.0f}ms")
-        # 샘플 3개만 미리보기
-        print("\n  Doc 샘플 (최대 3개):")
-        for node_id, doc in list(docs.items())[:3]:
-            summary = getattr(doc, "summary", "")[:100]
-            print(f"    · {node_id}")
-            print(f"        summary: {summary}")
-    except Exception as e:
-        print(f"  [WARN] doc 생성 중 일부/전체 실패 ({type(e).__name__}: {e})")
-        print(f"         → fallback doc(프롬프트 첫 200자)으로 autonomous 모드가 동작합니다.")
+    docs = await engine.generate_docs(planning_only=True)
+    elapsed = (time.perf_counter() - t0) * 1000
+    print(f"  doc 생성 완료: {len(docs)}개 노드, 소요시간: {elapsed:.0f}ms")
+    # 샘플 3개만 미리보기
+    print("\n  Doc 샘플 (최대 3개):")
+    for node_id, doc in list(docs.items())[:3]:
+        summary = getattr(doc, "summary", "")[:100]
+        print(f"    · {node_id}")
+        print(f"        summary: {summary}")
 
     # ── Phase 3: Autonomous 실행 테스트 ─────────────────────────────────
     #

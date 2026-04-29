@@ -44,7 +44,6 @@ from flowforge import DynamicRunOptions, FlowForge, flow, global_config, step, t
 from flowforge.types import DependencyPolicy, LLMConfig
 
 
-LOG = logging.getLogger(__name__)
 ROOT_DIR = Path(__file__).resolve().parent
 ARTIFACT_DIR = ROOT_DIR / "_artifacts" / "dynamic_paper_report"
 GENERATED_DIR = "examples/_artifacts/dynamic_paper_report/generated"
@@ -341,102 +340,6 @@ class PresentationArtifact(BaseModel):
     generated_at: str
 
 
-def _short_text(value: Any, limit: int = 220) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rstrip() + "…"
-
-
-def _fallback_digest_payload(payload: dict[str, Any]) -> PaperDigestPayload:
-    digests: list[dict[str, Any]] = []
-    for paper in payload.get("papers", []):
-        title = str(paper.get("title", "")).strip()
-        snippet = _short_text(paper.get("summary_snippet", ""), 360)
-        authors = paper.get("authors", [])
-        if not isinstance(authors, list):
-            authors = _normalise_authors(authors)
-        digests.append({
-            "rank": int(paper.get("rank") or len(digests) + 1),
-            "title": title,
-            "authors": authors,
-            "headline": _short_text(title, 90),
-            "easy_summary": snippet or "arXiv 초록을 기반으로 한 요약을 생성할 수 없습니다.",
-            "problem": "논문 초록에서 제시한 연구 문제를 다룹니다.",
-            "approach": "제공된 초록과 메타데이터를 바탕으로 접근 방식을 정리했습니다.",
-            "why_it_matters": "최신 AI 연구 흐름을 빠르게 파악하는 데 도움이 됩니다.",
-            "caveats": ["LLM 호출 실패로 세부 해석은 원문 확인이 필요합니다."],
-        })
-    return PaperDigestPayload.model_validate({
-        "papers": digests,
-        "source_url": payload["source_url"],
-        "fetched_at": payload["fetched_at"],
-    })
-
-
-def _fallback_slide_deck(payload: dict[str, Any]) -> SlideDeckData:
-    papers = payload.get("papers", [])
-    titles = [str(paper.get("title", "")).strip() for paper in papers]
-    slides: list[dict[str, Any]] = [
-        {
-            "title": "최신 AI 논문 3선",
-            "bullets": [
-                "arXiv 최신 항목을 기준으로 구성",
-                "각 논문의 문제, 접근, 의미를 간단히 정리",
-                "네트워크/LLM 장애 시에도 생성되는 안정화 deck",
-            ],
-            "speaker_note": "자동 fallback으로 생성된 보고서입니다.",
-        },
-        {
-            "title": "한눈에 보는 요약",
-            "bullets": [
-                _short_text(title, 95) for title in titles[:3]
-            ] or ["가져온 논문 목록을 확인하세요."],
-            "speaker_note": "논문 제목 중심의 빠른 개요입니다.",
-        },
-    ]
-
-    for index in range(3):
-        paper = papers[index] if index < len(papers) else {}
-        slides.append({
-            "title": f"논문 {index + 1}: {_short_text(paper.get('title', '확인 필요'), 70)}",
-            "bullets": [
-                _short_text(paper.get("headline", paper.get("title", "")), 100),
-                _short_text(paper.get("easy_summary", ""), 120),
-                _short_text(paper.get("why_it_matters", ""), 100),
-            ],
-            "speaker_note": _short_text(paper.get("problem", ""), 220),
-        })
-
-    slides.extend([
-        {
-            "title": "비교 / 공통 인사이트",
-            "bullets": [
-                "최신 AI 연구는 모델 효율, 추론 품질, 실제 적용성을 함께 다룹니다.",
-                "각 논문은 서로 다른 문제 설정에서 개선 방향을 제시합니다.",
-                "초록 기반 요약이므로 세부 실험 수치는 원문 검증이 필요합니다.",
-            ],
-            "speaker_note": "원문 기반 추가 검토를 권장합니다.",
-        },
-        {
-            "title": "결론 / 추천 액션",
-            "bullets": [
-                "관심 논문의 abstract와 PDF를 먼저 확인",
-                "관련 코드/데이터 공개 여부 점검",
-                "팀 과제와 연결되는 아이디어를 후속 조사",
-            ],
-            "speaker_note": "보고서의 다음 액션을 정리합니다.",
-        },
-    ])
-    return SlideDeckData.model_validate({
-        "deck_title": "최신 AI 논문 3선",
-        "deck_subtitle": "arXiv 기반 자동 보고서",
-        "source_url": payload["source_url"],
-        "fetched_at": payload["fetched_at"],
-        "slides": slides[:7],
-    })
-
-
 # ---------------------------------------------------------------------------
 # Static downstream pipeline
 # ---------------------------------------------------------------------------
@@ -503,14 +406,7 @@ class PaperReportPipeline:
                 "- 과장하지 말고, 본문에 없는 내용은 추측하지 마.\n\n"
                 f"{json.dumps(compact_payload, ensure_ascii=False)}"
             )
-            try:
-                return await ctx.call_llm(prompt)
-            except Exception as exc:
-                LOG.warning(
-                    "paper_digest LLM failed; using deterministic fallback: %s",
-                    exc,
-                )
-                return _fallback_digest_payload(payload)
+            return await ctx.call_llm(prompt)
 
     @task(name="slide_briefing", prompt="prepare a fixed 7-slide report deck")
     class SlideBriefingTask:
@@ -539,14 +435,7 @@ class PaperReportPipeline:
                 "bullets는 3~5개 정도의 짧은 문장으로 써.\n\n"
                 f"{json.dumps(payload, ensure_ascii=False)}"
             )
-            try:
-                return await ctx.call_llm(prompt)
-            except Exception as exc:
-                LOG.warning(
-                    "slide_briefing LLM failed; using deterministic fallback: %s",
-                    exc,
-                )
-                return _fallback_slide_deck(payload)
+            return await ctx.call_llm(prompt)
 
     @task(name="ppt_render", prompt="render the final pptx artifact using builtin pptx_create tool")
     class PptRenderTask:

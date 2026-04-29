@@ -144,28 +144,20 @@ class TestPlanWorkflow:
         assert kwargs["max_tokens"] >= 4096
 
     @pytest.mark.asyncio
-    async def test_plan_workflow_uses_heuristic_when_llm_fails(self):
+    async def test_plan_workflow_raises_when_llm_fails(self):
         with patch(
             "flowforge.llm.caller.call_with_tool",
             new_callable=AsyncMock,
         ) as mock_call:
             mock_call.side_effect = TimeoutError("network timeout")
-            plan = await plan_workflow(
-                user_query="fetch latest arxiv papers before report pipeline",
-                suggested_flow_name="arxiv_paper_fetcher",
-                suggested_flow_prompt="Fetch arXiv API data for downstream use.",
-                flow_summaries=["- paper_report_pipeline: consumes papers"],
-                llm_config=LLMConfig(model="test"),
-            )
-
-        assert plan.flow_name == "arxiv_paper_fetcher"
-        assert [step.name for step in plan.steps] == [
-            "normalise_request",
-            "fetch_source_data",
-            "extract_records",
-            "validate_payload",
-        ]
-        assert plan.steps[1].needs_llm_reasoning is False
+            with pytest.raises(TimeoutError):
+                await plan_workflow(
+                    user_query="fetch latest arxiv papers before report pipeline",
+                    suggested_flow_name="arxiv_paper_fetcher",
+                    suggested_flow_prompt="Fetch arXiv API data for downstream use.",
+                    flow_summaries=["- paper_report_pipeline: consumes papers"],
+                    llm_config=LLMConfig(model="test"),
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +306,7 @@ class TestSelectCapabilities:
         assert sel.by_step_name()["fetch"].tool_names == ["web_fetch_url"]
 
     @pytest.mark.asyncio
-    async def test_select_capabilities_uses_heuristic_when_llm_fails(self, tmp_path):
+    async def test_select_capabilities_raises_when_llm_fails(self, tmp_path):
         plan = _make_plan()
         tool = FunctionTool(
             func=lambda url: {"ok": True, "url": url},
@@ -327,17 +319,13 @@ class TestSelectCapabilities:
             new_callable=AsyncMock,
         ) as mock_call:
             mock_call.side_effect = TimeoutError("network timeout")
-            sel = await select_capabilities(
-                plan=plan,
-                tool_configs=[tool],
-                dynamic_options=options,
-                llm_config=LLMConfig(model="test"),
-            )
-
-        by_name = sel.by_step_name()
-        assert by_name["fetch"].mode == "builtin_tool"
-        assert by_name["fetch"].tool_names == ["web_fetch_url"]
-        assert by_name["design"].mode == "llm_only"
+            with pytest.raises(TimeoutError):
+                await select_capabilities(
+                    plan=plan,
+                    tool_configs=[tool],
+                    dynamic_options=options,
+                    llm_config=LLMConfig(model="test"),
+                )
 
 
 # ---------------------------------------------------------------------------

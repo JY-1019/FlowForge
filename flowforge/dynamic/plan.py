@@ -26,7 +26,6 @@ Design notes
 from __future__ import annotations
 
 import logging
-import re
 import textwrap
 from typing import Any, TYPE_CHECKING
 
@@ -209,143 +208,6 @@ class WorkflowPlan(BaseModel):
         for step in self.steps:
             groups.setdefault(step.order, []).append(step)
         return groups
-
-
-# ---------------------------------------------------------------------------
-# Heuristic fallback
-# ---------------------------------------------------------------------------
-
-
-def _snake_case(value: str, default: str) -> str:
-    words = re.findall(r"[a-zA-Z][a-zA-Z0-9]*", value.lower())
-    if not words:
-        return default
-    return "_".join(words[:6])
-
-
-def _pascal_case(value: str) -> str:
-    parts = [part for part in value.split("_") if part]
-    stem = "".join(part.capitalize() for part in parts) or "Dynamic"
-    if not stem.endswith("Flow"):
-        stem += "Flow"
-    return stem
-
-
-def heuristic_workflow_plan(
-    *,
-    user_query: str | Any,
-    suggested_flow_name: str,
-    suggested_flow_prompt: str,
-) -> WorkflowPlan:
-    """Build a conservative plan when the planning LLM is unavailable.
-
-    Dynamic generation should degrade to a simple, auditable workflow rather
-    than aborting on transient LLM/network failures.  The fallback is
-    intentionally generic: normalise request context, perform any external
-    fetch implied by the prompt, shape records for the downstream contract,
-    then verify that the output is non-empty.
-    """
-
-    query_text = str(user_query)
-    prompt_text = str(suggested_flow_prompt or query_text)
-    combined = f"{query_text}\n{prompt_text}".lower()
-    flow_name = _snake_case(suggested_flow_name, "dynamic_generated_flow")
-    if not flow_name.endswith("_flow") and flow_name == "dynamic_generated_flow":
-        flow_name = "dynamic_generated_flow"
-
-    web_fetch_terms = (
-        "http", "url", "web", "fetch", "api", "arxiv", "news", "site",
-        "crawl", "scrape", "download", "external", "source", "collect",
-    )
-    needs_external_fetch = any(term in combined for term in web_fetch_terms)
-
-    if needs_external_fetch:
-        steps = [
-            PlannedStep(
-                name="normalise_request",
-                order=1,
-                purpose=(
-                    "Normalise the original request into explicit source, "
-                    "query, count, and downstream payload requirements."
-                ),
-                needs_llm_reasoning=False,
-            ),
-            PlannedStep(
-                name="fetch_source_data",
-                order=2,
-                purpose=(
-                    "Fetch the required external source data with the "
-                    "registered web or HTTP capability and keep enough raw "
-                    "content for extraction."
-                ),
-                needs_llm_reasoning=False,
-                consumes_previous_orders=[1],
-            ),
-            PlannedStep(
-                name="extract_records",
-                order=3,
-                purpose=(
-                    "Extract real records from the fetched content and shape "
-                    "them into the downstream payload fields without "
-                    "placeholder or empty values."
-                ),
-                needs_llm_reasoning=True,
-                consumes_previous_orders=[1, 2],
-            ),
-            PlannedStep(
-                name="validate_payload",
-                order=4,
-                purpose=(
-                    "Validate that the payload contains non-empty real data "
-                    "and return exactly the structure expected by the next "
-                    "FlowForge flow."
-                ),
-                needs_llm_reasoning=False,
-                consumes_previous_orders=[3],
-            ),
-        ]
-    else:
-        steps = [
-            PlannedStep(
-                name="normalise_request",
-                order=1,
-                purpose=(
-                    "Normalise the original request and preserve stable "
-                    "parameters for later generated steps."
-                ),
-                needs_llm_reasoning=False,
-            ),
-            PlannedStep(
-                name="produce_payload",
-                order=2,
-                purpose=(
-                    "Produce the missing structured payload required to "
-                    "satisfy the user request and downstream flow."
-                ),
-                needs_llm_reasoning=True,
-                consumes_previous_orders=[1],
-            ),
-            PlannedStep(
-                name="validate_payload",
-                order=3,
-                purpose=(
-                    "Validate that the generated payload is non-empty, "
-                    "non-placeholder, and ready for downstream execution."
-                ),
-                needs_llm_reasoning=False,
-                consumes_previous_orders=[2],
-            ),
-        ]
-
-    return WorkflowPlan(
-        flow_name=flow_name,
-        flow_prompt=prompt_text
-        or "Generate the missing upstream payload for the existing workflow.",
-        task_name="generate_payload",
-        task_prompt="Generate and validate the missing upstream payload.",
-        top_class=_pascal_case(flow_name),
-        steps=steps,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -532,25 +394,14 @@ async def plan_workflow(
         f"single-responsibility steps.  Submit the plan via the tool."
     )
 
-    try:
-        raw = await call_with_tool(
-            prompt=user_prompt,
-            tool_schema=_PLAN_TOOL_SCHEMA,
-            llm_config=llm_config,
-            system_prompt=_PLAN_SYSTEM,
-            max_tokens=_PLAN_MAX_TOKENS,
-        )
-        plan = WorkflowPlan.model_validate(raw)
-    except Exception as exc:
-        logger.warning(
-            "workflow planning LLM failed; using heuristic fallback: %s",
-            exc,
-        )
-        plan = heuristic_workflow_plan(
-            user_query=user_query,
-            suggested_flow_name=suggested_flow_name,
-            suggested_flow_prompt=suggested_flow_prompt,
-        )
+    raw = await call_with_tool(
+        prompt=user_prompt,
+        tool_schema=_PLAN_TOOL_SCHEMA,
+        llm_config=llm_config,
+        system_prompt=_PLAN_SYSTEM,
+        max_tokens=_PLAN_MAX_TOKENS,
+    )
+    plan = WorkflowPlan.model_validate(raw)
     logger.info(
         "workflow plan: flow=%s steps=%d",
         plan.flow_name, len(plan.steps),
@@ -562,6 +413,5 @@ __all__ = [
     "PlannedBranch",
     "PlannedStep",
     "WorkflowPlan",
-    "heuristic_workflow_plan",
     "plan_workflow",
 ]

@@ -417,13 +417,7 @@ async def _synthesise_and_inject(ctx):
             plan.flow_name, node_id,
         )
 
-        try:
-            await agent.generate_docs(planning_only=True)
-        except Exception as doc_error:
-            logger.warning(
-                "dynamic flow doc generation failed for '%s': %s",
-                plan.flow_name, doc_error,
-            )
+        await agent.generate_docs(planning_only=True)
 
         return {
             **data,

@@ -1174,20 +1174,13 @@ class DynamicFlowGenerator:
             },
         }
 
-        try:
-            result = await call_with_tool(
-                prompt=user_prompt,
-                tool_schema=tool_schema,
-                llm_config=self._llm_config,
-                system_prompt=_GAP_ANALYSIS_SYSTEM,
-                max_tokens=512,
-            )
-        except Exception as exc:
-            logger.warning(
-                "gap analysis LLM failed; using heuristic gap analysis: %s",
-                exc,
-            )
-            result = _heuristic_gap_analysis(query_str, str(exc))
+        result = await call_with_tool(
+            prompt=user_prompt,
+            tool_schema=tool_schema,
+            llm_config=self._llm_config,
+            system_prompt=_GAP_ANALYSIS_SYSTEM,
+            max_tokens=512,
+        )
         logger.info("gap analysis result: %s", result)
         if isinstance(result, dict):
             self._gap_cache[cache_key] = dict(result)
@@ -2008,10 +2001,7 @@ class DynamicFlowGenerator:
 
         Empty registry → no validation (the loop relies on other checks).
         """
-        registered = {
-            _tool_config_name(tc)
-            for tc in self._tool_configs
-        }
+        registered = set(self._tool_names())
         registered.discard("")
         if not registered:
             return None
@@ -2413,6 +2403,37 @@ class DynamicFlowGenerator:
             elif isinstance(tool, AgentSkill):
                 name = tool.name
             if name:
+                names.append(name)
+        names.extend(self._declared_mcp_tool_names())
+        seen: set[str] = set()
+        unique_names: list[str] = []
+        for name in names:
+            if name in seen:
+                continue
+            seen.add(name)
+            unique_names.append(name)
+        return unique_names
+
+    def _declared_mcp_tool_names(self) -> list[str]:
+        """Return tool names declared on dynamic MCP server options.
+
+        Dynamic flows register these tools at runtime with
+        ``mcp_register_server`` before using them via ``ctx.call_llm``. They
+        are not present in the static ToolConfig list at generation time, but
+        they are still valid names when they come from
+        DynamicRunOptions.mcp_server_tools.
+        """
+        if self._dynamic_options is None:
+            return []
+
+        declared = getattr(self._dynamic_options, "mcp_server_tools", {}) or {}
+        names: list[str] = []
+        seen: set[str] = set()
+        for tool_names in declared.values():
+            for name in tool_names or []:
+                if not name or name in seen:
+                    continue
+                seen.add(name)
                 names.append(name)
         return names
 
@@ -3395,34 +3416,3 @@ def _sanitise_name(name: str) -> str:
     if name[0].isdigit():
         name = f"flow_{name}"
     return name
-
-
-def _heuristic_gap_analysis(query: str, error: str) -> dict[str, Any]:
-    """Return a conservative missing-flow record when gap LLM is unavailable."""
-
-    lowered = query.lower()
-    if "arxiv" in lowered or "paper" in lowered:
-        flow_name = "arxiv_paper_fetcher"
-        flow_prompt = "Fetch paper records and return a structured payload."
-    elif "hada" in lowered or "geeknews" in lowered or "news.hada.io" in lowered:
-        flow_name = "hada_top3_korean_docx_report"
-        flow_prompt = (
-            "Fetch GeekNews/Hada stories and produce the requested report."
-        )
-    elif "mountain" in lowered or "산" in query:
-        flow_name = "top5_highest_mountains_table"
-        flow_prompt = (
-            "Produce a verified markdown table of the world's five highest "
-            "mountains with names, heights, and locations."
-        )
-    else:
-        words = re.findall(r"[a-zA-Z][a-zA-Z0-9]+", lowered)
-        flow_name = "_".join(words[:5]) or "dynamic_generated_flow"
-        flow_prompt = f"Generate the missing workflow for this request: {query[:500]}"
-
-    return {
-        "covered": False,
-        "reason": f"Gap analysis LLM unavailable; heuristic fallback used. {error}",
-        "suggested_flow_name": _sanitise_name(flow_name),
-        "suggested_flow_prompt": flow_prompt,
-    }

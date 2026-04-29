@@ -520,21 +520,12 @@ class StepRunner:
                 '{"pass": true/false, "feedback": "reason if failed"}'
             )
 
-            try:
-                judge_resp = await call_llm_api(
-                    system_prompt="You are an output quality evaluator. Always respond in valid JSON.",
-                    user_prompt=judge_prompt,
-                    llm_config=ctx.llm_config,
-                )
-
-                verdict = _parse_judge_response(judge_resp)
-            except Exception as e:
-                logger.warning(
-                    "pass_criteria judge failed node_id=%s attempt=%d: %s",
-                    node_id, attempt, e,
-                )
-                # If judge itself fails, accept the result.
-                break
+            judge_resp = await call_llm_api(
+                system_prompt="You are an output quality evaluator. Always respond in valid JSON.",
+                user_prompt=judge_prompt,
+                llm_config=ctx.llm_config,
+            )
+            verdict = _parse_judge_response(judge_resp)
 
             if verdict["pass"]:
                 logger.debug(
