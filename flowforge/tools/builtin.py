@@ -400,17 +400,12 @@ def _create_document_tools(options: DynamicRunOptions) -> list[FunctionTool]:
             func=_make_pptx_create_tool(project_root),
             name="pptx_create",
             description=(
-                "Create an editable PowerPoint (.pptx) presentation from a "
-                "JSON array of slide objects. The tool writes native "
-                "PowerPoint text boxes, shapes, tables, and charts rather "
-                "than slide screenshots. Layouts include: cover, content, "
-                "section, comparison, table, cards, metric, quote, timeline, "
-                "process, chart, and blank. Slides support title, subtitle, "
-                "body, bullets, cards, metrics, table, chart, shapes, "
-                "image_path, speaker_note, footer, and per-slide colors. "
-                "Themes: default, dark, editorial, consulting, academic, tech. "
-                "Requires 'python-pptx' (use pip_install if missing). "
-                "Path must be relative to the project root."
+                "Create editable .pptx from JSON slide objects. Layouts: "
+                "cover, content, comparison, table, cards, metric, timeline, "
+                "chart, quote, blank. Supports svg/svg_path; set "
+                "engine='ppt-master' for vendored SVG-to-DrawingML native "
+                "shape export. Themes: default, dark, editorial, consulting, "
+                "academic, tech. Requires python-pptx. Path is project-relative."
             ),
         ),
         FunctionTool(
@@ -553,13 +548,19 @@ def _parse_page_range(pages_str: str, total: int) -> list[int]:
 
 
 def _make_pptx_create_tool(project_root: Path):
-    def _tool(path: str, slides: str, theme: str = "default") -> dict[str, Any]:
+    def _tool(
+        path: str,
+        slides: str,
+        theme: str = "default",
+        engine: str = "auto",
+    ) -> dict[str, Any]:
         """Create an editable PPTX deck from structured slide JSON.
 
-        Inspired by ppt-master's native-editability principle, this tool
-        composes slides on a blank 16:9 canvas using real PowerPoint text
-        boxes, shapes, tables, and charts.  It intentionally avoids rendering
-        whole slides as screenshots.
+        ``engine="ppt-master"`` uses the vendored PPT Master SVG-to-DrawingML
+        converter, so slide SVG becomes directly editable native PowerPoint
+        shapes. ``engine="python-pptx"`` uses FlowForge's structured fallback
+        renderer for native text boxes, shapes, tables, and charts. ``auto``
+        chooses PPT Master whenever a slide supplies ``svg`` or ``svg_path``.
         """
         import json as _json
 
@@ -575,6 +576,47 @@ def _make_pptx_create_tool(project_root: Path):
 
         if not isinstance(slide_data, list):
             return {"ok": False, "error": "slides must be a JSON array of slide objects"}
+
+        engine_name = str(engine or "auto").lower()
+        wants_ppt_master = (
+            engine_name in {"ppt-master", "ppt_master", "svg", "drawingml"}
+            or (
+                engine_name == "auto"
+                and any(
+                    isinstance(slide, dict) and (slide.get("svg") or slide.get("svg_path"))
+                    for slide in slide_data
+                )
+            )
+        )
+        if wants_ppt_master:
+            try:
+                from flowforge.tools.ppt_master_bridge import create_native_pptx_from_slide_data
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "error": f"PPT Master engine unavailable: {e}",
+                }
+
+            try:
+                for idx, slide_info in enumerate(slide_data):
+                    if not isinstance(slide_info, dict):
+                        return {"ok": False, "error": f"slide {idx + 1} must be an object"}
+                result = create_native_pptx_from_slide_data(
+                    project_root=project_root,
+                    output_path=resolved,
+                    slide_data=slide_data,
+                    theme=theme,
+                )
+                result.update({
+                    "path": path,
+                    "slide_count": len(slide_data),
+                    "size": resolved.stat().st_size if resolved.exists() else 0,
+                })
+                if not result.get("ok"):
+                    result.setdefault("error", "PPT Master conversion failed")
+                return result
+            except Exception as e:
+                return {"ok": False, "error": f"Failed to create PPTX via PPT Master: {e}"}
 
         try:
             from pptx import Presentation
@@ -1097,6 +1139,7 @@ def _make_pptx_create_tool(project_root: Path):
                 "path": path,
                 "slide_count": len(slide_data),
                 "size": resolved.stat().st_size,
+                "engine": "python-pptx",
                 "native_objects": True,
                 "layouts": [
                     str(slide.get("layout", "content")).lower()

@@ -474,7 +474,11 @@ async def render(ctx):
         },
     ])
     return await ctx.call_tool(
-        "pptx_create", path="report.pptx", slides=slides, theme="tech",
+        "pptx_create",
+        path="report.pptx",
+        slides=slides,
+        theme="tech",
+        engine="ppt-master",
     )
 ```
 
@@ -483,10 +487,13 @@ order and executes the matching local function tool.
 
 ### `pptx_create` Layouts
 
-`pptx_create` follows the same design principle as PPT Master: output should
-remain editable in PowerPoint. It composes a blank 16:9 canvas with native
-PowerPoint text boxes, shapes, tables, and charts rather than slide-sized
-screenshots.
+`pptx_create` includes a vendored copy of PPT Master's SVG-to-DrawingML
+converter. Set `engine="ppt-master"` to render slide objects through that
+pipeline, or provide `svg` / `svg_path` on a slide to trigger it automatically.
+The output remains editable in PowerPoint because SVG elements become native
+DrawingML shapes instead of slide-sized screenshots. The default
+`engine="python-pptx"` path remains available for direct native tables and
+PowerPoint chart objects.
 
 | Layout | Main fields | Notes |
 |--------|-------------|-------|
@@ -498,14 +505,15 @@ screenshots.
 | `cards` | `cards[].title`, `cards[].body`, `cards[].bullets` | 2-4 compact cards |
 | `metric` | `metrics[].value`, `metrics[].label`, `metrics[].note` | Big-number summary |
 | `timeline` / `process` | `items[].label`, `items[].title`, `items[].body` | Native line/circle process |
-| `chart` | `chart.type`, `chart.categories`, `chart.series` | Native chart; supports `column`, `bar`, `line`, `pie` |
+| `chart` | `chart.type`, `chart.categories`, `chart.series` | Native chart in `python-pptx`; editable SVG bars in `ppt-master` |
 | `quote` | `quote`, `attribution` | Editorial quote slide |
 | `blank` | `shapes` / `objects` | Custom native shapes |
+| SVG slides | `svg` or `svg_path` | Passed directly to the vendored PPT Master converter |
 
 Themes: `default`, `dark`, `editorial`, `consulting`, `academic`, `tech`.
 Every slide may override `bg`, `fg`, `muted`, `accent`, `accent2`, `panel`, and
-`line`. The tool returns `native_objects: true`, `slide_count`, `size`, and the
-layout names it rendered.
+`line`. The tool returns `engine`, `native_objects: true`, `slide_count`,
+`size`, and the layout names it rendered.
 
 ---
 

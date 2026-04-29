@@ -76,6 +76,8 @@ flowforge = [
     "_docs/**/*.png",
     "_docs/**/*.svg",
     "_docs/**/*.css",
+    "tools/_ppt_master/LICENSE",
+    "tools/_ppt_master/TECHNICAL_DESIGN.md",
 ]
 
 [tool.pytest.ini_options]

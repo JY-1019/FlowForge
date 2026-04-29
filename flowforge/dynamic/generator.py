@@ -3170,8 +3170,11 @@ def _format_artifact_instructions(artifacts: list[dict[str, str]]) -> str:
         "convert the data into a JSON array of editable slide objects. Prefer "
         "structured layouts such as 'cover', 'metric', 'cards', 'timeline', "
         "'chart', and 'table' over plain title+bullets when they fit the "
-        "content. pptx_create writes native PowerPoint objects, so use its "
-        "table/chart/shape fields instead of rendering a slide screenshot.",
+        "content. For high-fidelity decks, pass engine='ppt-master' and either "
+        "provide slide-level 'svg'/'svg_path' values or structured layouts; "
+        "FlowForge will run the vendored PPT Master SVG-to-DrawingML pipeline "
+        "to produce editable native PowerPoint shapes. Use table/chart/shape "
+        "fields instead of rendering a slide screenshot.",
     ])
     return "\n".join(lines)
 

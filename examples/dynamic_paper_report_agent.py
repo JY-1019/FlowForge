@@ -633,6 +633,7 @@ class PaperReportPipeline:
                 path=rel_path,
                 slides=json.dumps(slides_for_pptx, ensure_ascii=False),
                 theme="tech",
+                engine="ppt-master",
             )
 
             if not result.get("ok"):

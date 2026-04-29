@@ -285,7 +285,7 @@ result = await engine.run(
 Key features:
 - **Manifest caching** — generated flows are saved, loaded on compile, and skipped when already present
 - **Compact codegen context** — only relevant tools and project context are sent to the code generator by default
-- **14+ builtin tools** — web, files, editable native PPT, CSV, DOCX, charts, PDF, markdown
+- **14+ builtin tools** — web, files, PPT Master-backed editable PPT, CSV, DOCX, charts, PDF, markdown
 - **Dynamic MCP setup** — generated flows can start declared MCP servers and register their tools for later `<tool>` use
 - **Auto artifact detection** — "make a PPT" → automatically includes `pptx_create`
 - **AST safety validation** — blocks dangerous imports/calls before execution

@@ -2534,6 +2534,65 @@ class TestEnhancedPptxCreate:
         assert len(prs.slides) == 3
         assert any(shape.has_chart for shape in prs.slides[2].shapes)
 
+    def test_ppt_master_engine_from_svg_slide(self, tmp_path):
+        from flowforge.tools.builtin import _make_pptx_create_tool
+        import json
+
+        tool = _make_pptx_create_tool(tmp_path)
+        slides = [{
+            "svg": (
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720">'
+                '<rect x="0" y="0" width="1280" height="720" fill="#07111F"/>'
+                '<text x="120" y="180" font-family="Arial" font-size="64" '
+                'font-weight="700" fill="#FFFFFF">Native SVG</text>'
+                '<rect x="120" y="260" width="340" height="120" fill="#38BDF8"/>'
+                '</svg>'
+            ),
+            "speaker_note": "Converted with PPT Master.",
+        }]
+
+        result = tool(path="svg_engine.pptx", slides=json.dumps(slides))
+
+        assert result["ok"] is True
+        assert result["engine"] == "ppt-master"
+        assert result["native_objects"] is True
+
+        from pptx import Presentation
+        prs = Presentation(str(tmp_path / "svg_engine.pptx"))
+        assert len(prs.slides) == 1
+        assert any("Native SVG" in getattr(shape, "text", "") for shape in prs.slides[0].shapes)
+        notes = prs.slides[0].notes_slide.notes_text_frame.text
+        assert "Converted with PPT Master" in notes
+
+    def test_ppt_master_engine_from_structured_layouts(self, tmp_path):
+        from flowforge.tools.builtin import _make_pptx_create_tool
+        import json
+
+        tool = _make_pptx_create_tool(tmp_path)
+        slides = [
+            {"layout": "cover", "title": "Report", "subtitle": "Editable SVG pipeline"},
+            {
+                "layout": "metric",
+                "title": "Signals",
+                "metrics": [{"value": "3", "label": "papers"}],
+            },
+        ]
+
+        result = tool(
+            path="structured_svg_engine.pptx",
+            slides=json.dumps(slides),
+            theme="tech",
+            engine="ppt-master",
+        )
+
+        assert result["ok"] is True
+        assert result["engine"] == "ppt-master"
+        assert result["layouts"] == ["cover", "metric"]
+
+        from pptx import Presentation
+        prs = Presentation(str(tmp_path / "structured_svg_engine.pptx"))
+        assert len(prs.slides) == 2
+
     def test_pptx_create_with_symlinked_project_root(self, tmp_path):
         from flowforge.tools.builtin import _make_pptx_create_tool
         import json
