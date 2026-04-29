@@ -217,9 +217,17 @@ class AgentSession:
             resume_from=resume_from, dynamic_options=dynamic_options,
         )
 
-    def compare_mermaid(self, trace: RunTrace | None = None) -> str:
-        """Return comparison Mermaid diagrams (full DAG vs executed path)."""
-        from flowforge.viz.renderer import render_mermaid
+    def compare_mermaid(
+        self,
+        trace: RunTrace | None = None,
+        *,
+        include_full_dag: bool = False,
+    ) -> str:
+        """Return a Markdown run report with Mermaid for the executed path.
+
+        Set ``include_full_dag=True`` to include the full compiled DAG before
+        the run diagram.
+        """
         from flowforge.viz.subtree import render_run_mermaid
 
         t = trace or self.last_trace
@@ -232,14 +240,25 @@ class AgentSession:
         n_total = len(self._dag.get_all_nodes())
 
         lines = [
-            "# FlowForge - DAG vs Executed Path",
-            "", "## 1. Full DAG Structure", "",
-            "```mermaid", render_mermaid(self._dag), "```", "",
-            f"## 2. Executed Path - Run `{t.run_id}`",
+            "# FlowForge - Executed Path",
+            "",
             f"> Status: **{status}** | Duration: **{dur}** | "
-            f"Executed: **{n_exec} / {n_total}** nodes", "",
+            f"Executed: **{n_exec} / {n_total}** nodes",
+            "",
             "```mermaid", render_run_mermaid(self._dag, t), "```",
         ]
+        if include_full_dag:
+            from flowforge.viz.renderer import render_mermaid
+
+            lines = [
+                "# FlowForge - DAG vs Executed Path",
+                "", "## 1. Full DAG Structure", "",
+                "```mermaid", render_mermaid(self._dag), "```", "",
+                f"## 2. Executed Path - Run `{t.run_id}`",
+                f"> Status: **{status}** | Duration: **{dur}** | "
+                f"Executed: **{n_exec} / {n_total}** nodes", "",
+                "```mermaid", render_run_mermaid(self._dag, t), "```",
+            ]
         return "\n".join(lines)
 
 
@@ -616,23 +635,25 @@ class CompiledAgent:
             )
         return render_run_mermaid(self._dag, t)
 
-    def compare_mermaid(self, trace: RunTrace | None = None) -> str:
-        """Return a Markdown string with two Mermaid diagrams side-by-side:
+    def compare_mermaid(
+        self,
+        trace: RunTrace | None = None,
+        *,
+        include_full_dag: bool = False,
+    ) -> str:
+        """Return a Markdown string with the executed-path Mermaid diagram.
 
-        1. **Full DAG** — every node in the compiled structure.
-        2. **Executed path** — same nodes, but executed ones are colored with
-           order + timing and skipped ones are gray-dashed.
-
-        Paste the output into any Markdown viewer (VS Code, GitHub, mermaid.live)
-        to compare the agent's route against the full available structure.
+        The default is intentionally compact for saved ``.md`` run artifacts.
+        Set ``include_full_dag=True`` to prepend the full compiled DAG.
 
         Args:
             trace: Explicit RunTrace; defaults to self.last_trace.
+            include_full_dag: Include the full compiled DAG Mermaid diagram
+                before the executed-path diagram.
 
         Raises:
             RuntimeError: If no trace is available.
         """
-        from flowforge.viz.renderer import render_mermaid
         from flowforge.viz.subtree import render_run_mermaid
 
         t = trace or self.last_trace
@@ -647,16 +668,9 @@ class CompiledAgent:
         n_total = len(self._dag.get_all_nodes())
 
         lines = [
-            "# FlowForge — DAG vs Executed Path",
+            "# FlowForge — Executed Path",
             "",
-            "## 1. Full DAG Structure",
-            "> Every node compiled from the annotations.",
-            "",
-            "```mermaid",
-            render_mermaid(self._dag),
-            "```",
-            "",
-            f"## 2. Executed Path — Run `{t.run_id}`",
+            f"## Run `{t.run_id}`",
             f"> Status: **{status}** · Duration: **{dur}** · "
             f"Executed: **{n_exec} / {n_total}** nodes",
             ">",
@@ -668,6 +682,31 @@ class CompiledAgent:
             render_run_mermaid(self._dag, t),
             "```",
         ]
+        if include_full_dag:
+            from flowforge.viz.renderer import render_mermaid
+
+            lines = [
+                "# FlowForge — DAG vs Executed Path",
+                "",
+                "## 1. Full DAG Structure",
+                "> Every node compiled from the annotations.",
+                "",
+                "```mermaid",
+                render_mermaid(self._dag),
+                "```",
+                "",
+                f"## 2. Executed Path — Run `{t.run_id}`",
+                f"> Status: **{status}** · Duration: **{dur}** · "
+                f"Executed: **{n_exec} / {n_total}** nodes",
+                ">",
+                "> - **Colored** nodes ran (dark = global/flow/task/step, red = error)",
+                "> - **Bold arrows** (`==>`) are the executed edges",
+                "> - **Gray dashed** nodes were compiled but skipped this run",
+                "",
+                "```mermaid",
+                render_run_mermaid(self._dag, t),
+                "```",
+            ]
         return "\n".join(lines)
 
     def print_run_summary(self, trace: RunTrace | None = None) -> None:

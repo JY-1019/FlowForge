@@ -134,8 +134,9 @@ def run(
     viz_output: Path = typer.Option(Path("run.svg"), "--viz-output", help="Subtree SVG output path"),
     viz_fmt: str = typer.Option("svg", "--viz-fmt", help="svg | png | pdf"),
     viz_mermaid: bool = typer.Option(False, "--viz-mermaid", help="Print executed-path Mermaid to stdout"),
-    compare: bool = typer.Option(False, "--compare", help="Print full DAG + executed path side by side"),
-    compare_output: Optional[Path] = typer.Option(None, "--compare-output", help="Save comparison to a .md file"),
+    compare: bool = typer.Option(False, "--compare", help="Print executed-path Mermaid report"),
+    compare_output: Optional[Path] = typer.Option(None, "--compare-output", help="Save executed-path Mermaid report to a .md file"),
+    include_full_dag: bool = typer.Option(False, "--include-full-dag", help="Include full DAG Mermaid in compare output"),
     planning_mode: str = typer.Option("deterministic", "--planning-mode", help="deterministic | autonomous | hybrid"),
     allow_dynamic: bool = typer.Option(False, "--allow-dynamic", help="Allow dynamic flow/tool generation for this run"),
     dynamic_dir: Path = typer.Option(Path("flowforge/generated"), "--dynamic-dir", help="Directory for generated flow/tool files"),
@@ -147,8 +148,9 @@ def run(
     --------
     flowforge run agent.py -q "hello" --trace
     flowforge run agent.py -q "hello" --viz-mermaid          # executed path only
-    flowforge run agent.py -q "hello" --compare              # full DAG + executed path
+    flowforge run agent.py -q "hello" --compare              # executed path report
     flowforge run agent.py -q "hello" --compare-output viz.md
+    flowforge run agent.py -q "hello" --compare-output viz.md --include-full-dag
     flowforge run agent.py -q "hello" --viz --viz-output run.svg
     """
     from flowforge import DynamicRunOptions
@@ -181,12 +183,15 @@ def run(
             print(mmd)
 
         if compare or compare_output:
-            md = engine.compare_mermaid(run_trace)
+            md = engine.compare_mermaid(
+                run_trace,
+                include_full_dag=include_full_dag,
+            )
             if compare_output:
                 compare_output.write_text(md)
-                console.print(f"[green]✓ Comparison saved to {compare_output}[/green]")
+                console.print(f"[green]✓ Mermaid report saved to {compare_output}[/green]")
             else:
-                console.print("\n[bold]Full DAG vs Executed Path:[/bold]")
+                console.print("\n[bold]Executed Path:[/bold]")
                 print(md)
 
         if viz_run:

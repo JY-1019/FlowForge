@@ -210,12 +210,13 @@ Return a Mermaid diagram for the last (or given) run.
 
 #### `compare_mermaid(trace=None)` → `str`
 
-Return a Markdown string with two Mermaid diagrams: the full DAG and the executed path side-by-side.
+Return a compact Markdown string with the executed-path Mermaid diagram.
+Pass `include_full_dag=True` to also include the full compiled DAG.
 
 ```python
 await engine.run(input_data)
 md = engine.compare_mermaid()
-# Paste into any Markdown viewer to compare
+full_md = engine.compare_mermaid(include_full_dag=True)
 ```
 
 #### `print_run_summary(trace=None)` → `None`
@@ -264,7 +265,7 @@ result = await session.run(user_input)
 |--------|---------|-------------|
 | `run(input_data, ...)` | `Any` | Same interface as `CompiledAgent.run()` |
 | `run_traced(input_data, ...)` | `tuple[Any, RunTrace]` | Same interface as `CompiledAgent.run_traced()` |
-| `compare_mermaid(trace=None)` | `str` | Full DAG vs executed path comparison |
+| `compare_mermaid(trace=None, include_full_dag=False)` | `str` | Executed-path Markdown report |
 
 ---
 
