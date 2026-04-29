@@ -400,13 +400,15 @@ def _create_document_tools(options: DynamicRunOptions) -> list[FunctionTool]:
             func=_make_pptx_create_tool(project_root),
             name="pptx_create",
             description=(
-                "Create a PowerPoint (.pptx) presentation from a JSON array "
-                "of slide objects. Each slide supports: layout ('cover', "
-                "'content', 'section', 'comparison', 'table', 'blank'), "
-                "title, subtitle, body, bullets (list of strings), "
-                "left/right (comparison columns with heading+bullets), "
-                "table (headers+rows), image_path, speaker_note. "
-                "Optional theme parameter: 'default' or 'dark'. "
+                "Create an editable PowerPoint (.pptx) presentation from a "
+                "JSON array of slide objects. The tool writes native "
+                "PowerPoint text boxes, shapes, tables, and charts rather "
+                "than slide screenshots. Layouts include: cover, content, "
+                "section, comparison, table, cards, metric, quote, timeline, "
+                "process, chart, and blank. Slides support title, subtitle, "
+                "body, bullets, cards, metrics, table, chart, shapes, "
+                "image_path, speaker_note, footer, and per-slide colors. "
+                "Themes: default, dark, editorial, consulting, academic, tech. "
                 "Requires 'python-pptx' (use pip_install if missing). "
                 "Path must be relative to the project root."
             ),
@@ -552,26 +554,12 @@ def _parse_page_range(pages_str: str, total: int) -> list[int]:
 
 def _make_pptx_create_tool(project_root: Path):
     def _tool(path: str, slides: str, theme: str = "default") -> dict[str, Any]:
-        """Create a PPTX presentation from a JSON array of slide objects.
+        """Create an editable PPTX deck from structured slide JSON.
 
-        Each slide object supports the following fields:
-
-        - ``layout`` (str): ``"cover"``, ``"content"`` (default), ``"section"``,
-          ``"comparison"``, ``"table"``, ``"blank"``.
-        - ``title`` (str): slide title.
-        - ``subtitle`` (str): subtitle (cover/section slides only).
-        - ``body`` (str): plain text body (content layout).
-        - ``bullets`` (list[str]): bullet point list (content layout).
-        - ``left``/``right`` (dict): comparison columns, each with ``heading``
-          and ``bullets`` keys.
-        - ``table`` (dict): ``{"headers": [...], "rows": [[...], ...]}``
-          for table layout.
-        - ``image_path`` (str): path to an image file (relative to project root)
-          to embed in the slide.
-        - ``speaker_note`` (str): speaker notes text.
-
-        ``theme``: ``"default"`` or ``"dark"``.  Dark theme applies a dark
-        background with white text.
+        Inspired by ppt-master's native-editability principle, this tool
+        composes slides on a blank 16:9 canvas using real PowerPoint text
+        boxes, shapes, tables, and charts.  It intentionally avoids rendering
+        whole slides as screenshots.
         """
         import json as _json
 
@@ -590,9 +578,12 @@ def _make_pptx_create_tool(project_root: Path):
 
         try:
             from pptx import Presentation
-            from pptx.util import Inches, Pt, Emu
-            from pptx.enum.text import PP_ALIGN
+            from pptx.chart.data import CategoryChartData
             from pptx.dml.color import RGBColor
+            from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
+            from pptx.enum.shapes import MSO_SHAPE
+            from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+            from pptx.util import Inches, Pt
         except ImportError:
             return {
                 "ok": False,
@@ -603,153 +594,501 @@ def _make_pptx_create_tool(project_root: Path):
                 ),
             }
 
+        palettes = {
+            "default": {
+                "bg": "F7F8FB", "fg": "172033", "muted": "5F6B7A",
+                "accent": "2F6FED", "accent2": "11A683", "panel": "FFFFFF",
+                "line": "D8DEE8",
+            },
+            "dark": {
+                "bg": "1E1E2E", "fg": "FFFFFF", "muted": "C9CEDA",
+                "accent": "8AB4FF", "accent2": "7AE1B8", "panel": "2B2D42",
+                "line": "4A4E69",
+            },
+            "editorial": {
+                "bg": "F6F0E8", "fg": "1C1A17", "muted": "6F6257",
+                "accent": "C2472D", "accent2": "243B53", "panel": "FFF9F1",
+                "line": "DACBBB",
+            },
+            "consulting": {
+                "bg": "FFFFFF", "fg": "111827", "muted": "4B5563",
+                "accent": "0B5CAD", "accent2": "E87500", "panel": "F3F6FA",
+                "line": "CBD5E1",
+            },
+            "academic": {
+                "bg": "FAFAF8", "fg": "1F2937", "muted": "56616F",
+                "accent": "6A1B9A", "accent2": "0F766E", "panel": "FFFFFF",
+                "line": "D6D3D1",
+            },
+            "tech": {
+                "bg": "07111F", "fg": "F8FAFC", "muted": "A7B1C2",
+                "accent": "38BDF8", "accent2": "A3E635", "panel": "102033",
+                "line": "29445F",
+            },
+        }
+
+        def _hex(value: Any, fallback: str) -> str:
+            text = str(value or fallback).strip().lstrip("#")
+            if len(text) == 3:
+                text = "".join(ch * 2 for ch in text)
+            if len(text) != 6:
+                text = fallback
+            try:
+                int(text, 16)
+            except ValueError:
+                text = fallback
+            return text.upper()
+
+        def _rgb(value: Any, fallback: str = "000000"):
+            text = _hex(value, fallback)
+            return RGBColor(int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
+
+        def _as_dict(value: Any, fallback_key: str = "title") -> dict[str, Any]:
+            if isinstance(value, dict):
+                return value
+            return {fallback_key: str(value)}
+
+        def _palette(slide_info: dict[str, Any]) -> dict[str, str]:
+            base = dict(palettes.get(str(theme).lower(), palettes["default"]))
+            slide_theme = str(slide_info.get("theme", "")).lower()
+            if slide_theme in palettes:
+                base.update(palettes[slide_theme])
+            for key in ("bg", "fg", "muted", "accent", "accent2", "panel", "line"):
+                if key in slide_info:
+                    base[key] = _hex(slide_info[key], base[key])
+            return base
+
+        def _emu(value: Any, default: float):
+            try:
+                return Inches(float(value))
+            except (TypeError, ValueError):
+                return Inches(default)
+
+        def _set_fill(shape: Any, color: str, transparency: int | None = None) -> None:
+            fill = shape.fill
+            fill.solid()
+            fill.fore_color.rgb = _rgb(color)
+            if transparency is not None:
+                fill.transparency = max(0, min(100, int(transparency)))
+
+        def _set_line(shape: Any, color: str | None, width_pt: float = 1.0) -> None:
+            if not color:
+                shape.line.fill.background()
+                return
+            shape.line.color.rgb = _rgb(color)
+            shape.line.width = Pt(width_pt)
+
+        def _apply_background(slide: Any, pal: dict[str, str]) -> None:
+            fill = slide.background.fill
+            fill.solid()
+            fill.fore_color.rgb = _rgb(pal["bg"])
+
+        def _set_text_frame(
+            shape: Any,
+            text: Any,
+            *,
+            color: str,
+            size: float = 20,
+            bold: bool = False,
+            align: Any = PP_ALIGN.LEFT,
+            font: str = "Aptos",
+            vertical: Any = MSO_ANCHOR.TOP,
+            line_spacing: float | None = None,
+        ) -> None:
+            tf = shape.text_frame
+            tf.clear()
+            tf.word_wrap = True
+            tf.vertical_anchor = vertical
+            p = tf.paragraphs[0]
+            p.alignment = align
+            if line_spacing is not None:
+                p.line_spacing = line_spacing
+            run = p.add_run()
+            run.text = str(text or "")
+            run.font.name = font
+            run.font.size = Pt(size)
+            run.font.bold = bold
+            run.font.color.rgb = _rgb(color)
+
+        def _text_box(
+            slide: Any,
+            text: Any,
+            x: float,
+            y: float,
+            w: float,
+            h: float,
+            *,
+            color: str,
+            size: float = 20,
+            bold: bool = False,
+            align: Any = PP_ALIGN.LEFT,
+            font: str = "Aptos",
+            vertical: Any = MSO_ANCHOR.TOP,
+        ) -> Any:
+            shape = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+            _set_text_frame(
+                shape, text, color=color, size=size, bold=bold,
+                align=align, font=font, vertical=vertical,
+            )
+            return shape
+
+        def _add_title(slide: Any, info: dict[str, Any], pal: dict[str, str]) -> None:
+            title = info.get("title", "")
+            if title:
+                _text_box(
+                    slide, title, 0.65, 0.35, 8.6, 0.62,
+                    color=pal["fg"], size=25, bold=True,
+                )
+            kicker = info.get("kicker") or info.get("eyebrow")
+            if kicker:
+                _text_box(
+                    slide, str(kicker).upper(), 0.68, 0.16, 5.6, 0.24,
+                    color=pal["accent"], size=8.5, bold=True,
+                )
+
+        def _add_footer(slide: Any, info: dict[str, Any], pal: dict[str, str], idx: int) -> None:
+            footer = info.get("footer")
+            if footer is None:
+                footer = ""
+            if footer or info.get("show_page_number"):
+                text = str(footer)
+                if info.get("show_page_number"):
+                    text = f"{text}  {idx + 1}".strip()
+                _text_box(
+                    slide, text, 0.65, 7.05, 12.0, 0.22,
+                    color=pal["muted"], size=7.5,
+                )
+
+        def _bullets(
+            slide: Any,
+            bullets: list[Any],
+            x: float,
+            y: float,
+            w: float,
+            h: float,
+            pal: dict[str, str],
+            *,
+            size: float = 18,
+        ) -> None:
+            shape = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+            tf = shape.text_frame
+            tf.clear()
+            tf.word_wrap = True
+            for i, bullet in enumerate(bullets):
+                p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                p.text = str(bullet)
+                p.level = 0
+                p.space_after = Pt(8)
+                p.font.name = "Aptos"
+                p.font.size = Pt(size)
+                p.font.color.rgb = _rgb(pal["fg"])
+
+        def _shape_rect(
+            slide: Any,
+            x: float,
+            y: float,
+            w: float,
+            h: float,
+            *,
+            fill: str,
+            line: str | None = None,
+            radius: bool = False,
+        ) -> Any:
+            kind = MSO_SHAPE.ROUNDED_RECTANGLE if radius else MSO_SHAPE.RECTANGLE
+            shape = slide.shapes.add_shape(kind, Inches(x), Inches(y), Inches(w), Inches(h))
+            _set_fill(shape, fill)
+            _set_line(shape, line, 0.8)
+            return shape
+
+        def _add_image(slide: Any, info: dict[str, Any]) -> None:
+            image_path = info.get("image_path", "")
+            if not image_path:
+                return
+            try:
+                img_resolved = _resolve_safe_path(project_root, image_path)
+            except Exception:
+                return
+            if not img_resolved.is_file():
+                return
+            x = float(info.get("image_x", 7.1))
+            y = float(info.get("image_y", 1.35))
+            w = float(info.get("image_w", 5.35))
+            h = info.get("image_h")
+            if h is None:
+                slide.shapes.add_picture(str(img_resolved), Inches(x), Inches(y), width=Inches(w))
+            else:
+                slide.shapes.add_picture(
+                    str(img_resolved), Inches(x), Inches(y),
+                    width=Inches(w), height=Inches(float(h)),
+                )
+
+        def _render_cover(slide: Any, info: dict[str, Any], pal: dict[str, str]) -> None:
+            _shape_rect(slide, 0, 0, 13.333, 7.5, fill=pal["bg"], line=None)
+            _shape_rect(slide, 0, 0, 0.18, 7.5, fill=pal["accent"], line=None)
+            _shape_rect(slide, 9.4, 0, 3.95, 7.5, fill=pal["panel"], line=None)
+            if info.get("kicker") or info.get("eyebrow"):
+                _text_box(
+                    slide, str(info.get("kicker") or info.get("eyebrow")).upper(),
+                    0.75, 1.05, 5.8, 0.28, color=pal["accent"], size=9, bold=True,
+                )
+            _text_box(
+                slide, info.get("title", ""), 0.72, 1.55, 8.15, 1.9,
+                color=pal["fg"], size=34, bold=True,
+            )
+            if info.get("subtitle") or info.get("body"):
+                _text_box(
+                    slide, info.get("subtitle") or info.get("body"), 0.78, 3.65, 7.3, 0.8,
+                    color=pal["muted"], size=16,
+                )
+            if info.get("bullets"):
+                _bullets(slide, list(info["bullets"])[:4], 0.9, 4.8, 6.8, 1.25, pal, size=13)
+            _add_image(slide, {**info, "image_x": info.get("image_x", 9.85), "image_y": info.get("image_y", 1.35), "image_w": info.get("image_w", 2.85)})
+
+        def _render_section(slide: Any, info: dict[str, Any], pal: dict[str, str]) -> None:
+            _shape_rect(slide, 0, 0, 13.333, 7.5, fill=pal["bg"], line=None)
+            _shape_rect(slide, 0.68, 1.45, 0.1, 4.2, fill=pal["accent"], line=None)
+            _text_box(slide, info.get("title", ""), 1.05, 2.35, 9.6, 1.25, color=pal["fg"], size=32, bold=True)
+            if info.get("subtitle") or info.get("body"):
+                _text_box(slide, info.get("subtitle") or info.get("body"), 1.08, 3.72, 8.8, 0.8, color=pal["muted"], size=16)
+
+        def _render_content(slide: Any, info: dict[str, Any], pal: dict[str, str], idx: int) -> None:
+            _shape_rect(slide, 0, 0, 13.333, 7.5, fill=pal["bg"], line=None)
+            _add_title(slide, info, pal)
+            if info.get("bullets"):
+                _bullets(slide, list(info["bullets"]), 0.88, 1.45, 6.4, 4.8, pal, size=16)
+            elif info.get("body"):
+                _text_box(slide, info["body"], 0.78, 1.35, 6.1, 4.85, color=pal["fg"], size=16)
+            _add_image(slide, info)
+            _render_shapes(slide, info, pal)
+            _add_footer(slide, info, pal, idx)
+
+        def _render_comparison(slide: Any, info: dict[str, Any], pal: dict[str, str], idx: int) -> None:
+            _shape_rect(slide, 0, 0, 13.333, 7.5, fill=pal["bg"], line=None)
+            _add_title(slide, info, pal)
+            columns = [info.get("left", {}), info.get("right", {})]
+            for i, col in enumerate(columns):
+                col = _as_dict(col, "heading")
+                x = 0.78 + i * 6.18
+                _shape_rect(slide, x, 1.35, 5.62, 5.35, fill=pal["panel"], line=pal["line"], radius=True)
+                _text_box(slide, col.get("heading", f"Option {i + 1}"), x + 0.35, 1.72, 4.8, 0.35, color=pal["accent" if i == 0 else "accent2"], size=17, bold=True)
+                _bullets(slide, list(col.get("bullets", [])), x + 0.42, 2.35, 4.72, 3.6, pal, size=13)
+            _add_footer(slide, info, pal, idx)
+
+        def _render_table(slide: Any, info: dict[str, Any], pal: dict[str, str], idx: int) -> None:
+            _shape_rect(slide, 0, 0, 13.333, 7.5, fill=pal["bg"], line=None)
+            _add_title(slide, info, pal)
+            tbl_data = info.get("table", {}) or {}
+            headers = list(tbl_data.get("headers", []))
+            rows = list(tbl_data.get("rows", []))
+            if not headers:
+                return
+            n_rows = len(rows) + 1
+            n_cols = len(headers)
+            x = float(tbl_data.get("x", 0.7))
+            y = float(tbl_data.get("y", 1.35))
+            w = float(tbl_data.get("w", 11.95))
+            h = float(tbl_data.get("h", min(5.7, 0.46 * n_rows + 0.2)))
+            table = slide.shapes.add_table(n_rows, n_cols, Inches(x), Inches(y), Inches(w), Inches(h)).table
+            for col_idx, header in enumerate(headers):
+                cell = table.cell(0, col_idx)
+                cell.text = str(header)
+                cell.fill.solid()
+                cell.fill.fore_color.rgb = _rgb(pal["accent"])
+                for para in cell.text_frame.paragraphs:
+                    para.font.bold = True
+                    para.font.size = Pt(10)
+                    para.font.color.rgb = _rgb("FFFFFF")
+            for row_idx, row in enumerate(rows):
+                for col_idx in range(n_cols):
+                    value = row[col_idx] if isinstance(row, (list, tuple)) and col_idx < len(row) else ""
+                    cell = table.cell(row_idx + 1, col_idx)
+                    cell.text = str(value)
+                    if row_idx % 2 == 1:
+                        cell.fill.solid()
+                        cell.fill.fore_color.rgb = _rgb(pal["panel"])
+                    for para in cell.text_frame.paragraphs:
+                        para.font.size = Pt(9.2)
+                        para.font.color.rgb = _rgb(pal["fg"])
+            _add_footer(slide, info, pal, idx)
+
+        def _render_cards(slide: Any, info: dict[str, Any], pal: dict[str, str], idx: int) -> None:
+            _shape_rect(slide, 0, 0, 13.333, 7.5, fill=pal["bg"], line=None)
+            _add_title(slide, info, pal)
+            cards = list(info.get("cards") or [])
+            if not cards and info.get("bullets"):
+                cards = [{"title": str(b), "body": ""} for b in info["bullets"]]
+            n = max(1, min(len(cards), 4))
+            card_w = 11.9 / n
+            for i, raw_card in enumerate(cards[:4]):
+                card = _as_dict(raw_card)
+                x = 0.72 + i * card_w
+                _shape_rect(slide, x, 1.55, card_w - 0.22, 4.75, fill=pal["panel"], line=pal["line"], radius=True)
+                _text_box(slide, card.get("title", ""), x + 0.25, 1.88, card_w - 0.72, 0.72, color=pal["accent"], size=15, bold=True)
+                if card.get("body"):
+                    _text_box(slide, card.get("body", ""), x + 0.25, 2.72, card_w - 0.72, 1.4, color=pal["fg"], size=11.5)
+                if card.get("bullets"):
+                    _bullets(slide, list(card["bullets"])[:4], x + 0.28, 4.15, card_w - 0.75, 1.55, pal, size=10.5)
+            _add_footer(slide, info, pal, idx)
+
+        def _render_metric(slide: Any, info: dict[str, Any], pal: dict[str, str], idx: int) -> None:
+            _shape_rect(slide, 0, 0, 13.333, 7.5, fill=pal["bg"], line=None)
+            _add_title(slide, info, pal)
+            metrics = list(info.get("metrics") or [])
+            if not metrics and info.get("bullets"):
+                metrics = [{"value": str(b), "label": ""} for b in info["bullets"][:3]]
+            n = max(1, min(len(metrics), 3))
+            for i, raw_metric in enumerate(metrics[:3]):
+                metric = _as_dict(raw_metric, "value")
+                x = 0.85 + i * 4.05
+                _text_box(slide, metric.get("value", ""), x, 2.05, 3.55, 0.85, color=pal["accent" if i == 0 else "fg"], size=30, bold=True)
+                _text_box(slide, metric.get("label", ""), x + 0.03, 3.02, 3.25, 0.42, color=pal["fg"], size=13, bold=True)
+                note = metric.get("note") or metric.get("delta") or ""
+                if note:
+                    _text_box(slide, note, x + 0.03, 3.55, 3.35, 0.65, color=pal["muted"], size=10.5)
+            if info.get("body"):
+                _text_box(slide, info["body"], 0.9, 5.12, 10.8, 0.8, color=pal["muted"], size=14)
+            _add_footer(slide, info, pal, idx)
+
+        def _render_quote(slide: Any, info: dict[str, Any], pal: dict[str, str], idx: int) -> None:
+            _shape_rect(slide, 0, 0, 13.333, 7.5, fill=pal["bg"], line=None)
+            _text_box(slide, "“", 0.78, 0.95, 0.8, 0.8, color=pal["accent"], size=42, bold=True)
+            _text_box(slide, info.get("quote") or info.get("body") or info.get("title", ""), 1.25, 1.55, 10.4, 2.35, color=pal["fg"], size=27, bold=True)
+            attribution = info.get("attribution") or info.get("subtitle", "")
+            if attribution:
+                _text_box(slide, attribution, 1.33, 4.22, 7.8, 0.42, color=pal["muted"], size=13)
+            _add_footer(slide, info, pal, idx)
+
+        def _render_timeline(slide: Any, info: dict[str, Any], pal: dict[str, str], idx: int) -> None:
+            _shape_rect(slide, 0, 0, 13.333, 7.5, fill=pal["bg"], line=None)
+            _add_title(slide, info, pal)
+            items = list(info.get("items") or info.get("timeline") or info.get("steps") or [])
+            if not items and info.get("bullets"):
+                items = [{"title": str(b)} for b in info["bullets"]]
+            y = 3.1
+            _shape_rect(slide, 1.05, y + 0.12, 11.1, 0.03, fill=pal["line"], line=None)
+            n = max(1, min(len(items), 5))
+            for i, raw_item in enumerate(items[:5]):
+                item = _as_dict(raw_item)
+                x = 1.05 + i * (11.1 / max(1, n - 1))
+                oval = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x - 0.12), Inches(y), Inches(0.24), Inches(0.24))
+                _set_fill(oval, pal["accent"])
+                _set_line(oval, None)
+                _text_box(slide, item.get("label") or item.get("date") or str(i + 1), x - 0.45, y - 0.5, 0.9, 0.3, color=pal["accent"], size=9, bold=True, align=PP_ALIGN.CENTER)
+                _text_box(slide, item.get("title", ""), x - 0.92, y + 0.42, 1.85, 0.55, color=pal["fg"], size=11, bold=True, align=PP_ALIGN.CENTER)
+                if item.get("body"):
+                    _text_box(slide, item["body"], x - 0.95, y + 1.05, 1.9, 0.72, color=pal["muted"], size=8.8, align=PP_ALIGN.CENTER)
+            _add_footer(slide, info, pal, idx)
+
+        def _render_chart(slide: Any, info: dict[str, Any], pal: dict[str, str], idx: int) -> None:
+            _shape_rect(slide, 0, 0, 13.333, 7.5, fill=pal["bg"], line=None)
+            _add_title(slide, info, pal)
+            chart_info = info.get("chart", {}) or {}
+            categories = list(chart_info.get("categories") or [])
+            series = chart_info.get("series")
+            values = chart_info.get("values")
+            if not series and values is not None:
+                series = [{"name": chart_info.get("name", "Series 1"), "values": values}]
+            elif isinstance(series, dict):
+                series = [series]
+            if not categories or not series:
+                if info.get("bullets"):
+                    _bullets(slide, list(info["bullets"]), 0.9, 1.45, 10.5, 4.7, pal)
+                return
+            chart_data = CategoryChartData()
+            chart_data.categories = categories
+            for raw_serie in series:
+                serie = _as_dict(raw_serie, "name")
+                chart_data.add_series(str(serie.get("name", "Series")), list(serie.get("values", [])))
+            chart_types = {
+                "bar": XL_CHART_TYPE.BAR_CLUSTERED,
+                "column": XL_CHART_TYPE.COLUMN_CLUSTERED,
+                "line": XL_CHART_TYPE.LINE,
+                "pie": XL_CHART_TYPE.PIE,
+            }
+            chart_type = chart_types.get(str(chart_info.get("type", "column")).lower(), XL_CHART_TYPE.COLUMN_CLUSTERED)
+            frame = slide.shapes.add_chart(
+                chart_type,
+                _emu(chart_info.get("x"), 0.85),
+                _emu(chart_info.get("y"), 1.45),
+                _emu(chart_info.get("w"), 11.8),
+                _emu(chart_info.get("h"), 4.9),
+                chart_data,
+            )
+            chart = frame.chart
+            chart.has_legend = True
+            chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+            chart.legend.include_in_layout = False
+            chart.has_title = bool(chart_info.get("title"))
+            if chart_info.get("title"):
+                chart.chart_title.text_frame.text = str(chart_info["title"])
+            _add_footer(slide, info, pal, idx)
+
+        def _render_shapes(slide: Any, info: dict[str, Any], pal: dict[str, str]) -> None:
+            shape_map = {
+                "rect": MSO_SHAPE.RECTANGLE,
+                "rectangle": MSO_SHAPE.RECTANGLE,
+                "round_rect": MSO_SHAPE.ROUNDED_RECTANGLE,
+                "ellipse": MSO_SHAPE.OVAL,
+                "oval": MSO_SHAPE.OVAL,
+            }
+            for obj in list(info.get("shapes") or info.get("objects") or []):
+                kind = shape_map.get(str(obj.get("type", "rect")).lower(), MSO_SHAPE.RECTANGLE)
+                shape = slide.shapes.add_shape(
+                    kind,
+                    _emu(obj.get("x"), 0),
+                    _emu(obj.get("y"), 0),
+                    _emu(obj.get("w"), 1),
+                    _emu(obj.get("h"), 1),
+                )
+                _set_fill(shape, obj.get("fill", pal["panel"]), obj.get("transparency"))
+                _set_line(shape, obj.get("stroke", obj.get("line", pal["line"])), float(obj.get("stroke_width", 1)))
+                if obj.get("text"):
+                    _set_text_frame(
+                        shape, obj["text"],
+                        color=_hex(obj.get("color"), pal["fg"]),
+                        size=float(obj.get("font_size", 14)),
+                        bold=bool(obj.get("bold", False)),
+                        align=PP_ALIGN.CENTER,
+                        vertical=MSO_ANCHOR.MIDDLE,
+                    )
+
+        renderers = {
+            "cover": _render_cover,
+            "section": _render_section,
+            "content": _render_content,
+            "comparison": _render_comparison,
+            "table": _render_table,
+            "cards": _render_cards,
+            "metric": _render_metric,
+            "quote": _render_quote,
+            "timeline": _render_timeline,
+            "process": _render_timeline,
+            "chart": _render_chart,
+            "blank": _render_content,
+        }
+
         try:
             prs = Presentation()
-            is_dark = theme.lower() == "dark"
+            prs.slide_width = Inches(13.333)
+            prs.slide_height = Inches(7.5)
+            blank_layout = prs.slide_layouts[6]
 
             for idx, slide_info in enumerate(slide_data):
-                layout_name = slide_info.get("layout", "content")
-                title = slide_info.get("title", "")
-                subtitle = slide_info.get("subtitle", "")
-                body = slide_info.get("body", "")
-                bullets = slide_info.get("bullets", [])
-                speaker_note = slide_info.get("speaker_note", "")
-                image_path = slide_info.get("image_path", "")
+                if not isinstance(slide_info, dict):
+                    return {"ok": False, "error": f"slide {idx + 1} must be an object"}
+                slide = prs.slides.add_slide(blank_layout)
+                pal = _palette(slide_info)
+                _apply_background(slide, pal)
+                layout_name = str(slide_info.get("layout", "content")).lower()
+                renderer = renderers.get(layout_name, _render_content)
+                if renderer in {_render_cover, _render_section}:
+                    renderer(slide, slide_info, pal)
+                else:
+                    renderer(slide, slide_info, pal, idx)
 
-                # Select layout index based on layout name.
-                layout_map = {
-                    "cover": 0,       # Title Slide
-                    "content": 1,     # Title and Content
-                    "section": 2,     # Section Header
-                    "comparison": 3,  # Two Content
-                    "blank": 6,       # Blank
-                    "table": 1,       # Use content layout, add table manually
-                }
-                layout_idx = layout_map.get(layout_name, 1)
-                # Clamp to available layouts.
-                layout_idx = min(layout_idx, len(prs.slide_layouts) - 1)
-                slide = prs.slides.add_slide(prs.slide_layouts[layout_idx])
-
-                # Dark theme: set background.
-                if is_dark:
-                    bg = slide.background
-                    fill = bg.fill
-                    fill.solid()
-                    fill.fore_color.rgb = RGBColor(0x1E, 0x1E, 0x2E)
-
-                # Title.
-                if slide.shapes.title:
-                    slide.shapes.title.text = title
-                    if is_dark:
-                        for para in slide.shapes.title.text_frame.paragraphs:
-                            for run in para.runs:
-                                run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-
-                # Cover / Section layout.
-                if layout_name in ("cover", "section"):
-                    if len(slide.placeholders) > 1:
-                        ph = slide.placeholders[1]
-                        if subtitle:
-                            ph.text = subtitle
-                        elif bullets:
-                            ph.text = "\n".join(str(b) for b in bullets)
-                        else:
-                            ph.text = body
-                        if is_dark:
-                            for para in ph.text_frame.paragraphs:
-                                for run in para.runs:
-                                    run.font.color.rgb = RGBColor(0xCC, 0xCC, 0xCC)
-
-                # Content layout with bullets or body.
-                elif layout_name == "content" or layout_name not in layout_map:
-                    if len(slide.placeholders) > 1:
-                        ph = slide.placeholders[1]
-                        if bullets:
-                            tf = ph.text_frame
-                            tf.clear()
-                            for i, bullet in enumerate(bullets):
-                                p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-                                p.text = str(bullet)
-                                p.level = 0
-                                if is_dark:
-                                    for run in p.runs:
-                                        run.font.color.rgb = RGBColor(0xE0, 0xE0, 0xE0)
-                        else:
-                            ph.text = body
-                            if is_dark:
-                                for para in ph.text_frame.paragraphs:
-                                    for run in para.runs:
-                                        run.font.color.rgb = RGBColor(0xE0, 0xE0, 0xE0)
-
-                # Comparison layout (left/right columns).
-                elif layout_name == "comparison":
-                    left_data = slide_info.get("left", {})
-                    right_data = slide_info.get("right", {})
-                    for ph_idx, col_data in [(1, left_data), (2, right_data)]:
-                        if ph_idx < len(slide.placeholders):
-                            ph = slide.placeholders[ph_idx]
-                            tf = ph.text_frame
-                            tf.clear()
-                            heading = col_data.get("heading", "")
-                            if heading:
-                                p = tf.paragraphs[0]
-                                p.text = heading
-                                p.font.bold = True
-                                for b in col_data.get("bullets", []):
-                                    p = tf.add_paragraph()
-                                    p.text = str(b)
-                                    p.level = 0
-                            else:
-                                for i, b in enumerate(col_data.get("bullets", [])):
-                                    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-                                    p.text = str(b)
-
-                # Table layout.
-                elif layout_name == "table":
-                    tbl_data = slide_info.get("table", {})
-                    headers = tbl_data.get("headers", [])
-                    rows = tbl_data.get("rows", [])
-                    if headers:
-                        n_rows = len(rows) + 1
-                        n_cols = len(headers)
-                        left = Inches(0.5)
-                        top = Inches(2.0)
-                        width = Inches(9.0)
-                        height = Inches(0.4) * n_rows
-                        table = slide.shapes.add_table(
-                            n_rows, n_cols, left, top, width, height,
-                        ).table
-                        for i, h in enumerate(headers):
-                            cell = table.cell(0, i)
-                            cell.text = str(h)
-                            for para in cell.text_frame.paragraphs:
-                                para.font.bold = True
-                                para.font.size = Pt(11)
-                        for r_idx, row in enumerate(rows):
-                            for c_idx, val in enumerate(row):
-                                if c_idx < n_cols:
-                                    cell = table.cell(r_idx + 1, c_idx)
-                                    cell.text = str(val)
-                                    for para in cell.text_frame.paragraphs:
-                                        para.font.size = Pt(10)
-
-                # Embed image if provided.
-                if image_path:
-                    try:
-                        img_resolved = _resolve_safe_path(project_root, image_path)
-                        if img_resolved.is_file():
-                            slide.shapes.add_picture(
-                                str(img_resolved),
-                                Inches(1.0), Inches(2.5),
-                                width=Inches(8.0),
-                            )
-                    except (ValueError, Exception):
-                        pass  # Skip image on error.
-
-                # Speaker notes.
+                speaker_note = slide_info.get("speaker_note", slide_info.get("notes", ""))
                 if speaker_note:
-                    notes_slide = slide.notes_slide
-                    notes_slide.notes_text_frame.text = speaker_note
+                    slide.notes_slide.notes_text_frame.text = str(speaker_note)
 
             resolved.parent.mkdir(parents=True, exist_ok=True)
             prs.save(str(resolved))
@@ -758,6 +1097,12 @@ def _make_pptx_create_tool(project_root: Path):
                 "path": path,
                 "slide_count": len(slide_data),
                 "size": resolved.stat().st_size,
+                "native_objects": True,
+                "layouts": [
+                    str(slide.get("layout", "content")).lower()
+                    for slide in slide_data
+                    if isinstance(slide, dict)
+                ],
             }
         except Exception as e:
             return {"ok": False, "error": f"Failed to create PPTX: {e}"}
@@ -1235,10 +1580,11 @@ def _generate_ai_image(
 
 def _resolve_safe_path(project_root: Path, path: str) -> Path:
     """Resolve a relative path, ensuring it stays inside project_root."""
+    root = project_root.expanduser().resolve()
     raw = Path(path).expanduser()
-    resolved = raw.resolve() if raw.is_absolute() else (project_root / raw).resolve()
+    resolved = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
     try:
-        resolved.relative_to(project_root)
+        resolved.relative_to(root)
     except ValueError:
         raise ValueError(f"path must stay inside project root: {resolved}")
     return resolved

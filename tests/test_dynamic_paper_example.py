@@ -22,6 +22,7 @@ def test_pptx_create_builtin_smoke(tmp_path: Path):
     result = tool(path="report.pptx", slides=json.dumps(slides, ensure_ascii=False))
 
     assert result["ok"] is True
+    assert result["native_objects"] is True
     assert (tmp_path / "report.pptx").exists()
     assert (tmp_path / "report.pptx").stat().st_size > 0
 

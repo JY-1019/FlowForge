@@ -2453,6 +2453,26 @@ class TestEnhancedPptxCreate:
         notes = prs.slides[0].notes_slide.notes_text_frame.text
         assert "Remember to emphasize" in notes
 
+    def test_notes_alias_and_missing_image_are_tolerated(self, tmp_path):
+        from flowforge.tools.builtin import _make_pptx_create_tool
+        import json
+
+        tool = _make_pptx_create_tool(tmp_path)
+        slides = [{
+            "title": "Optional Image",
+            "body": "This should still render.",
+            "image_path": "missing.png",
+            "notes": "Legacy note alias.",
+            "accent": "not-a-hex-color",
+        }]
+        result = tool(path="test.pptx", slides=json.dumps(slides))
+        assert result["ok"] is True
+
+        from pptx import Presentation
+        prs = Presentation(str(tmp_path / "test.pptx"))
+        notes = prs.slides[0].notes_slide.notes_text_frame.text
+        assert "Legacy note alias" in notes
+
     def test_mixed_layouts(self, tmp_path):
         from flowforge.tools.builtin import _make_pptx_create_tool
         import json
@@ -2470,6 +2490,67 @@ class TestEnhancedPptxCreate:
         result = tool(path="test.pptx", slides=json.dumps(slides))
         assert result["ok"] is True
         assert result["slide_count"] == 5
+        assert result["native_objects"] is True
+
+    def test_metric_timeline_and_chart_layouts(self, tmp_path):
+        from flowforge.tools.builtin import _make_pptx_create_tool
+        import json
+
+        tool = _make_pptx_create_tool(tmp_path)
+        slides = [
+            {
+                "layout": "metric",
+                "title": "Signals",
+                "metrics": [
+                    {"value": "3", "label": "papers"},
+                    {"value": "7", "label": "slides"},
+                ],
+            },
+            {
+                "layout": "timeline",
+                "title": "Workflow",
+                "items": [
+                    {"label": "1", "title": "Fetch"},
+                    {"label": "2", "title": "Summarise"},
+                    {"label": "3", "title": "Render"},
+                ],
+            },
+            {
+                "layout": "chart",
+                "title": "Counts",
+                "chart": {
+                    "type": "column",
+                    "categories": ["A", "B"],
+                    "series": [{"name": "Values", "values": [1, 2]}],
+                },
+            },
+        ]
+        result = tool(path="rich.pptx", slides=json.dumps(slides), theme="tech")
+        assert result["ok"] is True
+        assert result["layouts"] == ["metric", "timeline", "chart"]
+
+        from pptx import Presentation
+        prs = Presentation(str(tmp_path / "rich.pptx"))
+        assert len(prs.slides) == 3
+        assert any(shape.has_chart for shape in prs.slides[2].shapes)
+
+    def test_pptx_create_with_symlinked_project_root(self, tmp_path):
+        from flowforge.tools.builtin import _make_pptx_create_tool
+        import json
+
+        real_root = tmp_path / "real"
+        real_root.mkdir()
+        linked_root = tmp_path / "linked"
+        linked_root.symlink_to(real_root, target_is_directory=True)
+
+        tool = _make_pptx_create_tool(linked_root)
+        result = tool(
+            path="deck.pptx",
+            slides=json.dumps([{"layout": "cover", "title": "Linked root"}]),
+        )
+
+        assert result["ok"] is True
+        assert (real_root / "deck.pptx").exists()
 
 
 # ---------------------------------------------------------------------------

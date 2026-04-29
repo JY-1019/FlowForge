@@ -437,7 +437,7 @@ reference in the runtime prompt, such as
 | Tool | Description | Gate |
 |------|-------------|------|
 | `pdf_read_text` | Extract text from PDF files | Requires `pypdf` |
-| `pptx_create` | Create PowerPoint decks with layouts, tables, themes, and speaker notes | Requires `python-pptx` |
+| `pptx_create` | Create editable PowerPoint decks with native text, shapes, tables, charts, layouts, themes, and speaker notes | Requires `python-pptx` |
 | `csv_read` | Read CSV rows as dictionaries | Always available |
 | `csv_write` | Write CSV files | Always available |
 | `docx_create` | Create Word documents | Requires `python-docx` |
@@ -459,14 +459,23 @@ with `ctx.call_tool()`:
 async def render(ctx):
     slides = json.dumps([
         {"layout": "cover", "title": "Report", "subtitle": "2026"},
-        {"layout": "content", "title": "Summary", "body": "Key points..."},
+        {
+            "layout": "metric",
+            "title": "Summary",
+            "metrics": [
+                {"value": "3", "label": "papers"},
+                {"value": "7", "label": "slides"},
+            ],
+        },
         {
             "layout": "table",
             "title": "Data",
             "table": {"headers": ["Metric", "Value"], "rows": [["A", "10"]]},
         },
     ])
-    return await ctx.call_tool("pptx_create", path="report.pptx", slides=slides)
+    return await ctx.call_tool(
+        "pptx_create", path="report.pptx", slides=slides, theme="tech",
+    )
 ```
 
 `ctx.call_tool()` searches the merged tools in global -> flow -> task -> step
@@ -474,14 +483,29 @@ order and executes the matching local function tool.
 
 ### `pptx_create` Layouts
 
-| Layout | Required fields | Optional fields |
-|--------|-----------------|-----------------|
-| `cover` | `title` | `subtitle` |
-| `content` | `title`, `body` | `notes` |
-| `section` | `title` | `subtitle` |
-| `comparison` | `title`, `left_title`, `left_body`, `right_title`, `right_body` | `notes` |
-| `table` | `title`, `table.headers`, `table.rows` | `notes` |
-| `blank` | none | none |
+`pptx_create` follows the same design principle as PPT Master: output should
+remain editable in PowerPoint. It composes a blank 16:9 canvas with native
+PowerPoint text boxes, shapes, tables, and charts rather than slide-sized
+screenshots.
+
+| Layout | Main fields | Notes |
+|--------|-------------|-------|
+| `cover` | `title`, `subtitle`, `kicker` | Editorial opening slide |
+| `content` | `title`, `body`, `bullets`, `image_path` | Open text/bullet slide |
+| `section` | `title`, `subtitle` | Divider slide |
+| `comparison` | `left.heading`, `left.bullets`, `right.heading`, `right.bullets` | Two-column comparison |
+| `table` | `table.headers`, `table.rows` | Native editable PowerPoint table |
+| `cards` | `cards[].title`, `cards[].body`, `cards[].bullets` | 2-4 compact cards |
+| `metric` | `metrics[].value`, `metrics[].label`, `metrics[].note` | Big-number summary |
+| `timeline` / `process` | `items[].label`, `items[].title`, `items[].body` | Native line/circle process |
+| `chart` | `chart.type`, `chart.categories`, `chart.series` | Native chart; supports `column`, `bar`, `line`, `pie` |
+| `quote` | `quote`, `attribution` | Editorial quote slide |
+| `blank` | `shapes` / `objects` | Custom native shapes |
+
+Themes: `default`, `dark`, `editorial`, `consulting`, `academic`, `tech`.
+Every slide may override `bg`, `fg`, `muted`, `accent`, `accent2`, `panel`, and
+`line`. The tool returns `native_objects: true`, `slide_count`, `size`, and the
+layout names it rendered.
 
 ---
 

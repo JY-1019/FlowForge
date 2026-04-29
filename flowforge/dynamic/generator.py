@@ -3167,8 +3167,11 @@ def _format_artifact_instructions(artifacts: list[dict[str, str]]) -> str:
         "",
         "IMPORTANT: The render step should transform the previous step's output "
         "into the format expected by the tool. For example, for pptx_create, "
-        "convert the data into a JSON array of slide objects with 'title' and "
-        "'bullets' keys.",
+        "convert the data into a JSON array of editable slide objects. Prefer "
+        "structured layouts such as 'cover', 'metric', 'cards', 'timeline', "
+        "'chart', and 'table' over plain title+bullets when they fit the "
+        "content. pptx_create writes native PowerPoint objects, so use its "
+        "table/chart/shape fields instead of rendering a slide screenshot.",
     ])
     return "\n".join(lines)
 

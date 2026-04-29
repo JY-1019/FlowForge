@@ -561,38 +561,88 @@ class PaperReportPipeline:
             timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
             rel_path = f"_artifacts/dynamic_paper_report/arxiv_report_{timestamp}.pptx"
 
-            slides_for_pptx = [
-                {
-                    "title": slide.get("title", ""),
-                    "bullets": slide.get("bullets", []),
-                }
-                for slide in (
-                    s.model_dump() if hasattr(s, "model_dump") else s
-                    for s in ctx.input.slides
-                )
+            raw_slides = [
+                s.model_dump() if hasattr(s, "model_dump") else s
+                for s in ctx.input.slides
             ]
 
-            # Use the builtin pptx_create tool
+            def _cards_from_bullets(slide):
+                return [
+                    {"title": bullet, "body": ""}
+                    for bullet in slide.get("bullets", [])[:4]
+                ]
+
+            slides_for_pptx = []
+            for index, slide in enumerate(raw_slides):
+                title = slide.get("title", "")
+                bullets = slide.get("bullets", [])
+                speaker_note = slide.get("speaker_note", "")
+                base = {
+                    "title": title,
+                    "bullets": bullets,
+                    "speaker_note": speaker_note,
+                    "footer": "FlowForge dynamic arXiv report",
+                    "show_page_number": True,
+                }
+                if index == 0:
+                    slides_for_pptx.append({
+                        **base,
+                        "layout": "cover",
+                        "kicker": "arXiv AI briefing",
+                        "subtitle": deck.get("deck_subtitle", ""),
+                    })
+                elif index == 1:
+                    slides_for_pptx.append({
+                        **base,
+                        "layout": "metric",
+                        "metrics": [
+                            {"value": "3", "label": "papers reviewed"},
+                            {"value": "7", "label": "report slides"},
+                            {"value": "1", "label": "source feed"},
+                        ],
+                        "body": "요약 슬라이드는 실제 arXiv API 결과를 기반으로 생성됩니다.",
+                    })
+                elif index in {2, 3, 4}:
+                    slides_for_pptx.append({
+                        **base,
+                        "layout": "content",
+                        "kicker": f"paper {index - 1}",
+                    })
+                elif index == 5:
+                    slides_for_pptx.append({
+                        **base,
+                        "layout": "cards",
+                        "cards": _cards_from_bullets(slide),
+                    })
+                elif index == 6:
+                    slides_for_pptx.append({
+                        **base,
+                        "layout": "process",
+                        "items": [
+                            {"label": "1", "title": "원문 확인"},
+                            {"label": "2", "title": "실험/코드 점검"},
+                            {"label": "3", "title": "팀 과제 연결"},
+                        ],
+                        "body": speaker_note,
+                    })
+                else:
+                    slides_for_pptx.append({**base, "layout": "content"})
+
             result = await ctx.call_tool(
                 "pptx_create",
                 path=rel_path,
                 slides=json.dumps(slides_for_pptx, ensure_ascii=False),
+                theme="tech",
             )
 
             if not result.get("ok"):
-                # Fallback: save as JSON if pptx_create fails
-                json_rel = rel_path.replace(".pptx", ".json")
-                await ctx.call_tool(
-                    "files_write_text",
-                    path=json_rel,
-                    content=json.dumps(slides_for_pptx, ensure_ascii=False, indent=2),
-                )
-                LOG.warning("pptx_create failed — saved slides as JSON: %s", json_rel)
-                rel_path = json_rel
+                raise RuntimeError(f"pptx_create failed: {result}")
+            if int(result.get("size") or 0) < 5000:
+                raise RuntimeError(f"pptx_create produced a tiny file: {result}")
 
             return PresentationArtifact(
                 pptx_path=rel_path,
-                slide_count=len(ctx.input.slides),
+                slide_count=int(result.get("slide_count") or len(ctx.input.slides)),
                 source_url=deck["source_url"],
                 generated_at=datetime.now(timezone.utc).isoformat(),
             )
