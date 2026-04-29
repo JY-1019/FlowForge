@@ -471,6 +471,32 @@ class F:
         assert '```json' in code
         assert code.endswith(")")
 
+    def test_strip_markdown_fences_ignores_trailing_markdown_blocks(self):
+        from flowforge.dynamic.generator import _strip_markdown_fences
+
+        text = '''```python
+from flowforge import flow
+
+@flow(name="f", prompt="f")
+class F:
+    pass
+```
+
+Explanation follows.
+
+```text
+not python
+```'''
+
+        code = _strip_markdown_fences(text)
+
+        assert code == (
+            'from flowforge import flow\n\n'
+            '@flow(name="f", prompt="f")\n'
+            'class F:\n'
+            '    pass'
+        )
+
     def test_normalise_generated_flow_code_fills_bare_top_level_flow(self):
         from flowforge.dynamic.generator import (
             DynamicFlowGenerator,

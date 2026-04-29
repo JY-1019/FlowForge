@@ -1,6 +1,8 @@
 """Utilities for cleaning LLM-generated Python code before compile."""
 from __future__ import annotations
 
+import ast
+
 
 def _normalise_generated_flow_code(
     text: str,
@@ -36,8 +38,12 @@ def _strip_markdown_fences(text: str) -> str:
             candidate = lines[candidate_idx]
             if candidate.startswith("```") and candidate.strip() == "```":
                 closing_idx = candidate_idx
-                break
+                body = "".join(lines[idx + 1:candidate_idx]).strip()
+                if _looks_like_python(body):
+                    return body
         if closing_idx is not None:
+            # Fall back to the furthest closing fence so column-zero fences
+            # inside generated prompt strings are preserved for compile repair.
             return "".join(lines[idx + 1:closing_idx]).strip()
         break
 
@@ -59,6 +65,14 @@ def _strip_markdown_fences(text: str) -> str:
     if text.endswith("```"):
         text = text[:-3]
     return text.strip()
+
+
+def _looks_like_python(code: str) -> bool:
+    try:
+        ast.parse(code)
+    except SyntaxError:
+        return False
+    return True
 
 
 def _fill_bare_top_level_flow_decorator(
