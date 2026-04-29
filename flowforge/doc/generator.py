@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from typing import Any, TYPE_CHECKING
 
 from flowforge.doc.cache import DocCache
@@ -21,8 +20,6 @@ from flowforge.errors import DocGenerationError
 
 if TYPE_CHECKING:
     from flowforge.types import LLMConfig
-
-logger = logging.getLogger(__name__)
 
 # Default concurrency limit for parallel doc generation.
 _DEFAULT_CONCURRENCY = 5
@@ -131,14 +128,8 @@ class DocGenerator:
                 doc = await self.generate_node(node)
                 return node.id, doc
 
-        results = await asyncio.gather(
-            *[_gen(n) for n in targets],
-            return_exceptions=True,
-        )
+        results = await asyncio.gather(*[_gen(n) for n in targets])
         for result in results:
-            if isinstance(result, Exception):
-                logger.warning("doc generation task failed: %s", result)
-                continue
             node_id, doc = result
             if doc is not None:
                 docs[node_id] = doc
@@ -157,17 +148,9 @@ class DocGenerator:
             if cached:
                 return self._dict_to_doc(node.type, cached)
 
-        try:
-            raw = await self._call_llm(prompt, node)
-            self._cache.set(prompt, raw)
-            return self._dict_to_doc(node.type, raw)
-        except Exception as e:
-            logger.warning(
-                "doc generation failed for node '%s' (provider=%s), "
-                "using prompt-only fallback: %s",
-                node.id, self._llm_config.provider, e,
-            )
-            return self._fallback_doc(node)
+        raw = await self._call_llm(prompt, node)
+        self._cache.set(prompt, raw)
+        return self._dict_to_doc(node.type, raw)
 
     def _build_prompt(self, node: DAGNode) -> str:
         meta = node.meta
@@ -224,7 +207,3 @@ class DocGenerator:
         }
         model = model_map.get(node_type, GlobalDoc)
         return model(**{k: v for k, v in data.items() if k in model.model_fields})
-
-    def _fallback_doc(self, node: DAGNode) -> AnyDoc:
-        raw = getattr(node.meta, "prompt", "") or f"{node.type.value}: {node.name}"
-        return self._dict_to_doc(node.type, {"summary": raw[:200]})

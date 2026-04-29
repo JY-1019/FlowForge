@@ -83,6 +83,22 @@ result = await engine.run(Query(text="What is FlowForge?"))
     `flowforge validate`, `flowforge viz`, `flowforge run --trace` —
     inspect and execute your agents without writing any boilerplate.
 
+-   :material-creation-outline: **Dynamic Flow Generation**
+
+    ---
+
+    Let the agent create missing flows. When the existing DAG does not cover a
+    requirement, the LLM can generate a new Flow, inject it at runtime, and
+    persist it in the manifest for reuse.
+
+-   :material-tools: **Tools & Skills**
+
+    ---
+
+    Register MCP, HTTP, Python functions, Anthropic-native Claude Skills, and
+    local `SKILL.md` Agent Skills through the same `tools=[...]` interface and
+    activate them with `<tool-name>`.
+
 </div>
 
 ---
@@ -123,5 +139,6 @@ At runtime the engine traverses the DAG, threads outputs into inputs, and record
 - [Annotation Reference →](concepts/annotations.md)
 - [I/O Data Flow →](concepts/data-flow.md)
 - [Tools & LLM Calling →](guides/tools-and-llm.md)
+- [Dynamic Flow Generation →](guides/dynamic-flow.md)
 - [Run Visualization Guide →](guides/visualization.md)
 - [CLI Reference →](api/cli.md)

@@ -8,6 +8,11 @@
 from flowforge import FlowForge
 
 engine = FlowForge.compile(MyAgent)
+
+# With dynamic flow generation:
+from flowforge import DynamicRunOptions
+options = DynamicRunOptions(persist_generated=True)
+engine = FlowForge.compile(MyAgent, dynamic_options=options)
 ```
 
 Converts a `@global_config`-decorated class into a `CompiledAgent`. Raises `CompileError` if:
@@ -15,6 +20,16 @@ Converts a `@global_config`-decorated class into a `CompiledAgent`. Raises `Comp
 - The class is not decorated with `@global_config`
 - The DAG has cycles (`CycleDetectedError`)
 - Step orders conflict (`OrderConflictError`)
+
+When `dynamic_options` is provided and the agent has `dynamic_flow=True`, the
+internal `_dynamic_generator` meta-flow is injected into the DAG. If
+`auto_load_generated=True`, previously generated flows and tools are loaded
+from `manifest.json` during compile, before planning/running.
+
+The manifest also acts as a cache: before creating a new dynamic flow,
+FlowForge checks both the in-memory DAG and the persisted manifest. If a flow
+with the target name already exists, generation is skipped and the existing
+flow is reused.
 
 ---
 
@@ -69,6 +84,18 @@ Session memory that persists across `run()` calls. Stores compact summaries of p
 engine.memory.clear()  # reset memory
 ```
 
+#### `.last_dynamic_generation` — `dict[str, Any] | None`
+
+Information about the most recent dynamic flow generation, if any:
+
+```python
+result = await engine.run(input_data, planning_mode="autonomous")
+dyn = engine.last_dynamic_generation
+if dyn and dyn.get("success"):
+    print(f"Generated: {dyn['dynamic_flow']}")
+    print(dyn["generated_code"])
+```
+
 ---
 
 ### Methods
@@ -89,6 +116,7 @@ result = await engine.run(my_input)
 | `planning_mode` | `str` | `"deterministic"` | `"deterministic"`, `"autonomous"`, or `"hybrid"` |
 | `route` | `str \| list[str] \| None` | `None` | Execute only specific paths |
 | `resume_from` | `Checkpoint \| None` | `None` | Resume from a previous run's checkpoint |
+| `dynamic_options` | `DynamicRunOptions \| None` | `None` | Override dynamic generation options for this run |
 
 **Planning modes:**
 
@@ -182,12 +210,13 @@ Return a Mermaid diagram for the last (or given) run.
 
 #### `compare_mermaid(trace=None)` → `str`
 
-Return a Markdown string with two Mermaid diagrams: the full DAG and the executed path side-by-side.
+Return a compact Markdown string with the executed-path Mermaid diagram.
+Pass `include_full_dag=True` to also include the full compiled DAG.
 
 ```python
 await engine.run(input_data)
 md = engine.compare_mermaid()
-# Paste into any Markdown viewer to compare
+full_md = engine.compare_mermaid(include_full_dag=True)
 ```
 
 #### `print_run_summary(trace=None)` → `None`
@@ -236,7 +265,7 @@ result = await session.run(user_input)
 |--------|---------|-------------|
 | `run(input_data, ...)` | `Any` | Same interface as `CompiledAgent.run()` |
 | `run_traced(input_data, ...)` | `tuple[Any, RunTrace]` | Same interface as `CompiledAgent.run_traced()` |
-| `compare_mermaid(trace=None)` | `str` | Full DAG vs executed path comparison |
+| `compare_mermaid(trace=None, include_full_dag=False)` | `str` | Executed-path Markdown report |
 
 ---
 

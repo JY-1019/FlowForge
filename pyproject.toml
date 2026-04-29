@@ -32,6 +32,12 @@ docs   = [
     "mkdocs-material>=9.5",
     "pymdown-extensions>=10.7",
 ]
+examples = [
+    "beautifulsoup4>=4.12",
+    "pypdf>=4.0",
+    "python-pptx>=0.6.23",
+    "python-docx>=1.1",
+]
 all = ["graphviz>=0.20", "openai>=1.50", "google-genai>=1.0", "mcp>=1.0"]
 dev = [
     "pytest>=8.0",
@@ -40,6 +46,10 @@ dev = [
     "mkdocs>=1.6",
     "mkdocs-material>=9.5",
     "pymdown-extensions>=10.7",
+    "beautifulsoup4>=4.12",
+    "pypdf>=4.0",
+    "python-pptx>=0.6.23",
+    "python-docx>=1.1",
 ]
 
 [project.urls]
@@ -66,6 +76,8 @@ flowforge = [
     "_docs/**/*.png",
     "_docs/**/*.svg",
     "_docs/**/*.css",
+    "tools/_ppt_master/LICENSE",
+    "tools/_ppt_master/TECHNICAL_DESIGN.md",
 ]
 
 [tool.pytest.ini_options]

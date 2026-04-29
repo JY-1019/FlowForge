@@ -85,7 +85,7 @@ from flowforge.annotations.validators import (
 from flowforge.errors import CompileError
 
 if TYPE_CHECKING:
-    from flowforge.types import BranchCondition, LLMConfig, ToolConfig
+    from flowforge.types import BranchCondition, LLMConfig, ToolReference
 
 # ---------------------------------------------------------------------------
 # Internal sentinel attribute names
@@ -115,7 +115,7 @@ def step(
     timeout_seconds: int = 60,
     unique: bool = False,
     approval: bool = False,
-    tools: list[ToolConfig] | None = None,
+    tools: list[ToolReference] | None = None,
     condition: BranchCondition | None = None,
     branches: dict[str, Callable[..., Any]] | None = None,
     fallback: Callable[..., Any] | None = None,
@@ -234,7 +234,7 @@ def task(
     output_schema: type | None = None,
     order: int | None = None,
     unique: bool = False,
-    tools: list[ToolConfig] | None = None,
+    tools: list[ToolReference] | None = None,
     on_error: str = "raise",
     max_loops: int = 1,
     loop_condition: Callable[..., bool] | None = None,
@@ -399,7 +399,7 @@ def flow(
     max_retries: int = 3,
     order: int | None = None,
     unique: bool = False,
-    tools: list[ToolConfig] | None = None,
+    tools: list[ToolReference] | None = None,
     condition: BranchCondition | None = None,
     branches: dict[str, type] | None = None,
     fallback: type | None = None,
@@ -552,8 +552,9 @@ def global_config(
     *,
     prompt: str,
     llm_config: LLMConfig | None = None,
-    tools: list[ToolConfig] | None = None,
+    tools: list[ToolReference] | None = None,
     dynamic_flow: bool = False,
+    include_builtin_tools: bool = False,
 ) -> Callable[[type], type]:
     """Mark the top-level agent class, collecting all root-level flows.
 
@@ -576,6 +577,13 @@ def global_config(
         ``DynamicFlowGenerator`` will analyse the gap, generate new
         FlowForge decorator code via LLM, compile it, and inject the
         new flow into the live DAG for execution.
+    include_builtin_tools:
+        When ``True``, inject the framework's builtin tool pack (web,
+        json, files, document tools) into the global tool list.  These
+        tools are then accessible from every step via ``ctx.call_tool()``.
+        When ``dynamic_flow=True``, builtin tools are always included
+        regardless of this flag (controlled by
+        ``DynamicRunOptions.include_builtin_tools``).
 
     Notes
     -----
@@ -604,6 +612,7 @@ def global_config(
             tools=tools or [],
             flows=flows,
             dynamic_flow=dynamic_flow,
+            include_builtin_tools=include_builtin_tools,
         )
         setattr(cls, _GLOBAL_ATTR, meta)
         return cls

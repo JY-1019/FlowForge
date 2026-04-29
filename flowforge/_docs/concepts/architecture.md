@@ -1,6 +1,7 @@
 # Architecture Overview
 
 FlowForge has four phases: **Decorate → Compile → Plan → Execute**.
+When `dynamic_flow=True`, a fifth phase — **Dynamic Generation** — can insert itself between Plan and Execute.
 
 ---
 
@@ -100,16 +101,43 @@ After every run, a `RunTrace` is stored in `engine.last_trace`.
 
 ---
 
+## Phase 4.5 — Dynamic Generation *(optional)*
+
+When `@global_config(dynamic_flow=True)` is set and the planner reports a gap (missing capability), the engine triggers the built-in `_dynamic_generator` meta-flow:
+
+```
+Planner reports gap_detected / uncovered requirements
+  → Engine triggers _dynamic_generator (per requirement)
+  → Meta-flow 3-step pipeline:
+      [1] analyse_gap      — verify the gap is real
+      [2] prepare_codegen  — build implementation brief
+      [3] generate_and_inject — LLM codegen → AST safety → compile → persist → inject
+  → Engine replans with the new flow(s) in the DAG
+  → Normal execution continues
+```
+
+Generated code passes through AST safety validation (blocks `os.system`,
+`subprocess`, `eval`, etc.) before execution. When `persist_generated=True`,
+flows are saved to disk and registered in `manifest.json` with file-lock
+protection. On later compiles, `auto_load_generated=True` loads those records
+back into the DAG; before new generation, FlowForge checks both the current DAG
+and the manifest so existing generated flows are not recreated.
+
+See [Dynamic Flow Generation Guide](../guides/dynamic-flow.md) for details.
+
+---
+
 ## Component Map
 
 ```
 flowforge/
 ├── annotations/      ← decorators + metadata dataclasses + validators
 ├── schema/           ← DAG node/edge models, compiler (metadata→DAG), resolver
-├── execution/        ← context hierarchy, runners, engine
+├── dynamic/          ← dynamic flow generation (generator, meta-flow, manifest)
+├── execution/        ← context hierarchy, runners, engine, LLM caller
 ├── doc/              ← AI doc generation, cache
 ├── planner/          ← path selection (Deterministic/Autonomous/Hybrid)
-├── tools/            ← MCP, function, HTTP adapters
+├── tools/            ← MCP, function, HTTP adapters + builtin tool pack
 ├── viz/              ← graphviz/mermaid renderer, run_trace, subtree renderer
 └── cli/              ← typer CLI entry point
 ```

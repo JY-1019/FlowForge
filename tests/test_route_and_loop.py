@@ -117,6 +117,13 @@ class TestRunWithRoute:
         assert result["result"] == "gamma_g1"
 
     @pytest.mark.asyncio
+    async def test_route_multiple_preserves_input_order(self):
+        """route list order controls root-flow execution order."""
+        engine = FlowForge.compile(RouteAgent)
+        result = await engine.run({"value": 1}, route=["gamma", "alpha"])
+        assert result["result"] == "alpha_a2"
+
+    @pytest.mark.asyncio
     async def test_route_with_trace(self):
         """Route filtering is visible in the run trace."""
         engine = FlowForge.compile(RouteAgent)

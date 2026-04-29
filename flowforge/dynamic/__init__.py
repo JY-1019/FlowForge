@@ -10,6 +10,45 @@ Public API
     compile → inject → execute.  Used internally by the ``ExecutionEngine``
     and also available for programmatic use.
 """
-from flowforge.dynamic.generator import DynamicFlowGenerator
+from flowforge.dynamic.capability import (
+    CapabilitySelection,
+    StepCapability,
+    select_capabilities,
+)
+from flowforge.dynamic.generator import DynamicFlowGenerator, detect_output_artifacts
+from flowforge.dynamic.manifest import (
+    DynamicManifest,
+    GeneratedFlowRecord,
+    GeneratedToolRecord,
+    load_manifest,
+    save_manifest,
+)
+from flowforge.dynamic.mcp_provision import (
+    McpProvisionRecord,
+    provision_mcp_servers,
+)
+from flowforge.dynamic.plan import (
+    PlannedBranch,
+    PlannedStep,
+    WorkflowPlan,
+    plan_workflow,
+)
 
-__all__ = ["DynamicFlowGenerator"]
+__all__ = [
+    "CapabilitySelection",
+    "DynamicFlowGenerator",
+    "DynamicManifest",
+    "GeneratedFlowRecord",
+    "GeneratedToolRecord",
+    "McpProvisionRecord",
+    "PlannedBranch",
+    "PlannedStep",
+    "StepCapability",
+    "WorkflowPlan",
+    "detect_output_artifacts",
+    "load_manifest",
+    "plan_workflow",
+    "provision_mcp_servers",
+    "save_manifest",
+    "select_capabilities",
+]

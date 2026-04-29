@@ -19,6 +19,15 @@ tool-use format before the call.
 When the LLM returns ``tool_use`` blocks, the tool-use loop executes each
 tool call (MCP, FunctionTool, HTTPTool) and feeds the results back to the
 LLM until it produces a final text or structured-output response.
+
+Claude Agent Skills declared as ``ClaudeSkill`` are provider-native Anthropic
+capabilities.  They are selected with the same ``<name>`` syntax, but are
+attached to the request via ``container.skills`` instead of being executed by
+FlowForge's local tool loop.
+
+Open Agent Skills declared as ``AgentSkill`` are local ``SKILL.md`` folders.
+They are selected with ``<skill-name>`` and injected into the prompt as
+activated Skill instructions.  This path is provider-neutral.
 """
 from __future__ import annotations
 
@@ -28,6 +37,9 @@ import os
 import re
 import textwrap
 import time
+import weakref
+from pathlib import Path
+from collections.abc import Collection
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -39,6 +51,15 @@ logger = logging.getLogger(__name__)
 
 # Maximum number of tool-use round-trips before forcing a final answer.
 _MAX_TOOL_ROUNDS = 25
+
+_ANTHROPIC_SKILL_BETAS = [
+    "code-execution-2025-08-25",
+    "skills-2025-10-02",
+]
+_ANTHROPIC_CODE_EXECUTION_TOOL = {
+    "type": "code_execution_20250825",
+    "name": "code_execution",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +119,47 @@ def render_prompt(template: str, input_data: Any) -> str:
 # Tool reference parsing
 # ---------------------------------------------------------------------------
 
-def parse_tool_refs(prompt: str) -> tuple[str, list[str]]:
+_TOOL_REF_RE = re.compile(r"<([A-Za-z0-9_][A-Za-z0-9_-]*)>")
+_HTML_TAG_NAMES = {
+    "a", "abbr", "address", "area", "article", "aside", "audio", "b", "base",
+    "bdi", "bdo", "blockquote", "body", "br", "button", "canvas", "caption",
+    "cite", "code", "col", "colgroup", "data", "datalist", "dd", "del",
+    "details", "dfn", "dialog", "div", "dl", "dt", "em", "embed", "fieldset",
+    "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5",
+    "h6", "head", "header", "hgroup", "hr", "html", "i", "iframe", "img",
+    "input", "ins", "kbd", "label", "legend", "li", "link", "main", "map",
+    "mark", "menu", "meta", "meter", "nav", "noscript", "object", "ol",
+    "optgroup", "option", "output", "p", "param", "picture", "pre",
+    "progress", "q", "rp", "rt", "ruby", "s", "samp", "script", "section",
+    "select", "slot", "small", "source", "span", "strong",
+    "style", "sub", "summary", "sup", "svg", "table", "tbody", "td",
+    "template", "textarea", "tfoot", "th", "thead", "time", "title", "tr",
+    "track", "u", "ul", "var", "video", "wbr",
+}
+
+
+def is_html_tag_name(name: str) -> bool:
+    """Return ``True`` when *name* is a common HTML/SVG tag name."""
+    return name.lower() in _HTML_TAG_NAMES
+
+
+def find_tool_refs(prompt: str) -> list[str]:
+    """Return unique ``<name>`` markers from *prompt* without modifying text."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for match in _TOOL_REF_RE.finditer(prompt):
+        name = match.group(1)
+        if name not in seen:
+            names.append(name)
+            seen.add(name)
+    return names
+
+
+def parse_tool_refs(
+    prompt: str,
+    *,
+    known_names: Collection[str] | None = None,
+) -> tuple[str, list[str]]:
     """Extract ``<tool_name>`` markers from *prompt*.
 
     Each ``<tool_name>`` marker indicates that the named tool should be
@@ -109,6 +170,10 @@ def parse_tool_refs(prompt: str) -> tuple[str, list[str]]:
     ----------
     prompt:
         Raw prompt possibly containing ``<tool_name>`` references.
+    known_names:
+        Optional allow-list of registered tool/skill names.  When supplied,
+        only matching markers are removed; all other angle-bracket text is
+        left in place.
 
     Returns
     -------
@@ -119,15 +184,22 @@ def parse_tool_refs(prompt: str) -> tuple[str, list[str]]:
     tool_names: list[str] = []
     seen: set[str] = set()
 
+    known = set(known_names) if known_names is not None else None
+
     def _collect(match: re.Match[str]) -> str:
         name = match.group(1)
+        if known is not None and name not in known:
+            return match.group(0)
         if name not in seen:
             tool_names.append(name)
             seen.add(name)
         return ""  # remove marker from prompt
 
-    # Match <word_chars> but not HTML-like tags (e.g. </close> or <br/>).
-    cleaned = re.sub(r"<(\w+)>", _collect, prompt)
+    # Match Agent Skill/tool identifiers, including standard hyphenated skill
+    # names.  When ``known_names`` is provided, unknown angle-bracket text is
+    # preserved so literal HTML such as ``<div>`` does not get stripped from
+    # frontend/code-generation prompts.
+    cleaned = _TOOL_REF_RE.sub(_collect, prompt)
     # Clean up extra whitespace left by marker removal.
     cleaned = re.sub(r"  +", " ", cleaned).strip()
 
@@ -138,8 +210,16 @@ def parse_tool_refs(prompt: str) -> tuple[str, list[str]]:
 # LLM API call
 # ---------------------------------------------------------------------------
 
-def _tool_config_to_anthropic(tool_config: Any) -> dict[str, Any]:
-    """Convert a ``ToolConfig`` to an Anthropic tool-use schema dict."""
+# Tool configs are immutable Pydantic models; once converted to an
+# Anthropic schema the result can be reused for the lifetime of the
+# config.  Pydantic v2 models are unhashable so we key by ``id()`` and
+# attach a finalizer to evict the entry when the tool config is
+# garbage-collected, preventing stale entries when ids are reused.
+_TOOL_SCHEMA_CACHE: dict[int, dict[str, Any]] = {}
+
+
+def _build_tool_config_to_anthropic(tool_config: Any) -> dict[str, Any]:
+    """Build the Anthropic tool-use schema dict for a ``ToolConfig``."""
     from flowforge.types import MCPServer, FunctionTool, HTTPTool
 
     if isinstance(tool_config, FunctionTool):
@@ -168,6 +248,213 @@ def _tool_config_to_anthropic(tool_config: Any) -> dict[str, Any]:
     if hasattr(tool_config, "to_anthropic_tool"):
         return tool_config.to_anthropic_tool()
     return {}
+
+
+def _tool_config_to_anthropic(tool_config: Any) -> dict[str, Any]:
+    """Convert a ``ToolConfig`` to an Anthropic tool-use schema dict.
+
+    Results are memoised per tool-config instance so repeated ``call_llm``
+    invocations don't reflect-and-rebuild schemas every round-trip.  The
+    caller receives a shallow copy so it can mutate the dict freely.
+    """
+    key = id(tool_config)
+    cached = _TOOL_SCHEMA_CACHE.get(key)
+    if cached is None:
+        cached = _build_tool_config_to_anthropic(tool_config)
+        _TOOL_SCHEMA_CACHE[key] = cached
+        try:
+            weakref.finalize(tool_config, _TOOL_SCHEMA_CACHE.pop, key, None)
+        except TypeError:
+            # Object does not support weakref — keep the entry but accept
+            # the slow leak on this rare type.
+            pass
+    return dict(cached)
+
+
+def _split_claude_skill_configs(
+    tool_configs: list[ToolConfig] | None,
+) -> tuple[list[ToolConfig], list[Any]]:
+    """Split local executable tools from Anthropic-native Claude Skills."""
+    if not tool_configs:
+        return [], []
+
+    from flowforge.types import ClaudeSkill
+
+    regular: list[ToolConfig] = []
+    skills: list[ClaudeSkill] = []
+    for tc in tool_configs:
+        if isinstance(tc, ClaudeSkill):
+            skills.append(tc)
+        else:
+            regular.append(tc)
+    return regular, skills
+
+
+def _split_agent_skill_configs(
+    tool_configs: list[ToolConfig] | None,
+) -> tuple[list[ToolConfig], list[Any]]:
+    """Split provider-neutral local Agent Skills from other tool configs."""
+    if not tool_configs:
+        return [], []
+
+    from flowforge.types import AgentSkill
+
+    regular: list[ToolConfig] = []
+    skills: list[AgentSkill] = []
+    for tc in tool_configs:
+        if isinstance(tc, AgentSkill):
+            skills.append(tc)
+        else:
+            regular.append(tc)
+    return regular, skills
+
+
+def _split_skill_configs(
+    tool_configs: list[ToolConfig] | None,
+) -> tuple[list[ToolConfig], list[Any], list[Any]]:
+    """Return ``(regular_tools, claude_skills, agent_skills)``."""
+    non_agent, agent_skills = _split_agent_skill_configs(tool_configs)
+    regular, claude_skills = _split_claude_skill_configs(non_agent)
+    return regular, claude_skills, agent_skills
+
+
+def _parse_skill_frontmatter(markdown: str) -> tuple[dict[str, str], str]:
+    """Parse simple YAML frontmatter from a ``SKILL.md`` string."""
+    if not markdown.startswith("---"):
+        return {}, markdown.strip()
+
+    match = re.match(
+        r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)",
+        markdown,
+        re.DOTALL,
+    )
+    if not match:
+        return {}, markdown.strip()
+
+    frontmatter_text = match.group(1)
+    body = markdown[match.end():].strip()
+    metadata: dict[str, str] = {}
+    for line in frontmatter_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key in {"name", "description", "license", "compatibility", "allowed-tools"}:
+            metadata[key] = value
+    return metadata, body
+
+
+def _agent_skill_markdown_path(skill: Any) -> Path:
+    """Return the ``SKILL.md`` path for a local Agent Skill config."""
+    raw_path = Path(getattr(skill, "path", "")).expanduser()
+    path = raw_path if raw_path.is_absolute() else Path.cwd() / raw_path
+    if path.is_dir():
+        return path / "SKILL.md"
+    if path.name == "SKILL.md":
+        return path
+    return path / "SKILL.md"
+
+
+def _load_agent_skill_prompt(skill: Any) -> str:
+    """Load one local Agent Skill and format it for prompt activation."""
+    skill_md_path = _agent_skill_markdown_path(skill)
+    if not skill_md_path.is_file():
+        raise ValueError(f"AgentSkill SKILL.md not found: {skill_md_path}")
+
+    markdown = skill_md_path.read_text(encoding="utf-8")
+    metadata, body = _parse_skill_frontmatter(markdown)
+    name = (
+        getattr(skill, "name", "")
+        or metadata.get("name")
+        or skill_md_path.parent.name
+    )
+    description = (
+        getattr(skill, "description", "")
+        or metadata.get("description")
+        or "No description provided."
+    )
+    max_chars = max(0, int(getattr(skill, "max_chars", 12000) or 0))
+    if max_chars and len(body) > max_chars:
+        body = (
+            body[:max_chars].rstrip()
+            + "\n\n[truncated by FlowForge AgentSkill.max_chars]"
+        )
+
+    supporting_dirs = [
+        child.name
+        for child in skill_md_path.parent.iterdir()
+        if child.is_dir() and child.name in {"scripts", "references", "assets"}
+    ]
+    resource_line = ""
+    if supporting_dirs:
+        joined = ", ".join(f"{name}/" for name in supporting_dirs)
+        resource_line = f"\nSupporting directories: {joined}"
+
+    return (
+        f"<agent_skill name=\"{name}\">\n"
+        f"Source: {skill_md_path}\n"
+        f"Description: {description}"
+        f"{resource_line}\n\n"
+        f"{body}\n"
+        f"</agent_skill>"
+    )
+
+
+def _inject_agent_skill_prompts(system_prompt: str, skills: list[Any]) -> str:
+    """Append activated local Agent Skill instructions to the system prompt."""
+    if not skills:
+        return system_prompt
+
+    sections = "\n\n".join(_load_agent_skill_prompt(skill) for skill in skills)
+    activation_prompt = (
+        "Activated Agent Skills\n"
+        "The user prompt selected the following local Agent Skills. Follow each "
+        "Skill's instructions when relevant. Do not claim a Skill was available "
+        "unless it appears below.\n\n"
+        f"{sections}"
+    )
+    if system_prompt:
+        return f"{system_prompt}\n\n{activation_prompt}"
+    return activation_prompt
+
+
+def _claude_skill_to_container_skill(skill: Any) -> dict[str, Any]:
+    """Return one ``container.skills`` entry for a ``ClaudeSkill`` config."""
+    skill_id = getattr(skill, "skill_id", "") or getattr(skill, "name", "")
+    payload = {
+        "type": getattr(skill, "type", "anthropic"),
+        "skill_id": skill_id,
+    }
+    version = getattr(skill, "version", "")
+    if version:
+        payload["version"] = version
+    return payload
+
+
+def _add_anthropic_skill_kwargs(
+    kwargs: dict[str, Any],
+    skills: list[Any],
+) -> None:
+    """Attach Claude Skill request fields to Anthropic Messages kwargs."""
+    if not skills:
+        return
+
+    kwargs["betas"] = list(_ANTHROPIC_SKILL_BETAS)
+    kwargs["container"] = {
+        "skills": [_claude_skill_to_container_skill(skill) for skill in skills]
+    }
+
+    tools = list(kwargs.get("tools", []))
+    has_code_execution = any(
+        tool.get("name") == _ANTHROPIC_CODE_EXECUTION_TOOL["name"]
+        and tool.get("type") == _ANTHROPIC_CODE_EXECUTION_TOOL["type"]
+        for tool in tools
+    )
+    if not has_code_execution:
+        tools.append(dict(_ANTHROPIC_CODE_EXECUTION_TOOL))
+    kwargs["tools"] = tools
 
 
 def _pydantic_to_json_schema(schema: type) -> dict[str, Any]:
@@ -229,7 +516,7 @@ async def _build_executor(
 
 def _get_tool_name(tc: Any) -> str:
     """Extract a tool name from a ``ToolConfig`` instance."""
-    from flowforge.types import MCPServer, FunctionTool, HTTPTool
+    from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill, AgentSkill
 
     if isinstance(tc, MCPServer):
         return tc.name
@@ -237,7 +524,116 @@ def _get_tool_name(tc: Any) -> str:
         return tc.name or (tc.func.__name__ if hasattr(tc.func, "__name__") else "")
     elif isinstance(tc, HTTPTool):
         return tc.name or "http_tool"
+    elif isinstance(tc, ClaudeSkill):
+        return tc.name or tc.skill_id
+    elif isinstance(tc, AgentSkill):
+        return tc.name
     return ""
+
+
+def _serialize_anthropic_content(content: Any) -> list[dict[str, Any]]:
+    """Serialize Anthropic SDK content blocks for message history reuse."""
+    serialized: list[dict[str, Any]] = []
+    for block in content or []:
+        if isinstance(block, dict):
+            serialized.append(block)
+        elif hasattr(block, "model_dump"):
+            serialized.append(block.model_dump(exclude_unset=True))
+        else:
+            btype = getattr(block, "type", "")
+            if btype == "text":
+                serialized.append({"type": "text", "text": getattr(block, "text", "")})
+            elif btype == "tool_use":
+                serialized.append({
+                    "type": "tool_use",
+                    "id": getattr(block, "id", ""),
+                    "name": getattr(block, "name", ""),
+                    "input": getattr(block, "input", {}),
+                })
+    return serialized
+
+
+def _find_values_by_key(value: Any, key: str) -> list[str]:
+    """Recursively find string values for *key* in nested response content."""
+    found: list[str] = []
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k == key and isinstance(v, str):
+                found.append(v)
+            else:
+                found.extend(_find_values_by_key(v, key))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_find_values_by_key(item, key))
+    return found
+
+
+def _extract_anthropic_file_ids(content: Any) -> list[str]:
+    """Extract file IDs emitted by Anthropic server-side tools."""
+    seen: set[str] = set()
+    file_ids: list[str] = []
+    for block in _serialize_anthropic_content(content):
+        for file_id in _find_values_by_key(block, "file_id"):
+            if file_id not in seen:
+                seen.add(file_id)
+                file_ids.append(file_id)
+    return file_ids
+
+
+def _format_anthropic_text_response(content: Any) -> str:
+    """Return text plus any server-generated file IDs from Anthropic content."""
+    text_parts = [
+        getattr(block, "text")
+        for block in (content or [])
+        if hasattr(block, "text")
+    ]
+    text = "\n".join(text_parts)
+    file_ids = _extract_anthropic_file_ids(content)
+    if file_ids:
+        artifact_lines = ["", "Generated files:"]
+        artifact_lines.extend(f"- file_id: {file_id}" for file_id in file_ids)
+        text += "\n".join(artifact_lines)
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Markdown-fence stripping & auto JSON parse
+# ---------------------------------------------------------------------------
+
+_FENCE_RE = re.compile(
+    r"^\s*```(?:json|python|text|javascript|js|ts|typescript)?\s*\n"
+    r"(.*?)"
+    r"\n\s*```\s*$",
+    re.DOTALL,
+)
+
+
+def _strip_fences_and_parse(value: Any) -> Any:
+    """Post-process an LLM string response.
+
+    1. If *value* is not a ``str``, return it unchanged.
+    2. Strip surrounding markdown code-fences (```json ... ```, etc.).
+    3. Attempt ``json.loads`` — if it succeeds, return the parsed dict/list.
+    4. Otherwise return the (fence-stripped) string.
+    """
+    if not isinstance(value, str):
+        return value
+
+    text = value.strip()
+
+    # Strip markdown fences
+    m = _FENCE_RE.match(text)
+    if m:
+        text = m.group(1).strip()
+
+    # Try JSON parse
+    try:
+        return _json.loads(text)
+    except (ValueError, TypeError):
+        pass
+
+    # Return fence-stripped text (may still be useful even if not JSON)
+    return text if m else value
 
 
 async def call_llm_api(
@@ -248,6 +644,7 @@ async def call_llm_api(
     tool_configs: list[ToolConfig] | None = None,
     tool_registry: ToolRegistry | None = None,
     output_schema: type | None = None,
+    max_tool_rounds: int | None = None,
 ) -> Any:
     """Call the LLM using the configured provider.
 
@@ -265,6 +662,8 @@ async def call_llm_api(
         LLM configuration (provider, model, temperature, etc.).
     tool_configs:
         Tool configs resolved from ``<tool_name>`` references in the prompt.
+        ``AgentSkill`` configs are loaded into the system prompt; executable
+        tools remain available through the tool-use loop.
     tool_registry:
         Global tool registry (used to look up ToolAdapter instances).
     output_schema:
@@ -278,13 +677,23 @@ async def call_llm_api(
         The LLM response — a ``dict`` when *output_schema* is set (parsed
         from the tool call), otherwise a plain text string.
     """
+    (
+        regular_tool_configs,
+        claude_skill_configs,
+        agent_skill_configs,
+    ) = _split_skill_configs(tool_configs)
+    if claude_skill_configs and llm_config.provider != "anthropic":
+        raise ValueError("ClaudeSkill tools require LLMConfig(provider='anthropic').")
+    if agent_skill_configs:
+        system_prompt = _inject_agent_skill_prompts(system_prompt, agent_skill_configs)
+
     # Build executor and fetch real MCP schemas.
-    executor, mcp_schemas = await _build_executor(tool_configs)
+    executor, mcp_schemas = await _build_executor(regular_tool_configs)
 
     try:
         # Build tools payload — prefer real MCP schemas over stubs.
         tools_payload: list[dict[str, Any]] = []
-        for tc in (tool_configs or []):
+        for tc in regular_tool_configs:
             name = _get_tool_name(tc)
             if name and name in mcp_schemas:
                 tools_payload.append(mcp_schemas[name])
@@ -314,16 +723,20 @@ async def call_llm_api(
             result = await _call_anthropic(
                 system_prompt, user_prompt, llm_config, tools_payload,
                 executor=executor, output_schema=output_schema,
+                max_tool_rounds=max_tool_rounds,
+                claude_skills=claude_skill_configs,
             )
         elif llm_config.provider == "openai":
             result = await _call_openai(
                 system_prompt, user_prompt, llm_config, tools_payload,
                 executor=executor, output_schema=output_schema,
+                max_tool_rounds=max_tool_rounds,
             )
         elif llm_config.provider == "google":
             result = await _call_google(
                 system_prompt, user_prompt, llm_config, tools_payload,
                 executor=executor, output_schema=output_schema,
+                max_tool_rounds=max_tool_rounds,
             )
         else:
             raise ValueError(f"Unsupported LLM provider: {llm_config.provider}")
@@ -343,6 +756,9 @@ async def call_llm_api(
             logger.info("LLM response  %.0fms  type=str  len=%d  preview=%s", elapsed, len(result), preview)
         else:
             logger.info("LLM response  %.0fms  type=%s", elapsed, type(result).__name__)
+
+        # Auto-strip markdown fences and parse JSON when possible
+        result = _strip_fences_and_parse(result)
 
         return result
     finally:
@@ -377,6 +793,13 @@ async def stream_llm_api(
         async for chunk in ctx.call_llm("prompt", stream=True):
             print(chunk, end="", flush=True)
     """
+    non_agent_tool_configs, agent_skill_configs = _split_agent_skill_configs(tool_configs)
+    _, claude_skill_configs = _split_claude_skill_configs(non_agent_tool_configs)
+    if claude_skill_configs:
+        raise ValueError("ClaudeSkill tools are not supported with stream=True.")
+    if agent_skill_configs:
+        system_prompt = _inject_agent_skill_prompts(system_prompt, agent_skill_configs)
+
     if llm_config.provider == "anthropic":
         async for chunk in _stream_anthropic(system_prompt, user_prompt, llm_config):
             yield chunk
@@ -476,6 +899,8 @@ async def _call_anthropic(
     tools: list[dict[str, Any]],
     executor: ToolExecutor | None = None,
     output_schema: type | None = None,
+    max_tool_rounds: int | None = None,
+    claude_skills: list[Any] | None = None,
 ) -> Any:
     """Call the Anthropic Messages API with a tool-use loop.
 
@@ -528,13 +953,22 @@ async def _call_anthropic(
     has_executable = executor is not None and any(
         executor.has_tool(t.get("name", "")) for t in tools
     )
-    if output_schema and not has_executable:
+    has_claude_skills = bool(claude_skills)
+    if output_schema and not has_executable and not has_claude_skills:
         kwargs["tool_choice"] = {"type": "tool", "name": _structured_tool_name}
 
+    if claude_skills:
+        _add_anthropic_skill_kwargs(kwargs, claude_skills)
+
+    create_message = (
+        client.beta.messages.create if claude_skills else client.messages.create
+    )
+
     # -- Tool-use loop -------------------------------------------------------
-    for round_idx in range(_MAX_TOOL_ROUNDS):
+    tool_rounds = max_tool_rounds or _MAX_TOOL_ROUNDS
+    for round_idx in range(tool_rounds):
         kwargs["messages"] = messages
-        response = await client.messages.create(**kwargs)
+        response = await create_message(**kwargs)
 
         # Log raw response
         logger.debug(
@@ -547,6 +981,16 @@ async def _call_anthropic(
                 logger.debug("  content[%d] text=%s", i, block.text[:200].replace("\n", "\\n"))
             elif btype == "tool_use":
                 logger.debug("  content[%d] tool_use=%s  input=%s", i, block.name, str(block.input)[:200])
+
+        if claude_skills and getattr(response, "stop_reason", None) == "pause_turn":
+            messages.append({
+                "role": "assistant",
+                "content": _serialize_anthropic_content(response.content),
+            })
+            container_id = getattr(getattr(response, "container", None), "id", None)
+            if container_id:
+                kwargs.setdefault("container", {})["id"] = container_id
+            continue
 
         tool_uses = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
 
@@ -562,25 +1006,17 @@ async def _call_anthropic(
 
         if not executable:
             # No more tools to execute — return text.
-            text_parts = [b.text for b in response.content if hasattr(b, "text")]
-            if text_parts:
-                return "\n".join(text_parts)
+            text = _format_anthropic_text_response(response.content)
+            if text:
+                return text
             # No text either — might be the last round, break.
             break
 
         # Serialize assistant content blocks for message history.
         assistant_content: list[dict[str, Any]] = []
-        for block in response.content:
-            btype = getattr(block, "type", "?")
-            if btype == "text":
-                assistant_content.append({"type": "text", "text": block.text})
-            elif btype == "tool_use":
-                assistant_content.append({
-                    "type": "tool_use",
-                    "id": block.id,
-                    "name": block.name,
-                    "input": block.input,
-                })
+        for block in _serialize_anthropic_content(response.content):
+            if block.get("type") in {"text", "tool_use"}:
+                assistant_content.append(block)
         messages.append({"role": "assistant", "content": assistant_content})
 
         # Execute each tool and collect results.
@@ -613,17 +1049,16 @@ async def _call_anthropic(
 
     # -- Loop exhausted: force structured output if needed -------------------
     if output_schema is not None:
-        logger.info("Tool loop exhausted (%d rounds), forcing structured_output", _MAX_TOOL_ROUNDS)
+        logger.info("Tool loop exhausted (%d rounds), forcing structured_output", tool_rounds)
         kwargs["messages"] = messages
         kwargs["tool_choice"] = {"type": "tool", "name": _structured_tool_name}
-        response = await client.messages.create(**kwargs)
+        response = await create_message(**kwargs)
         for block in response.content:
             if getattr(block, "type", None) == "tool_use" and block.name == _structured_tool_name:
                 return block.input
 
     # Fallback: extract text from last response.
-    text_parts = [b.text for b in response.content if hasattr(b, "text")]
-    return "\n".join(text_parts) if text_parts else ""
+    return _format_anthropic_text_response(response.content)
 
 
 # ---------------------------------------------------------------------------
@@ -637,6 +1072,7 @@ async def _call_openai(
     tools: list[dict[str, Any]],
     executor: ToolExecutor | None = None,
     output_schema: type | None = None,
+    max_tool_rounds: int | None = None,
 ) -> Any:
     """Call the OpenAI Chat Completions API with a tool-use loop."""
     import openai
@@ -694,7 +1130,8 @@ async def _call_openai(
     if output_schema and not has_executable:
         kwargs["tool_choice"] = {"type": "function", "function": {"name": _structured_fn_name}}
 
-    for round_idx in range(_MAX_TOOL_ROUNDS):
+    tool_rounds = max_tool_rounds or _MAX_TOOL_ROUNDS
+    for round_idx in range(tool_rounds):
         kwargs["messages"] = messages
         response = await client.chat.completions.create(**kwargs)
         msg = response.choices[0].message
@@ -762,6 +1199,7 @@ async def _call_google(
     tools: list[dict[str, Any]],
     executor: ToolExecutor | None = None,
     output_schema: type | None = None,
+    max_tool_rounds: int | None = None,
 ) -> Any:
     """Call the Google Gemini API with a tool-use loop.
 
@@ -818,7 +1256,8 @@ async def _call_google(
         executor.has_tool(t.get("name", "")) for t in tools
     )
 
-    for round_idx in range(_MAX_TOOL_ROUNDS):
+    tool_rounds = max_tool_rounds or _MAX_TOOL_ROUNDS
+    for round_idx in range(tool_rounds):
         # Check for function_call parts in the response.
         fn_calls = [
             part for part in response.candidates[0].content.parts

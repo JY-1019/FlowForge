@@ -50,7 +50,7 @@ class MyAgent: ...
 |-----------|------|----------|-------------|
 | `prompt` | `str` | ✅ | Global system prompt passed to every LLM call |
 | `llm_config` | `LLMConfig` | | Default LLM settings for all nodes |
-| `tools` | `list[ToolConfig]` | | MCP servers, Python functions, HTTP APIs |
+| `tools` | `list[ToolConfig]` | | MCP servers, Python functions, HTTP APIs, Claude Skills, local Agent Skills |
 
 ---
 

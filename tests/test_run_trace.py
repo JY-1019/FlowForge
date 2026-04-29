@@ -293,6 +293,32 @@ async def test_run_mermaid_bold_edges_for_executed_path():
 
 
 @pytest.mark.asyncio
+async def test_compare_mermaid_defaults_to_executed_path_only():
+    call_log.clear()
+    engine = FlowForge.compile(TraceAgent)
+
+    await engine.run(RouteInput(route="a"))
+    md = engine.compare_mermaid()
+
+    assert "# FlowForge" in md
+    assert "Executed Path" in md
+    assert "Full DAG Structure" not in md
+    assert md.count("```mermaid") == 1
+
+
+@pytest.mark.asyncio
+async def test_compare_mermaid_can_include_full_dag():
+    call_log.clear()
+    engine = FlowForge.compile(TraceAgent)
+
+    await engine.run(RouteInput(route="a"))
+    md = engine.compare_mermaid(include_full_dag=True)
+
+    assert "Full DAG Structure" in md
+    assert md.count("```mermaid") == 2
+
+
+@pytest.mark.asyncio
 async def test_visualize_run_raises_without_run():
     engine = FlowForge.compile(TraceAgent)
     # No run has been performed yet.

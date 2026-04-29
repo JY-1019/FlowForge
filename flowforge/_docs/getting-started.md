@@ -104,5 +104,7 @@ Then `FlowForge.compile()` converts that metadata tree into a networkx DAG and v
 | Understand the annotation hierarchy | [Concepts → Annotations](concepts/annotations.md) |
 | Learn how data moves between steps | [Concepts → Data Flow](concepts/data-flow.md) |
 | Build a real agent with branching | [Guides → First Agent](guides/first-agent.md) |
+| Register tools, Claude Skills, or Agent Skills | [Guides → Tools & LLM Calling](guides/tools-and-llm.md) |
 | Visualize a run | [Guides → Run Visualization](guides/visualization.md) |
+| Generate flows dynamically | [Guides → Dynamic Flow](guides/dynamic-flow.md) |
 | Use the CLI | [API → CLI](api/cli.md) |

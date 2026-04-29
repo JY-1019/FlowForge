@@ -16,7 +16,16 @@ from flowforge.execution.context import GlobalContext, FlowContext, TaskContext,
 from flowforge.execution.runner import StepRunner
 from flowforge.execution.llm import render_prompt, parse_tool_refs
 from flowforge.tools.registry import ToolRegistry
-from flowforge.types import LLMConfig, MCPServer, FunctionTool, HTTPTool
+from flowforge.types import (
+    LLMConfig,
+    MCPServer,
+    ClaudeSkill,
+    AgentSkill,
+    FunctionTool,
+    HTTPTool,
+    DynamicRunOptions,
+    DependencyPolicy,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +79,12 @@ class TestRenderPrompt:
             Return the top results.
         """, inp)
         assert result == "Search for AI trends in ko.\n\nReturn the top results."
+
+    def test_tool_refs_allow_hyphenated_agent_skill_names(self):
+        prompt, tools = parse_tool_refs("Roll with <roll-dice> and <web_search>.")
+
+        assert prompt == "Roll with and ."
+        assert tools == ["roll-dice", "web_search"]
 
     def test_triple_quoted_with_tools(self):
         """Triple-quoted strings with <tool> refs and {vars} work together."""
@@ -128,6 +143,17 @@ class TestParseToolRefs:
         cleaned, tools = parse_tool_refs("find results using <search>")
         assert tools == ["search"]
 
+    def test_known_names_preserve_literal_html(self):
+        cleaned, tools = parse_tool_refs(
+            "Render <div><button>Save</button></div> with <web_fetch_url>",
+            known_names={"web_fetch_url"},
+        )
+
+        assert tools == ["web_fetch_url"]
+        assert "<web_fetch_url>" not in cleaned
+        assert "<div>" in cleaned
+        assert "<button>" in cleaned
+
 
 # ---------------------------------------------------------------------------
 # Tool declaration on decorators
@@ -144,6 +170,18 @@ class TestToolDeclaration:
         meta = my_step.__flowforge_step_meta__
         assert len(meta.tools) == 1
         assert meta.tools[0].name == "test_mcp"
+
+    def test_step_with_claude_skill(self):
+        skill = ClaudeSkill(name="pptx")
+
+        @step(order=1, prompt="create presentation", tools=[skill])
+        async def my_step(ctx):
+            pass
+
+        meta = my_step.__flowforge_step_meta__
+        assert len(meta.tools) == 1
+        assert meta.tools[0].name == "pptx"
+        assert meta.tools[0].skill_id == "pptx"
 
     def test_task_with_tools(self):
         http = HTTPTool(url="http://api", name="api_tool")
@@ -275,6 +313,97 @@ class TestToolMerging:
         assert len(merged) == 1
         assert merged[0].name == "shared_tool"
 
+    def test_string_tool_refs_resolve_to_global_configs(self):
+        """Generated flows can scope tools by name without recreating configs."""
+        search_tool = FunctionTool(
+            func=lambda query: {"query": query},
+            name="web_search",
+        )
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+            global_tools=[search_tool],
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx,
+            flow_name="f",
+            flow_prompt="test",
+            flow_tools=["web_search"],
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx,
+            task_name="t",
+            task_prompt="test",
+            task_tools=["web_search"],
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="test",
+            step_tools=["web_search"],
+        )
+
+        assert step_ctx.merged_tools == [search_tool]
+        assert step_ctx._resolve_tool_configs(["web_search"]) == [search_tool]
+
+    def test_later_tool_configs_shadow_same_name_refs(self):
+        """Lower hierarchy levels override same-name configs before refs resolve."""
+        global_tool = FunctionTool(func=lambda: "global", name="shared")
+        step_tool = FunctionTool(func=lambda: "step", name="shared")
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+            global_tools=[global_tool],
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx,
+            flow_name="f",
+            flow_prompt="test",
+            flow_tools=["shared"],
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx,
+            task_name="t",
+            task_prompt="test",
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="test",
+            step_tools=[step_tool, "shared"],
+        )
+
+        assert step_ctx.merged_tools == [step_tool]
+
+    def test_step_results_alias_exposes_task_results(self):
+        """StepContext.step_results aliases the enclosing task accumulator."""
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx,
+            flow_name="f",
+            flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx,
+            task_name="t",
+            task_prompt="test",
+        )
+        task_ctx.step_results[1] = {"ok": True}
+
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="test",
+        )
+
+        assert step_ctx.step_results is task_ctx.step_results
+        assert step_ctx.step_results[1] == {"ok": True}
+
 
 # ---------------------------------------------------------------------------
 # Tool reference resolution
@@ -305,6 +434,28 @@ class TestToolResolution:
         assert len(resolved) == 1
         assert resolved[0].name == "search"
 
+    def test_resolve_claude_skill_by_name(self):
+        skill = ClaudeSkill(name="pptx")
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+            global_tools=[skill],
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx, flow_name="f", flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx, task_name="t", task_prompt="test",
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx, step_prompt="test",
+        )
+
+        resolved = step_ctx._resolve_tool_configs(["pptx"])
+        assert resolved == [skill]
+
     def test_resolve_unknown_tool_skipped(self):
         global_ctx = GlobalContext(
             llm_config=LLMConfig(),
@@ -323,6 +474,37 @@ class TestToolResolution:
 
         resolved = step_ctx._resolve_tool_configs(["nonexistent"])
         assert resolved == []
+
+    def test_resolve_unknown_tool_warns(self, caplog):
+        """Unresolved <tool> markers emit a WARNING so hallucinated names
+        don't silently degrade ``call_llm`` into a toolless prompt."""
+        import logging
+
+        skill = ClaudeSkill(name="frontend-design")
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+            global_tools=[skill],
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx, flow_name="f", flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx, task_name="t", task_prompt="test",
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx, step_prompt="test",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="flowforge.execution.context"):
+            resolved = step_ctx._resolve_tool_configs(
+                ["clone-coding", "frontend-design"]
+            )
+        assert resolved == [skill]
+        joined = "\n".join(rec.message for rec in caplog.records)
+        assert "clone-coding" in joined
+        assert "frontend-design" in joined
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +531,39 @@ class TestCompileWithTools:
 
         engine = FlowForge.compile(ToolAgent)
         assert engine.dag is not None
+
+    def test_compile_with_named_tool_refs_in_annotations(self):
+        """Annotation tools may reference globally registered tools by name."""
+        global_tool = FunctionTool(
+            func=lambda url: {"ok": True, "url": url},
+            name="web_fetch_url",
+        )
+
+        @global_config(prompt="agent", tools=[global_tool])
+        class NamedToolAgent:
+            @flow(
+                name="pipeline",
+                prompt="pipeline",
+                tools=["web_fetch_url"],
+            )
+            class Pipeline:
+                @task(
+                    name="process",
+                    prompt="process with scoped web tool",
+                    tools=["web_fetch_url"],
+                )
+                class Process:
+                    @step(
+                        order=1,
+                        prompt="fetch with scoped web tool",
+                        tools=["web_fetch_url"],
+                    )
+                    async def execute(ctx):
+                        return await ctx.call_tool("web_fetch_url", url="https://example.com")
+
+        engine = FlowForge.compile(NamedToolAgent)
+        flow_meta = engine.dag.get_node("global.pipeline").meta
+        assert flow_meta.tools == ["web_fetch_url"]
 
     @pytest.mark.asyncio
     async def test_run_with_tools_passed_to_context(self):
@@ -423,6 +638,142 @@ class TestCallLLM:
             assert "<web_search>" not in call_kwargs["user_prompt"]
             assert len(call_kwargs["tool_configs"]) == 1
             assert call_kwargs["tool_configs"][0].name == "web_search"
+
+    @pytest.mark.asyncio
+    async def test_call_llm_passes_claude_skill_from_angle_brackets(self):
+        """ClaudeSkill uses the same <name> syntax as regular tools."""
+        pptx_skill = ClaudeSkill(name="pptx")
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(provider="anthropic", model="test-model"),
+            global_prompt="system",
+            tool_registry=ToolRegistry(),
+            global_tools=[pptx_skill],
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx, flow_name="f", flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx, task_name="t", task_prompt="test",
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="You create decks",
+            step_input={"topic": "solar energy"},
+        )
+
+        with patch("flowforge.execution.llm.call_llm_api", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = "created"
+
+            result = await step_ctx.call_llm("Create a deck about {topic}. <pptx>")
+
+            assert result == "created"
+            call_kwargs = mock_call.call_args.kwargs
+            assert "<pptx>" not in call_kwargs["user_prompt"]
+            assert call_kwargs["tool_configs"] == [pptx_skill]
+
+    @pytest.mark.asyncio
+    async def test_call_llm_passes_agent_skill_from_hyphenated_angle_brackets(self, tmp_path):
+        """AgentSkill supports the standard hyphenated <skill-name> syntax."""
+        skill_dir = tmp_path / "code-review"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: code-review
+description: Review code.
+---
+
+Review carefully.
+""",
+            encoding="utf-8",
+        )
+        agent_skill = AgentSkill(path=str(skill_dir))
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(provider="openai", model="test-model"),
+            global_prompt="system",
+            tool_registry=ToolRegistry(),
+            global_tools=[agent_skill],
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx, flow_name="f", flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx, task_name="t", task_prompt="test",
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="You review code",
+            step_input={"diff": "patch"},
+        )
+
+        with patch("flowforge.execution.llm.call_llm_api", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = "reviewed"
+
+            result = await step_ctx.call_llm("Review this {diff}. <code-review>")
+
+            assert result == "reviewed"
+            call_kwargs = mock_call.call_args.kwargs
+            assert "<code-review>" not in call_kwargs["user_prompt"]
+            assert call_kwargs["tool_configs"] == [agent_skill]
+
+    @pytest.mark.asyncio
+    async def test_call_llm_preserves_html_tags_when_stripping_tool_refs(self):
+        """Frontend prompts may contain literal HTML that is not a tool ref."""
+        fetch_tool = FunctionTool(func=lambda url: {"ok": True}, name="web_fetch_url")
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(provider="anthropic", model="test-model"),
+            global_prompt="system",
+            tool_registry=ToolRegistry(),
+            global_tools=[fetch_tool],
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="test")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="test")
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="Build UI",
+            step_input={"url": "https://example.com"},
+        )
+
+        prompt = """
+            Use <web_fetch_url> to inspect {url}.
+            Keep this exact snippet in mind: <div><button>Save</button></div>
+        """
+        with patch("flowforge.execution.llm.call_llm_api", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = "ok"
+            await step_ctx.call_llm(prompt)
+
+        call_kwargs = mock_call.call_args.kwargs
+        assert call_kwargs["tool_configs"] == [fetch_tool]
+        assert "<web_fetch_url>" not in call_kwargs["user_prompt"]
+        assert "<div><button>Save</button></div>" in call_kwargs["user_prompt"]
+
+    @pytest.mark.asyncio
+    async def test_call_llm_warns_unknown_marker_but_keeps_prompt_text(self, caplog):
+        """Unknown non-HTML markers are visible in logs and not deleted."""
+        import logging
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(provider="anthropic", model="test-model"),
+            global_prompt="system",
+            tool_registry=ToolRegistry(),
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="test")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="test")
+        step_ctx = StepContext(task_ctx=task_ctx, step_prompt="test")
+
+        with (
+            caplog.at_level(logging.WARNING, logger="flowforge.execution.context"),
+            patch("flowforge.execution.llm.call_llm_api", new_callable=AsyncMock) as mock_call,
+        ):
+            mock_call.return_value = "ok"
+            await step_ctx.call_llm("Try <clone-coding> but keep <div>literal</div>.")
+
+        user_prompt = mock_call.call_args.kwargs["user_prompt"]
+        assert "<clone-coding>" in user_prompt
+        assert "<div>literal</div>" in user_prompt
+        assert "clone-coding" in "\n".join(rec.message for rec in caplog.records)
 
     @pytest.mark.asyncio
     async def test_call_llm_no_tools(self):
@@ -600,6 +951,21 @@ class TestToolExecutor:
         assert executor.has_tool("my_func")
         assert not executor.has_tool("unknown")
 
+    def test_mcp_headers_merge_config_and_session(self):
+        from flowforge.execution.tool_executor import ToolExecutor
+
+        executor = ToolExecutor([])
+        executor._mcp_sessions["http://localhost/mcp"] = "session-1"
+
+        headers = executor._mcp_headers(
+            "http://localhost/mcp",
+            {"Authorization": "Bearer test"},
+        )
+
+        assert headers["Authorization"] == "Bearer test"
+        assert headers["Mcp-Session-Id"] == "session-1"
+        assert "application/json" in headers["Content-Type"]
+
     @pytest.mark.asyncio
     async def test_execute_function_tool_async(self):
         from flowforge.execution.tool_executor import ToolExecutor
@@ -660,6 +1026,71 @@ class TestToolUseLoopIntegration:
         assert executor.has_tool("my_tool")
         assert schemas == {}  # No MCP → no schemas fetched
 
+    def test_claude_skill_request_helpers(self):
+        from flowforge.execution.llm import (
+            _add_anthropic_skill_kwargs,
+            _claude_skill_to_container_skill,
+            _format_anthropic_text_response,
+            _split_claude_skill_configs,
+        )
+
+        skill = ClaudeSkill(name="pptx")
+        regular = FunctionTool(func=lambda: "ok", name="local_tool")
+
+        regular_tools, skills = _split_claude_skill_configs([regular, skill])
+        assert regular_tools == [regular]
+        assert skills == [skill]
+        assert _claude_skill_to_container_skill(skill) == {
+            "type": "anthropic",
+            "skill_id": "pptx",
+            "version": "latest",
+        }
+
+        kwargs = {"tools": [{"name": "local_tool", "input_schema": {}}]}
+        _add_anthropic_skill_kwargs(kwargs, skills)
+
+        assert kwargs["betas"] == [
+            "code-execution-2025-08-25",
+            "skills-2025-10-02",
+        ]
+        assert kwargs["container"]["skills"] == [
+            {"type": "anthropic", "skill_id": "pptx", "version": "latest"}
+        ]
+        assert {"type": "code_execution_20250825", "name": "code_execution"} in kwargs["tools"]
+
+        class TextBlock:
+            text = "Deck created."
+
+        class ToolResultBlock:
+            def model_dump(self, exclude_unset=True):
+                return {
+                    "type": "bash_code_execution_tool_result",
+                    "content": {
+                        "content": [
+                            {
+                                "type": "bash_code_execution_output",
+                                "file_id": "file_123",
+                            }
+                        ]
+                    },
+                }
+
+        formatted = _format_anthropic_text_response([TextBlock(), ToolResultBlock()])
+        assert "Deck created." in formatted
+        assert "file_id: file_123" in formatted
+
+    @pytest.mark.asyncio
+    async def test_claude_skill_rejected_for_non_anthropic_provider(self):
+        from flowforge.execution.llm import call_llm_api
+
+        with pytest.raises(ValueError, match="ClaudeSkill"):
+            await call_llm_api(
+                system_prompt="system",
+                user_prompt="make a deck",
+                llm_config=LLMConfig(provider="openai", model="test"),
+                tool_configs=[ClaudeSkill(name="pptx")],
+            )
+
 
 # ---------------------------------------------------------------------------
 # FunctionTool schema auto-inference
@@ -708,9 +1139,30 @@ class TestFunctionToolSchemaInference:
         from flowforge.tools.function_tool import FunctionToolAdapter
         adapter = FunctionToolAdapter(fetch)
         assert adapter.schema["properties"]["url"]["type"] == "string"
+        assert adapter.schema["properties"]["timeout"]["type"] == "integer"
         assert "url" in adapter.schema["required"]
         # timeout has a default → not required
         assert "timeout" not in adapter.schema["required"]
+
+    def test_optional_collection_and_literal_types(self):
+        from typing import Literal
+
+        def write(
+            path: str,
+            tags: list[str] | None = None,
+            metadata: dict[str, int] | None = None,
+            mode: Literal["create", "update"] = "create",
+        ) -> str:
+            return ""
+
+        from flowforge.tools.function_tool import FunctionToolAdapter
+        schema = FunctionToolAdapter(write).schema
+
+        assert schema["properties"]["tags"]["type"] == "array"
+        assert schema["properties"]["tags"]["items"]["type"] == "string"
+        assert schema["properties"]["metadata"]["type"] == "object"
+        assert schema["properties"]["metadata"]["additionalProperties"]["type"] == "integer"
+        assert schema["properties"]["mode"]["enum"] == ["create", "update"]
 
     def test_ctx_param_skipped(self):
         async def my_step(ctx, query: str) -> str:
@@ -753,3 +1205,488 @@ class TestFunctionToolSchemaInference:
         assert result["input_schema"]["properties"]["query"]["type"] == "string"
         assert result["input_schema"]["properties"]["limit"]["type"] == "integer"
         assert "query" in result["input_schema"]["required"]
+
+
+class TestBuiltinShellTools:
+    def test_builtin_pack_includes_codegen_support_tools(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(project_root=str(tmp_path))
+        names = [tool.name for tool in create_builtin_tool_pack(options)]
+
+        assert "python_import_check" in names
+        assert "mcp_start_server" in names
+        assert "mcp_register_server" in names
+
+    def test_readonly_shell_tool_runs_allowlisted_command(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(project_root=str(tmp_path))
+        tool = next(
+            item for item in create_builtin_tool_pack(options)
+            if item.name == "shell_readonly"
+        )
+
+        result = tool.func("pwd")
+        assert result["ok"] is True
+        assert result["cwd"] == str(tmp_path)
+
+    def test_readonly_shell_tool_truncates_large_output(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        (tmp_path / "large.txt").write_text("x" * 2000)
+        options = DynamicRunOptions(
+            project_root=str(tmp_path),
+            shell_output_max_chars=500,
+        )
+        tool = next(
+            item for item in create_builtin_tool_pack(options)
+            if item.name == "shell_readonly"
+        )
+
+        result = tool.func("cat large.txt")
+        assert result["ok"] is True
+        assert result["truncated"] is True
+        assert len(result["stdout"]) < 600
+
+    def test_python_import_check_reports_available_module(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(project_root=str(tmp_path))
+        tool = next(
+            item for item in create_builtin_tool_pack(options)
+            if item.name == "python_import_check"
+        )
+
+        result = tool.func("json")
+        assert result["ok"] is True
+        assert result["results"][0]["module"] == "json"
+        assert result["results"][0]["available"] is True
+
+    def test_mcp_start_server_requires_declared_command(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(project_root=str(tmp_path))
+        tool = next(
+            item for item in create_builtin_tool_pack(options)
+            if item.name == "mcp_start_server"
+        )
+
+        result = tool.func("browser")
+        assert result["ok"] is False
+        assert "not declared" in result["stderr"]
+
+    @pytest.mark.asyncio
+    async def test_mcp_register_server_auto_starts_declared_server(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from flowforge.tools import builtin
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        started: dict[str, str] = {}
+
+        def fake_ready(url: str, timeout_seconds: float = 0.5) -> bool:
+            return False
+
+        def fake_start(options, server_name: str, cwd: str | None = None):
+            started["server_name"] = server_name
+            return {
+                "ok": True,
+                "server_name": server_name,
+                "url": options.mcp_server_urls[server_name],
+                "pid": 123,
+                "already_running": False,
+                "stderr": "",
+            }
+
+        monkeypatch.setattr(builtin, "_mcp_endpoint_ready", fake_ready)
+        monkeypatch.setattr(builtin, "_start_declared_mcp_server", fake_start)
+
+        options = DynamicRunOptions(
+            project_root=str(tmp_path),
+            mcp_server_commands={"browser": ["npx", "-y", "@playwright/mcp@latest"]},
+            mcp_server_urls={"browser": "http://localhost:3847/mcp"},
+            mcp_server_tools={"browser": ["browser_navigate"]},
+        )
+        tools = create_builtin_tool_pack(options)
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+            global_tools=tools,
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx,
+            flow_name="f",
+            flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx,
+            task_name="t",
+            task_prompt="test",
+        )
+        step_ctx = StepContext(task_ctx=task_ctx, step_prompt="test")
+
+        result = await step_ctx.call_tool("mcp_register_server", server_name="browser")
+
+        assert result["ok"] is True
+        assert started == {"server_name": "browser"}
+        assert result["start"]["pid"] == 123
+        assert result["registered_tools"] == ["browser_navigate"]
+
+    @pytest.mark.asyncio
+    async def test_mcp_register_server_adds_runtime_mcp_tools(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(
+            project_root=str(tmp_path),
+            mcp_server_urls={"browser": "http://localhost:3847/mcp"},
+            mcp_server_tools={"browser": ["browser_navigate", "browser_snapshot"]},
+            mcp_server_headers={"browser": {"Authorization": "Bearer token"}},
+        )
+        tools = create_builtin_tool_pack(options)
+        register_tool = next(
+            item for item in tools
+            if item.name == "mcp_register_server"
+        )
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+            global_tools=tools,
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx,
+            flow_name="f",
+            flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx,
+            task_name="t",
+            task_prompt="test",
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="test",
+        )
+
+        result = await step_ctx.call_tool("mcp_register_server", server_name="browser")
+
+        assert result["ok"] is True
+        assert result["registered_tools"] == ["browser_navigate", "browser_snapshot"]
+        resolved = step_ctx._resolve_tool_configs(["browser_navigate"])
+        assert len(resolved) == 1
+        assert resolved[0].url == "http://localhost:3847/mcp"
+        assert resolved[0].headers == {"Authorization": "Bearer token"}
+
+    def test_install_tool_respects_dependency_policy(self, tmp_path):
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(
+            project_root=str(tmp_path),
+            allowed_shell_modes=["install_dependency"],
+            dependency_policy=DependencyPolicy(allow_install=False),
+        )
+        tool = next(
+            item for item in create_builtin_tool_pack(options)
+            if item.name == "shell_install_dependency"
+        )
+
+        result = tool.func("pip install requests")
+        assert result["ok"] is False
+        assert "disabled" in result["stderr"]
+
+
+# ---------------------------------------------------------------------------
+# Builtin tools available in user-defined flows via include_builtin_tools
+# ---------------------------------------------------------------------------
+
+@task(name="user_bt_task", prompt="use builtin tools")
+class _UserBuiltinTask:
+    @step(order=1, prompt="read a file")
+    async def use_builtin(ctx):
+        return {"done": True}
+
+
+@flow(name="user_bt_flow", prompt="user flow with builtins")
+class _UserBuiltinFlow:
+    _UserBuiltinTask = _UserBuiltinTask
+
+
+@global_config(
+    prompt="agent with builtin tools but no dynamic flow",
+    include_builtin_tools=True,
+)
+class _UserBuiltinAgent:
+    _UserBuiltinFlow = _UserBuiltinFlow
+
+
+class TestIncludeBuiltinTools:
+    """include_builtin_tools=True injects tools without dynamic_flow."""
+
+    def test_builtin_tools_injected_without_dynamic_flow(self):
+        engine = FlowForge.compile(_UserBuiltinAgent)
+        tool_names = [t.name for t in engine._global_meta.tools
+                      if isinstance(t, FunctionTool)]
+        # Core builtin tools should be present
+        assert "web_fetch_url" in tool_names
+        assert "files_read_text" in tool_names
+        assert "files_write_text" in tool_names
+        assert "json_select_fields" in tool_names
+        assert "csv_read" in tool_names
+        assert "pptx_create" in tool_names
+        assert "chart_create" in tool_names
+
+    def test_builtin_tools_not_injected_by_default(self):
+        @global_config(prompt="plain agent")
+        class PlainAgent:
+            _UserBuiltinFlow = _UserBuiltinFlow
+
+        engine = FlowForge.compile(PlainAgent)
+        tool_names = [t.name for t in engine._global_meta.tools
+                      if isinstance(t, FunctionTool)]
+        assert "web_fetch_url" not in tool_names
+
+    def test_image_create_and_claude_skill_in_builtins(self):
+        engine = FlowForge.compile(_UserBuiltinAgent)
+        tool_names = [t.name for t in engine._global_meta.tools
+                      if isinstance(t, FunctionTool)]
+        assert "image_create" in tool_names
+        assert "claude_skill" in tool_names
+
+
+class TestClaudeSkillTool:
+    """Tests for the claude_skill builtin tool."""
+
+    def test_claude_cli_not_found(self):
+        from flowforge.tools.builtin import _make_claude_skill_tool
+        from unittest.mock import patch as _patch
+
+        tool = _make_claude_skill_tool(DynamicRunOptions())
+
+        with _patch("shutil.which", return_value=None):
+            result = tool(skill_name="commit", prompt="test")
+            assert result["ok"] is False
+            assert "not found" in result["error"]
+            assert result["skill"] == "commit"
+
+    def test_claude_skill_success(self):
+        from flowforge.tools.builtin import _make_claude_skill_tool
+        from unittest.mock import patch as _patch, MagicMock
+        import subprocess as sp
+
+        tool = _make_claude_skill_tool(DynamicRunOptions())
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "Commit created successfully"
+        mock_result.stderr = ""
+
+        with _patch("shutil.which", return_value="/usr/local/bin/claude"), \
+             _patch("subprocess.run", return_value=mock_result) as mock_run:
+            result = tool(skill_name="commit", prompt="fix bug")
+            assert result["ok"] is True
+            assert "Commit created" in result["result"]
+            assert result["skill"] == "commit"
+            # Verify the CLI was called with correct args
+            call_args = mock_run.call_args
+            cmd = call_args[0][0]
+            assert "/usr/local/bin/claude" in cmd
+            assert "--prompt" in cmd
+
+
+class TestAgentSkillTool:
+    """Tests for local Agent Skills loaded from SKILL.md."""
+
+    def test_agent_skill_loads_skill_md_prompt(self, tmp_path):
+        from flowforge.execution.llm import _inject_agent_skill_prompts
+
+        skill_dir = tmp_path / "roll-dice"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: roll-dice
+description: Roll dice when the user asks for random dice results.
+---
+
+Use this marker in every answer: AGENT_SKILL_MARKER.
+""",
+            encoding="utf-8",
+        )
+
+        skill = AgentSkill(path=str(skill_dir))
+        prompt = _inject_agent_skill_prompts("system", [skill])
+
+        assert skill.name == "roll-dice"
+        assert "Activated Agent Skills" in prompt
+        assert "name=\"roll-dice\"" in prompt
+        assert "Roll dice when the user asks" in prompt
+        assert "AGENT_SKILL_MARKER" in prompt
+
+    def test_agent_skill_accepts_direct_skill_md_path(self, tmp_path):
+        from flowforge.execution.llm import _inject_agent_skill_prompts
+
+        skill_dir = tmp_path / "direct-skill"
+        skill_dir.mkdir()
+        skill_md = skill_dir / "SKILL.md"
+        skill_md.write_text(
+            """---
+name: direct-skill
+description: Loaded from a direct SKILL.md file path.
+---
+
+DIRECT_SKILL_MARKER
+""",
+            encoding="utf-8",
+        )
+
+        prompt = _inject_agent_skill_prompts(
+            "system",
+            [AgentSkill(path=str(skill_md))],
+        )
+
+        assert "name=\"direct-skill\"" in prompt
+        assert "DIRECT_SKILL_MARKER" in prompt
+
+    @pytest.mark.asyncio
+    async def test_agent_skill_injected_for_openai_provider(self, tmp_path):
+        from flowforge.execution.llm import call_llm_api
+
+        skill_dir = tmp_path / "proof-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: proof-skill
+description: Prove local Agent Skill prompt injection.
+---
+
+Always include PROOF_SKILL_USED.
+""",
+            encoding="utf-8",
+        )
+
+        captured: dict[str, str] = {}
+
+        async def fake_openai(system_prompt, user_prompt, config, tools, **kwargs):
+            captured["system_prompt"] = system_prompt
+            captured["user_prompt"] = user_prompt
+            captured["tools"] = str(tools)
+            return "ok"
+
+        with patch("flowforge.execution.llm._call_openai", side_effect=fake_openai):
+            result = await call_llm_api(
+                system_prompt="system",
+                user_prompt="use the skill",
+                llm_config=LLMConfig(provider="openai", model="test"),
+                tool_configs=[AgentSkill(path=str(skill_dir))],
+            )
+
+        assert result == "ok"
+        assert "PROOF_SKILL_USED" in captured["system_prompt"]
+        assert captured["user_prompt"] == "use the skill"
+        assert captured["tools"] == "[]"
+
+
+class TestCallSkillContext:
+    """Tests for StepContext.call_skill()."""
+
+    @pytest.mark.asyncio
+    async def test_call_skill_cli_not_found(self):
+        """call_skill returns error when claude CLI is not in PATH."""
+        from unittest.mock import patch as _patch
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="f")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="t")
+        step_ctx = StepContext(task_ctx=task_ctx, step_prompt="s")
+
+        with _patch("shutil.which", return_value=None):
+            result = await step_ctx.call_skill("commit", "test commit")
+            assert result["ok"] is False
+            assert "not found" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_call_skill_success(self):
+        """call_skill returns result on successful CLI invocation."""
+        from unittest.mock import patch as _patch, AsyncMock as _AM
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="f")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="t")
+        step_ctx = StepContext(task_ctx=task_ctx, step_prompt="s")
+
+        # Mock asyncio.create_subprocess_exec
+        mock_proc = _AM()
+        mock_proc.communicate = _AM(return_value=(
+            b"Review complete: LGTM",
+            b"",
+        ))
+        mock_proc.returncode = 0
+
+        with _patch("shutil.which", return_value="/usr/bin/claude"), \
+             _patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await step_ctx.call_skill("review-pr", "PR #42")
+            assert result["ok"] is True
+            assert "LGTM" in result["result"]
+            assert result["skill"] == "review-pr"
+
+
+class TestToolResultWrapper:
+    """Tool results are wrapped so generated code can use them as
+    dict OR string (slicing, f-string formatting) without crashing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_call_tool_result_supports_slice_and_str(self):
+        from flowforge.execution.tool_result import ToolResult
+
+        def fake_fetch():
+            return {"ok": True, "body": "abcdefghij" * 10, "url": "https://x"}
+
+        fake_tool = FunctionTool(func=fake_fetch, name="fake")
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+            global_tools=[fake_tool],
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="f")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="t")
+        step_ctx = StepContext(task_ctx=task_ctx, step_prompt="s")
+
+        result = await step_ctx.call_tool("fake")
+
+        assert isinstance(result, ToolResult)
+        assert isinstance(result, dict)
+
+        # dict access still works
+        assert result["body"].startswith("abc")
+        assert result.get("ok") is True
+
+        # string-like access works (no KeyError on slice)
+        assert result[:5] == "abcde"
+        assert f"snippet={result[:3]}" == "snippet=abc"
+        assert "abc" in str(result)
+
+    def test_tool_result_falls_back_through_keys(self):
+        from flowforge.execution.tool_result import ToolResult
+
+        # body empty → falls through to stdout
+        r = ToolResult({"ok": True, "body": "", "stdout": "hello"})
+        assert r[:3] == "hel"
+        assert str(r) == "hello"
+
+        # all empty → repr-like string, no crash
+        r2 = ToolResult({"ok": False, "error": "boom"})
+        assert isinstance(str(r2), str)
+        assert r2[:0] == ""

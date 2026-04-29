@@ -33,11 +33,19 @@ if TYPE_CHECKING:
 
 _SUMMARY_MAX = 120   # chars per summary
 _CAPS_MAX = 3        # capabilities per node
+_PRE_MAX = 2         # preconditions per node
 _GLOBAL_PROMPT_MAX = 300
 
 
 class PromptBuilder:
     """Assembles the planner prompt from DAG metadata and docs."""
+
+    @staticmethod
+    def _shorten(text: str, max_len: int = _SUMMARY_MAX) -> str:
+        text = (text or "").strip()
+        if len(text) <= max_len:
+            return text
+        return text[:max_len] + "…"
 
     def build(
         self,
@@ -80,15 +88,34 @@ class PromptBuilder:
             doc = docs.get(node.id)
             summary = ""
             caps_str = ""
+            pre_str = ""
             if doc:
                 raw_summary = getattr(doc, "summary", "")
-                summary = raw_summary[:_SUMMARY_MAX] + ("…" if len(raw_summary) > _SUMMARY_MAX else "")
-                caps: list[str] = getattr(doc, "capabilities", [])[:_CAPS_MAX]
+                summary = self._shorten(raw_summary)
+                raw_caps = getattr(doc, "capabilities", [])
+                caps = raw_caps if isinstance(raw_caps, list) else [str(raw_caps)]
+                caps = [str(cap) for cap in caps[:_CAPS_MAX] if str(cap).strip()]
                 if caps:
                     caps_str = " | " + "; ".join(caps)
-            lines.append(f"{indent}{route_path}  — {summary}{caps_str}")
+                raw_preconditions = getattr(doc, "preconditions", [])
+                preconditions = (
+                    raw_preconditions
+                    if isinstance(raw_preconditions, list)
+                    else [str(raw_preconditions)]
+                )
+                preconditions = [
+                    str(item) for item in preconditions[:_PRE_MAX] if str(item).strip()
+                ]
+                if preconditions:
+                    pre_str = " | pre: " + "; ".join(preconditions)
 
-        parts.append("## Available Routes (Flow hierarchy)\n" + "\n".join(lines))
+            if not summary:
+                summary = self._shorten(getattr(node.meta, "prompt", ""))
+
+            lines.append(f"{indent}{route_path}  — {summary}{caps_str}{pre_str}")
+
+        routes_text = "\n".join(lines) if lines else "(no user-defined flows available)"
+        parts.append("## Available Routes (Flow hierarchy)\n" + routes_text)
 
         # 3. User request
         if hasattr(user_request, "model_dump"):
@@ -100,10 +127,25 @@ class PromptBuilder:
         # 4. Instruction
         parts.append(
             "## Task\n"
-            "Select the MINIMUM set of flow routes needed to fulfill this request.\n"
-            "Return dot-separated route paths (e.g. \"ml_platform.training\").\n"
+            "First decompose the request into ordered requirements, then select "
+            "the MINIMUM set of flow routes needed to fulfill them.\n"
+            "Return dot-separated route paths (e.g. \"ml_platform.training\") in execution order.\n"
             "- Be SPECIFIC: prefer deeper paths when the request targets a narrow capability.\n"
             "- If the request spans multiple domains, return multiple routes.\n"
+            "- Include `requirements[]` with one entry per ordered requirement; "
+            "mark whether each is covered by an existing route, needs a new "
+            "flow, or needs a new tool/dependency.\n"
+            "- If there are no available user-defined routes that can satisfy "
+            "the request, set `routes` to [], set `gap_detected` to true, and "
+            "fill `suggested_flow_name` plus `suggested_flow_prompt` at the "
+            "top level.\n"
+            "- If some routes can run now but a missing flow is still required to fully satisfy the request, "
+            "return the runnable routes AND report the missing flow as a gap.\n"
+            "- When reporting a gap, ALSO set `downstream_flow_route` to the "
+            "route of the FIRST flow that will consume the missing flow's output. "
+            "The missing flow will be chained immediately BEFORE that flow; the "
+            "framework uses this to align input/output schemas between them. "
+            "If the missing flow has no downstream consumer, leave it empty.\n"
             "- Tasks and steps within each flow run automatically — do NOT include them.\n"
             "Use the plan_execution tool."
         )

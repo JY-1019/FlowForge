@@ -191,17 +191,49 @@ class QualityCheck: ...
 Tools cascade through the hierarchy. Call the LLM from any step:
 
 ```python
-@global_config(prompt="...", tools=[MCPServer("https://api.example.com/mcp")])
+from flowforge.types import AgentSkill, ClaudeSkill, FunctionTool, MCPServer
+
+@global_config(
+    prompt="...",
+    tools=[
+        MCPServer("https://api.example.com/mcp"),
+        ClaudeSkill(name="pptx"),
+        AgentSkill(path=".agents/skills/code-review"),
+    ],
+)
 class Agent:
-    @flow(name="f", prompt="...", tools=[ToolConfig(name="calculator")])
+    @flow(name="f", prompt="...", tools=["calculator"])
     class F:
-        @task(name="t", prompt="...", tools=[ToolConfig(name="formatter")])
+        @task(name="t", prompt="...")
         class T:
-            @step(order=1, prompt="Use {query} to find answers <calculator>")
+            @step(order=1, prompt="Use the calculator tool to solve the query",
+                  tools=["calculator", "pptx", "code-review"])
             async def solve(ctx):
-                result = await ctx.call_llm("Solve: {query}")
+                result = await ctx.call_llm("Solve: {query} <calculator>")
+                deck = await ctx.call_llm("Turn the result into slides. <pptx>")
+                review = await ctx.call_llm("Review the solution. <code-review>")
                 return result
 ```
+
+Child annotations can list string tool references such as
+`tools=["calculator"]`; FlowForge resolves them against globally registered
+tool configs at runtime. This is useful for dynamic generated flows because
+they can declare intended tools without recreating `FunctionTool` objects.
+
+FlowForge supports five tool families:
+
+| Tool | Use for | Runtime behavior |
+|------|---------|------------------|
+| `FunctionTool` | Local Python functions | FlowForge executes it in the tool-use loop |
+| `HTTPTool` | HTTP APIs | FlowForge calls the endpoint with `httpx` |
+| `MCPServer` | Remote MCP tools | FlowForge fetches MCP schemas and calls `tools/call` |
+| `ClaudeSkill` | Anthropic native Skills such as `pptx` | Sent to Claude as `container.skills` |
+| `AgentSkill` | Local standard `SKILL.md` folders | Loaded into the model context with `<skill-name>` |
+
+Use `ClaudeSkill` when you want Anthropic's native Skills API. Use
+`AgentSkill` when a user has a local Agent Skills folder and you want the same
+`tools=[...]` + `<skill-name>` workflow across Anthropic, OpenAI, and Google
+providers.
 
 ### Parallel Execution
 
@@ -220,6 +252,45 @@ class T:
     async def c(ctx): ...
 ```
 
+### Dynamic Flow Generation
+
+Let the agent create missing flows when the compiled DAG does not already
+cover a user request:
+
+```python
+from flowforge import global_config, FlowForge, DynamicRunOptions
+
+@global_config(
+    prompt="General-purpose AI agent",
+    llm_config=LLMConfig.for_claude(),
+    dynamic_flow=True,  # enable dynamic generation
+)
+class MyAgent:
+    pass  # zero static flows is OK
+
+options = DynamicRunOptions(
+    project_root=".",
+    persist_generated=True,       # save generated code
+    auto_load_generated=True,     # reuse it on the next compile
+    include_builtin_tools=True,   # built-ins for PPT, CSV, charts, etc.
+)
+
+engine = FlowForge.compile(MyAgent, dynamic_options=options)
+result = await engine.run(
+    "Make a table of the five tallest mountains in the world",
+    planning_mode="autonomous",
+)
+```
+
+Key features:
+- **Manifest caching** — generated flows are saved, loaded on compile, and skipped when already present
+- **Compact codegen context** — only relevant tools and project context are sent to the code generator by default
+- **14+ builtin tools** — web, files, PPT Master-backed editable PPT, CSV, DOCX, charts, PDF, markdown
+- **Dynamic MCP setup** — generated flows can start declared MCP servers and register their tools for later `<tool>` use
+- **Auto artifact detection** — "make a PPT" → automatically includes `pptx_create`
+- **AST safety validation** — blocks dangerous imports/calls before execution
+- **Contract-first chaining** — generated flow output matches downstream input schema
+
 ### Compile-Time Validation
 
 Catch errors before runtime:
@@ -237,6 +308,19 @@ flowforge viz ./agent.py --mermaid  # Print Mermaid diagram
 flowforge run ./agent.py --query "test"  # Execute the agent
 flowforge doc-generate ./agent.py  # Auto-generate node docs via LLM
 ```
+
+## Examples
+
+| File | Shows |
+|------|-------|
+| `examples/dynamic_bare_agent.py` | Zero-flow agent that generates missing flows at runtime |
+| `examples/dynamic_docx_report_agent.py` | Zero-flow, zero-tool agent that dynamically generates a flow which uses the built-in `docx_create` tool to materialise a `.docx` report under `~/test/docx_reports` |
+| `examples/dynamic_skill_mcp_agent.py` | Zero-flow agent showing Agent Skill guidance, optional Claude `pptx` Skill use, compact dynamic codegen, and Playwright/Figma MCP server registration |
+| `examples/dynamic_paper_report_agent.py` | Static pipeline plus dynamic upstream paper search/reporting |
+| `examples/claude_skill_custom_text_agent.py` | Custom Claude Skill proof that prints a marker immediately |
+| `examples/claude_skill_pptx_agent.py` | Anthropic `pptx` Skill, file ID extraction, and Files API download |
+| `examples/playwright_agent.py` | MCP browser tool integration |
+| `examples/enterprise_agent.py` | Larger nested flow/task composition |
 
 ## How It Works
 
@@ -268,7 +352,8 @@ flowforge/
 ├── annotations/    # Decorators, metadata, validators
 ├── schema/         # DAG compiler, registry, resolver
 ├── execution/      # Async runners, context, LLM integration
-├── tools/          # MCP, HTTP, function tool adapters
+├── dynamic/        # Dynamic flow generation, manifest, meta-flow
+├── tools/          # MCP, HTTP, function tool adapters, builtin tools
 ├── planner/        # AI-driven path selection
 ├── viz/            # Mermaid & Graphviz rendering
 └── cli/            # Typer-based CLI
@@ -306,7 +391,7 @@ fresh git clone.
 |---------|-------------|
 | [Getting Started](flowforge/_docs/getting-started.md) | Installation, hello world, first run |
 | [Concepts](flowforge/_docs/concepts/) | Architecture, annotations, data flow, DAG compilation |
-| [Guides](flowforge/_docs/guides/) | First agent, branch dispatching, nested flows, tools & LLM, visualization |
+| [Guides](flowforge/_docs/guides/) | First agent, branch dispatching, nested flows, tools & LLM, visualization, dynamic flow generation |
 | [API Reference](flowforge/_docs/api/) | Decorators, types, engine, errors, CLI |
 
 You can also browse the docs directly on GitHub: [flowforge/_docs/](https://github.com/JY-1019/FlowForge/tree/main/flowforge/_docs)

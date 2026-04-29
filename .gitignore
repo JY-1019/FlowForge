@@ -31,9 +31,9 @@ htmlcov/
 # MkDocs build output
 site/
 
-# Claude Code (keep CLAUDE.md, ignore personal data)
+# Claude Code local context
 .claude/*
-!.claude/CLAUDE.md
+AGENTS.md
 
 # IDE
 .vscode/
@@ -58,3 +58,13 @@ claude_run_compare.md
 gemini_dag_structure.md
 gemini_run_compare.md
 test_research_dag
+FlowForge_dynamic_workflow.md
+FlowForge_소개.md
+arxiv_papers_payload.json
+
+# Generated example/runtime locks and Office temp files
+_artifacts/
+**/_artifacts/
+examples/_artifacts/**/manifest.json.lock
+~$*.pptx
+**/~$*.pptx

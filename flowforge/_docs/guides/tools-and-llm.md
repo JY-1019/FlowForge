@@ -17,14 +17,31 @@ FlowForge supports **hierarchical tool registration**: tools declared at a highe
 
 Inside a step function, use `ctx.call_llm(prompt)` to make an AI API call. The annotation's `prompt` becomes the **system prompt**, and the argument to `call_llm()` becomes the **user prompt**.
 
+Child annotations may also reference globally registered tools by name:
+
+```python
+@global_config(tools=[FunctionTool(func=fetch_url, name="web_fetch_url")])
+class Agent:
+    @flow(name="clone", prompt="Clone a public page", tools=["web_fetch_url"])
+    class Clone:
+        @task(name="inspect", prompt="Inspect the target page", tools=["web_fetch_url"])
+        class Inspect:
+            @step(order=1, prompt="Fetch the page with the web tool", tools=["web_fetch_url"])
+            async def fetch(ctx):
+                return await ctx.call_tool("web_fetch_url", url=ctx.input["url"])
+```
+
+This name-reference form is intended for generated flows and scoped prompts;
+the actual tool config still lives at `@global_config`.
+
 ---
 
 ## Tool Types
 
-FlowForge provides three built-in tool configurations:
+FlowForge provides five tool configurations:
 
 ```python
-from flowforge.types import MCPServer, FunctionTool, HTTPTool
+from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill, AgentSkill
 
 # MCP Server
 mcp = MCPServer(url="https://api.example.com/mcp", name="search", description="Web search")
@@ -37,7 +54,34 @@ func_tool = FunctionTool(func=my_func, name="my_func", description="Custom funct
 
 # HTTP API
 http = HTTPTool(url="https://api.example.com/translate", name="translate", method="POST")
+
+# Claude Agent Skill (Anthropic provider only)
+pptx = ClaudeSkill(name="pptx")
+
+# Local Agent Skills SKILL.md folder (provider-neutral)
+review = AgentSkill(path=".agents/skills/code-review")
 ```
+
+`ClaudeSkill` is provider-native: FlowForge does not execute it locally.
+When referenced as `<pptx>` in `ctx.call_llm()`, it is passed to Anthropic as
+`container.skills` with the required code execution beta tool.
+
+`AgentSkill` is provider-neutral. When referenced as `<code-review>`,
+FlowForge reads the local `SKILL.md` and injects the activated instructions
+into the model context. This follows the Agent Skills progressive-disclosure
+shape without relying on a provider-native Skills API.
+
+### Choosing Skill Types
+
+| Type | Provider support | Best for | What FlowForge sends |
+|------|------------------|----------|----------------------|
+| `ClaudeSkill` | Anthropic only | Hosted Skills such as `pptx`, `xlsx`, `docx`, `pdf`, or Anthropic custom `skill_id`s | `container.skills` + required beta flags |
+| `AgentSkill` | Anthropic, OpenAI, Google | Local standard Agent Skills folders authored as `SKILL.md` | Activated Skill instructions appended to the system prompt |
+
+Use `ClaudeSkill` when you need Claude's native server-side Skill runtime,
+especially for document-generation Skills that create downloadable files.
+Use `AgentSkill` when users keep Skills locally and you want the same FlowForge
+API across providers.
 
 ---
 
@@ -53,6 +97,8 @@ Tools on `@global_config` are available to **every** flow, task, and step in the
     tools=[
         MCPServer(url="https://search.example.com/mcp", name="web_search"),
         MCPServer(url="https://db.example.com/mcp", name="db_search"),
+        ClaudeSkill(name="pptx"),
+        AgentSkill(path=".agents/skills/code-review"),
     ]
 )
 class MyAgent:
@@ -77,6 +123,9 @@ class DataPipeline:
             # ctx.merged_tools includes "validator" from the parent flow
             ...
 ```
+
+If `validator` was already registered globally, the flow can scope it by name
+instead: `tools=["validator"]`.
 
 ### Task Level
 
@@ -111,6 +160,85 @@ async def translate_step(ctx):
     )
     return {"translated": result}
 ```
+
+### Claude Skill Example
+
+```python
+@global_config(
+    prompt="Document automation assistant",
+    llm_config=LLMConfig.for_claude(),
+    tools=[ClaudeSkill(name="pptx")],
+)
+class MyAgent:
+    @flow(name="deck", prompt="Create decks")
+    class DeckFlow:
+        @task(name="make", prompt="Make a presentation")
+        class MakeDeck:
+            @step(order=1, prompt="Generate a PowerPoint")
+            async def make(ctx):
+                return await ctx.call_llm(
+                    "Create a 5-slide presentation from this input. <pptx>"
+                )
+```
+
+Claude Skills require Anthropic's Messages API skill support. FlowForge adds
+the required `code-execution-2025-08-25` and `skills-2025-10-02` beta flags
+for calls that include `ClaudeSkill`.
+
+!!! note "Generated files"
+    Document Skills such as `pptx` can return server-side `file_id` values
+    instead of a local file path. FlowForge includes those IDs in the text
+    response so the caller can download the artifact through Anthropic's Files
+    API. See `examples/claude_skill_pptx_agent.py` for a full download flow.
+
+### Local Agent Skill Example
+
+Create `.agents/skills/code-review/SKILL.md`:
+
+```markdown
+---
+name: code-review
+description: Review code changes for correctness, regressions, and missing tests.
+---
+
+Prioritize concrete bugs, behavior changes, and test gaps. Return concise
+findings first.
+```
+
+Register and use it:
+
+```python
+@global_config(
+    prompt="Engineering assistant",
+    llm_config=LLMConfig.for_openai(),
+    tools=[AgentSkill(path=".agents/skills/code-review")],
+)
+class MyAgent:
+    @flow(name="review", prompt="Review changes")
+    class ReviewFlow:
+        @task(name="review", prompt="Review")
+        class ReviewTask:
+            @step(order=1, prompt="Review with the local Agent Skill")
+            async def review(ctx):
+                return await ctx.call_llm("Review this patch. <code-review>")
+```
+
+`AgentSkill(path=...)` accepts either the Skill directory or a direct
+`SKILL.md` path. If `name` is omitted, FlowForge uses the directory name, so
+hyphenated standard names such as `<code-review>` work naturally.
+
+### Custom Claude Skill Proof Example
+
+`examples/claude_skill_custom_text_agent.py` demonstrates a tiny custom Claude
+Skill that returns a marker directly in the Python process output:
+
+```text
+- marker: FLOWFORGE_CUSTOM_SKILL_USED
+- skill_name: flowforge-proof
+```
+
+This example is useful for checking that FlowForge is passing Skills into the
+Anthropic API correctly without dealing with file downloads.
 
 ---
 
@@ -189,6 +317,7 @@ async def research(ctx):
 
 **Rules:**
 - Multiple tools: `"Use <search> and <translate> to process"`
+- Hyphenated Agent Skill names: `"Review with <code-review>"`
 - Duplicate references are deduplicated
 - Unknown tool names are silently skipped
 - The `<...>` markers are removed from the final prompt sent to the LLM
@@ -294,11 +423,31 @@ FlowForge communicates with MCP servers using the **Streamable HTTP transport** 
 
 ```bash
 # Example: Start Playwright MCP server
-npx @anthropic/mcp-playwright --port 3847
+npx @playwright/mcp@latest --port 8931
 
 # The MCPServer config points to the server endpoint
-MCPServer(url="http://localhost:3847/mcp", name="browser_navigate")
+MCPServer(url="http://localhost:8931/mcp", name="browser_navigate")
 ```
+
+Dynamic flows can also register MCP tools at runtime when the server is
+declared in `DynamicRunOptions`:
+
+```python
+options = DynamicRunOptions(
+    mcp_server_commands={"playwright": ["npx", "-y", "@playwright/mcp@latest", "--port", "8931"]},
+    mcp_server_urls={"playwright": "http://localhost:8931/mcp"},
+    mcp_server_tools={"playwright": ["browser_navigate", "browser_snapshot"]},
+)
+
+await ctx.call_tool("mcp_start_server", server_name="playwright")
+await ctx.call_tool("mcp_register_server", server_name="playwright")
+result = await ctx.call_llm("Open the target URL. <browser_navigate>")
+```
+
+If the generated flow calls `mcp_register_server` first, FlowForge still checks
+the declared endpoint. When a command exists and the endpoint is down,
+registration starts the MCP server automatically before adding the MCP tool
+configs to the current run.
 
 ### FunctionTool in the Loop
 

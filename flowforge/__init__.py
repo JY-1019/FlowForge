@@ -69,7 +69,16 @@ from flowforge.annotations.decorators import (
     step,
 )
 from flowforge.annotations.decorators import _GLOBAL_ATTR
-from flowforge.types import LLMConfig, BranchCondition, MCPServer, ToolConfig
+from flowforge.types import (
+    LLMConfig,
+    BranchCondition,
+    MCPServer,
+    ClaudeSkill,
+    AgentSkill,
+    ToolConfig,
+    DynamicRunOptions,
+    DependencyPolicy,
+)
 from flowforge.dynamic.generator import DynamicFlowGenerator
 from flowforge.errors import (
     FlowForgeError,
@@ -86,6 +95,43 @@ if TYPE_CHECKING:
     from flowforge.schema.dag import FlowForgeDAG
     from flowforge.doc.models import AnyDoc
     from flowforge.viz.run_trace import RunTrace, Checkpoint
+
+
+def _coerce_dynamic_options(
+    value: DynamicRunOptions | dict[str, Any] | None,
+) -> DynamicRunOptions:
+    if isinstance(value, DynamicRunOptions):
+        return value
+    if value is None:
+        return DynamicRunOptions()
+    return DynamicRunOptions.model_validate(value)
+
+
+def _tool_name(tool: ToolConfig) -> str:
+    from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill, AgentSkill
+
+    if isinstance(tool, MCPServer):
+        return tool.name
+    if isinstance(tool, FunctionTool):
+        return tool.name or (
+            tool.func.__name__ if hasattr(tool.func, "__name__") else ""
+        )
+    if isinstance(tool, HTTPTool):
+        return tool.name
+    if isinstance(tool, ClaudeSkill):
+        return tool.name or tool.skill_id
+    if isinstance(tool, AgentSkill):
+        return tool.name
+    return ""
+
+
+def _extend_tools_once(target: list[ToolConfig], tools: list[ToolConfig]) -> None:
+    existing = {_tool_name(tool) for tool in target if _tool_name(tool)}
+    for tool in tools:
+        name = _tool_name(tool)
+        if name and name not in existing:
+            target.append(tool)
+            existing.add(name)
 
 
 class AgentSession:
@@ -117,6 +163,7 @@ class AgentSession:
         dag: FlowForgeDAG,
         global_meta: Any,
         docs: dict[str, AnyDoc],
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
     ) -> None:
         from flowforge.execution.engine import ExecutionEngine
         from flowforge.tools.registry import ToolRegistry
@@ -124,11 +171,13 @@ class AgentSession:
         self._dag = dag
         self._global_meta = global_meta
         self._docs = docs
+        self._dynamic_options = _coerce_dynamic_options(dynamic_options)
         self._engine = ExecutionEngine(
             dag=dag,
             global_meta=global_meta,
             docs=docs,
             tool_registry=ToolRegistry(),
+            dynamic_options=self._dynamic_options,
         )
 
     @property
@@ -146,11 +195,12 @@ class AgentSession:
         planning_mode: str = "deterministic",
         route: str | list[str] | None = None,
         resume_from: Any = None,
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
     ) -> Any:
         """Execute the pipeline. See ``CompiledAgent.run()`` for details."""
         return await self._engine.run(
             input_data, planning_mode=planning_mode, route=route,
-            resume_from=resume_from,
+            resume_from=resume_from, dynamic_options=dynamic_options,
         )
 
     async def run_traced(
@@ -159,16 +209,25 @@ class AgentSession:
         planning_mode: str = "deterministic",
         route: str | list[str] | None = None,
         resume_from: Any = None,
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
     ) -> tuple[Any, RunTrace]:
         """Execute the pipeline and return (result, RunTrace)."""
         return await self._engine.run_traced(
             input_data, planning_mode=planning_mode, route=route,
-            resume_from=resume_from,
+            resume_from=resume_from, dynamic_options=dynamic_options,
         )
 
-    def compare_mermaid(self, trace: RunTrace | None = None) -> str:
-        """Return comparison Mermaid diagrams (full DAG vs executed path)."""
-        from flowforge.viz.renderer import render_mermaid
+    def compare_mermaid(
+        self,
+        trace: RunTrace | None = None,
+        *,
+        include_full_dag: bool = False,
+    ) -> str:
+        """Return a Markdown run report with Mermaid for the executed path.
+
+        Set ``include_full_dag=True`` to include the full compiled DAG before
+        the run diagram.
+        """
         from flowforge.viz.subtree import render_run_mermaid
 
         t = trace or self.last_trace
@@ -181,14 +240,25 @@ class AgentSession:
         n_total = len(self._dag.get_all_nodes())
 
         lines = [
-            "# FlowForge - DAG vs Executed Path",
-            "", "## 1. Full DAG Structure", "",
-            "```mermaid", render_mermaid(self._dag), "```", "",
-            f"## 2. Executed Path - Run `{t.run_id}`",
+            "# FlowForge - Executed Path",
+            "",
             f"> Status: **{status}** | Duration: **{dur}** | "
-            f"Executed: **{n_exec} / {n_total}** nodes", "",
+            f"Executed: **{n_exec} / {n_total}** nodes",
+            "",
             "```mermaid", render_run_mermaid(self._dag, t), "```",
         ]
+        if include_full_dag:
+            from flowforge.viz.renderer import render_mermaid
+
+            lines = [
+                "# FlowForge - DAG vs Executed Path",
+                "", "## 1. Full DAG Structure", "",
+                "```mermaid", render_mermaid(self._dag), "```", "",
+                f"## 2. Executed Path - Run `{t.run_id}`",
+                f"> Status: **{status}** | Duration: **{dur}** | "
+                f"Executed: **{n_exec} / {n_total}** nodes", "",
+                "```mermaid", render_run_mermaid(self._dag, t), "```",
+            ]
         return "\n".join(lines)
 
 
@@ -215,20 +285,24 @@ class CompiledAgent:
         dag: FlowForgeDAG,
         global_meta: Any,
         docs: dict[str, AnyDoc] | None = None,
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
     ) -> None:
         from flowforge.execution.engine import ExecutionEngine
         from flowforge.tools.registry import ToolRegistry
 
         self._dag = dag
         self._global_meta = global_meta
-        self._docs: dict[str, AnyDoc] = docs or {}
+        self._docs: dict[str, AnyDoc] = docs if docs is not None else {}
         self._tool_registry = ToolRegistry()
+        self._dynamic_options = _coerce_dynamic_options(dynamic_options)
+        self._last_dynamic_generation: dict[str, Any] | None = None
         self._engine = ExecutionEngine(
             dag=dag,
             global_meta=global_meta,
             docs=self._docs,
             tool_registry=self._tool_registry,
             compiled_agent=self,
+            dynamic_options=self._dynamic_options,
         )
 
     # ------------------------------------------------------------------
@@ -247,6 +321,16 @@ class CompiledAgent:
     def last_trace(self) -> RunTrace | None:
         """Trace of the most recent run() call. None before first run."""
         return self._engine.last_trace
+
+    @property
+    def last_dynamic_generation(self) -> dict[str, Any] | None:
+        """Metadata about the most recent dynamic-flow injection, if any."""
+        return self._last_dynamic_generation
+
+    @property
+    def dynamic_options(self) -> DynamicRunOptions:
+        """Default dynamic generation options for this compiled agent."""
+        return self._dynamic_options
 
     @property
     def memory(self) -> Any:
@@ -270,6 +354,7 @@ class CompiledAgent:
             dag=self._dag,
             global_meta=self._global_meta,
             docs=self._docs,
+            dynamic_options=self._dynamic_options,
         )
 
     def add_flow(self, flow_cls: type) -> str:
@@ -320,6 +405,39 @@ class CompiledAgent:
 
         return node_id
 
+    def replace_flow(self, flow_cls: type) -> str:
+        """Replace an existing flow with a regenerated implementation.
+
+        Drops the old flow's subtree from the DAG and ``global_meta.flows``,
+        then re-adds *flow_cls* (which must carry the same ``@flow`` name).
+        Used by the dynamic-flow runtime-repair hook so a regenerated
+        flow takes the place of the broken one without requiring a fresh
+        ``compile()``.
+
+        Returns
+        -------
+        str
+            The DAG node ID of the newly added flow.
+        """
+        from flowforge.annotations.decorators import _FLOW_ATTR
+
+        if not hasattr(flow_cls, _FLOW_ATTR):
+            raise CompileError(
+                f"{flow_cls.__name__} is not decorated with @flow"
+            )
+        new_meta = getattr(flow_cls, _FLOW_ATTR)
+        node_id = f"global.{new_meta.name}"
+
+        # Drop the old subtree from the DAG (no-op when not present yet).
+        self._dag.remove_subtree(node_id)
+
+        # Drop the old FlowMeta from global_meta.flows by name.
+        self._global_meta.flows = [
+            f for f in self._global_meta.flows if f.name != new_meta.name
+        ]
+
+        return self.add_flow(flow_cls)
+
     def recompile(self) -> None:
         """Full recompile of the DAG from the current ``global_meta``.
 
@@ -342,6 +460,7 @@ class CompiledAgent:
             docs=self._docs,
             tool_registry=self._tool_registry or ToolRegistry(),
             compiled_agent=self,
+            dynamic_options=self._dynamic_options,
         )
         # Preserve session memory across rebuilds.
         engine.memory = self._engine.memory
@@ -389,6 +508,7 @@ class CompiledAgent:
         planning_mode: str = "deterministic",
         route: str | list[str] | None = None,
         resume_from: Any = None,
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
     ) -> Any:
         """Execute the agent pipeline. Trace stored in self.last_trace.
 
@@ -415,7 +535,7 @@ class CompiledAgent:
         """
         return await self._engine.run(
             input_data, planning_mode=planning_mode, route=route,
-            resume_from=resume_from,
+            resume_from=resume_from, dynamic_options=dynamic_options,
         )
 
     async def run_traced(
@@ -424,6 +544,7 @@ class CompiledAgent:
         planning_mode: str = "deterministic",
         route: str | list[str] | None = None,
         resume_from: Any = None,
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
     ) -> tuple[Any, RunTrace]:
         """Execute the agent pipeline and explicitly return (result, RunTrace).
 
@@ -431,7 +552,7 @@ class CompiledAgent:
         """
         return await self._engine.run_traced(
             input_data, planning_mode=planning_mode, route=route,
-            resume_from=resume_from,
+            resume_from=resume_from, dynamic_options=dynamic_options,
         )
 
     # ------------------------------------------------------------------
@@ -514,23 +635,25 @@ class CompiledAgent:
             )
         return render_run_mermaid(self._dag, t)
 
-    def compare_mermaid(self, trace: RunTrace | None = None) -> str:
-        """Return a Markdown string with two Mermaid diagrams side-by-side:
+    def compare_mermaid(
+        self,
+        trace: RunTrace | None = None,
+        *,
+        include_full_dag: bool = False,
+    ) -> str:
+        """Return a Markdown string with the executed-path Mermaid diagram.
 
-        1. **Full DAG** — every node in the compiled structure.
-        2. **Executed path** — same nodes, but executed ones are colored with
-           order + timing and skipped ones are gray-dashed.
-
-        Paste the output into any Markdown viewer (VS Code, GitHub, mermaid.live)
-        to compare the agent's route against the full available structure.
+        The default is intentionally compact for saved ``.md`` run artifacts.
+        Set ``include_full_dag=True`` to prepend the full compiled DAG.
 
         Args:
             trace: Explicit RunTrace; defaults to self.last_trace.
+            include_full_dag: Include the full compiled DAG Mermaid diagram
+                before the executed-path diagram.
 
         Raises:
             RuntimeError: If no trace is available.
         """
-        from flowforge.viz.renderer import render_mermaid
         from flowforge.viz.subtree import render_run_mermaid
 
         t = trace or self.last_trace
@@ -545,16 +668,9 @@ class CompiledAgent:
         n_total = len(self._dag.get_all_nodes())
 
         lines = [
-            "# FlowForge — DAG vs Executed Path",
+            "# FlowForge — Executed Path",
             "",
-            "## 1. Full DAG Structure",
-            "> Every node compiled from the annotations.",
-            "",
-            "```mermaid",
-            render_mermaid(self._dag),
-            "```",
-            "",
-            f"## 2. Executed Path — Run `{t.run_id}`",
+            f"## Run `{t.run_id}`",
             f"> Status: **{status}** · Duration: **{dur}** · "
             f"Executed: **{n_exec} / {n_total}** nodes",
             ">",
@@ -566,6 +682,31 @@ class CompiledAgent:
             render_run_mermaid(self._dag, t),
             "```",
         ]
+        if include_full_dag:
+            from flowforge.viz.renderer import render_mermaid
+
+            lines = [
+                "# FlowForge — DAG vs Executed Path",
+                "",
+                "## 1. Full DAG Structure",
+                "> Every node compiled from the annotations.",
+                "",
+                "```mermaid",
+                render_mermaid(self._dag),
+                "```",
+                "",
+                f"## 2. Executed Path — Run `{t.run_id}`",
+                f"> Status: **{status}** · Duration: **{dur}** · "
+                f"Executed: **{n_exec} / {n_total}** nodes",
+                ">",
+                "> - **Colored** nodes ran (dark = global/flow/task/step, red = error)",
+                "> - **Bold arrows** (`==>`) are the executed edges",
+                "> - **Gray dashed** nodes were compiled but skipped this run",
+                "",
+                "```mermaid",
+                render_run_mermaid(self._dag, t),
+                "```",
+            ]
         return "\n".join(lines)
 
     def print_run_summary(self, trace: RunTrace | None = None) -> None:
@@ -582,7 +723,10 @@ class FlowForge:
     """Main entry point — compile an annotated agent class into a runnable pipeline."""
 
     @staticmethod
-    def compile(agent_cls: type) -> CompiledAgent:
+    def compile(
+        agent_cls: type,
+        dynamic_options: DynamicRunOptions | dict[str, Any] | None = None,
+    ) -> CompiledAgent:
         """
         Compile the @global_config-decorated class into a DAG.
 
@@ -599,6 +743,29 @@ class FlowForge:
             )
 
         global_meta = getattr(agent_cls, _GLOBAL_ATTR)
+        options = _coerce_dynamic_options(dynamic_options)
+
+        # ── Builtin tool injection ─────────────────────────────────────
+        # Builtin tools are injected when EITHER:
+        #   1. @global_config(include_builtin_tools=True)  — user explicitly opts in
+        #   2. dynamic_flow=True AND DynamicRunOptions.include_builtin_tools=True
+        _want_builtin = (
+            global_meta.include_builtin_tools
+            or (global_meta.dynamic_flow and options.include_builtin_tools)
+        )
+        if _want_builtin:
+            from flowforge.tools.builtin import create_builtin_tool_pack
+
+            _extend_tools_once(
+                global_meta.tools,
+                create_builtin_tool_pack(options),
+            )
+
+        if global_meta.dynamic_flow:
+            if options.auto_load_generated:
+                from flowforge.dynamic.manifest import load_generated_assets
+
+                load_generated_assets(global_meta, options)
 
         # Inject the built-in dynamic generator flow when dynamic_flow=True.
         #
@@ -632,7 +799,11 @@ class FlowForge:
         # Validate — raises on cycles
         resolve_execution_order(dag)
 
-        return CompiledAgent(dag=dag, global_meta=global_meta)
+        return CompiledAgent(
+            dag=dag,
+            global_meta=global_meta,
+            dynamic_options=options,
+        )
 
 
 __all__ = [
@@ -645,7 +816,11 @@ __all__ = [
     "LLMConfig",
     "BranchCondition",
     "MCPServer",
+    "ClaudeSkill",
+    "AgentSkill",
     "ToolConfig",
+    "DynamicRunOptions",
+    "DependencyPolicy",
     # Main classes
     "FlowForge",
     "CompiledAgent",

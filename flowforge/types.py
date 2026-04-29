@@ -132,6 +132,7 @@ class MCPServer(BaseModel):
     url: str
     name: str = ""
     description: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
 
 
 class FunctionTool(BaseModel):
@@ -154,4 +155,214 @@ class HTTPTool(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
-ToolConfig = MCPServer | FunctionTool | HTTPTool
+class ClaudeSkill(BaseModel):
+    """Claude Agent Skill configuration for Anthropic-native skill use.
+
+    ``ClaudeSkill`` entries can be declared anywhere regular FlowForge tools
+    are accepted.  Referencing the skill with ``<name>`` in ``ctx.call_llm()``
+    attaches it to the Anthropic Messages API request via ``container.skills``.
+
+    Examples
+    --------
+    ``ClaudeSkill(name="pptx")`` enables Anthropic's built-in PowerPoint skill.
+    ``ClaudeSkill(type="custom", skill_id="skill_...", name="finance")``
+    enables a custom workspace skill and lets prompts reference ``<finance>``.
+    """
+
+    name: str = ""
+    skill_id: str = ""
+    type: Literal["anthropic", "custom"] = "anthropic"
+    version: str = "latest"
+    description: str = ""
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.skill_id and self.name:
+            self.skill_id = self.name
+        if not self.name and self.skill_id:
+            self.name = self.skill_id
+
+
+class AgentSkill(BaseModel):
+    """Local Agent Skills ``SKILL.md`` configuration.
+
+    ``AgentSkill`` supports the open Agent Skills folder format: a directory
+    containing a top-level ``SKILL.md`` with YAML frontmatter and Markdown
+    instructions.  Referencing the skill with ``<name>`` in ``ctx.call_llm()``
+    loads that ``SKILL.md`` into the model context.
+
+    Unlike ``ClaudeSkill``, this is provider-neutral and does not use a
+    provider-native Skills API.  It works by progressive prompt disclosure, so
+    it can be used with Anthropic, OpenAI, and Google providers.
+
+    Examples
+    --------
+    ``AgentSkill(path=".agents/skills/code-review")`` loads
+    ``.agents/skills/code-review/SKILL.md`` when the prompt includes
+    ``<code-review>``.
+    """
+
+    path: str
+    name: str = ""
+    description: str = ""
+    max_chars: int = 12000
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.name:
+            return
+        from pathlib import Path
+
+        path = Path(self.path)
+        self.name = path.parent.name if path.name == "SKILL.md" else path.name
+
+
+ToolConfig = MCPServer | FunctionTool | HTTPTool | ClaudeSkill | AgentSkill
+
+# Decorator-scoped tool declarations can either provide full tool configs or
+# refer to globally registered tools by name.  Name references are especially
+# useful for dynamically generated flows, which should not have to recreate
+# Python FunctionTool objects just to document and scope intended tool usage.
+ToolReference = ToolConfig | str
+
+
+class DependencyPolicy(BaseModel):
+    """Policy for dependencies requested by dynamically generated tools.
+
+    Dynamic generation can discover that a missing capability needs an
+    additional package.  The policy is intentionally explicit: generation can
+    describe dependencies freely, but installation is gated by this model.
+    """
+
+    allow_install: bool = False
+    allowed_managers: list[str] = Field(
+        default_factory=lambda: ["pip", "uv", "npm", "pnpm", "yarn"]
+    )
+    allowed_packages: list[str] = Field(default_factory=list)
+    denied_packages: list[str] = Field(default_factory=list)
+
+
+class DynamicRunOptions(BaseModel):
+    """Runtime options for dynamic flow/tool generation.
+
+    These options are accepted by ``FlowForge.compile()`` and ``engine.run()``.
+    ``@global_config(dynamic_flow=True)`` still declares that the agent is
+    allowed to use dynamic generation; this object controls where generated
+    code lives and what extra capabilities the dynamic generator may use.
+    """
+
+    enabled: bool = True
+    project_root: str | None = None
+    generated_dir: str = "flowforge/generated"
+    persist_generated: bool = True
+    auto_load_generated: bool = True
+    include_builtin_tools: bool = True
+    allow_tool_generation: bool = False
+    allow_codegen_tool_use: bool = False
+    generated_step_timeout_seconds: int = 300
+    allowed_shell_modes: list[
+        Literal["readonly", "workspace_write", "project_exec", "install_dependency"]
+    ] = Field(default_factory=lambda: ["readonly", "project_exec"])
+    shell_timeout_seconds: int = 60
+    shell_output_max_chars: int = 4000
+    mcp_server_commands: dict[str, list[str]] = Field(default_factory=dict)
+    mcp_server_urls: dict[str, str] = Field(default_factory=dict)
+    mcp_server_tools: dict[str, list[str]] = Field(default_factory=dict)
+    mcp_server_headers: dict[str, dict[str, str]] = Field(default_factory=dict)
+    mcp_start_timeout_seconds: int = 15
+    project_context_max_chars: int = 4000
+    codegen_tool_catalog_max_tools: int = 12
+    codegen_tool_catalog_max_chars: int = 6000
+    max_requirements: int = 8
+    dependency_policy: DependencyPolicy = Field(default_factory=DependencyPolicy)
+
+    @classmethod
+    def for_playwright_mcp(
+        cls,
+        *,
+        project_root: str | None = None,
+        port: int = 8931,
+        command: list[str] | None = None,
+        tools: list[str] | None = None,
+        **kwargs: Any,
+    ) -> "DynamicRunOptions":
+        """Return options preconfigured for the official Playwright MCP server."""
+        data = dict(kwargs)
+        commands = dict(data.pop("mcp_server_commands", {}) or {})
+        urls = dict(data.pop("mcp_server_urls", {}) or {})
+        server_tools = dict(data.pop("mcp_server_tools", {}) or {})
+
+        commands.setdefault(
+            "playwright",
+            command or ["npx", "-y", "@playwright/mcp@latest", "--port", str(port)],
+        )
+        urls.setdefault("playwright", f"http://localhost:{port}/mcp")
+        server_tools.setdefault(
+            "playwright",
+            tools or [
+                "browser_navigate",
+                "browser_snapshot",
+                "browser_click",
+                "browser_evaluate",
+            ],
+        )
+
+        data.setdefault("include_builtin_tools", True)
+        data.setdefault(
+            "allowed_shell_modes",
+            ["readonly", "project_exec", "install_dependency"],
+        )
+        data.setdefault("codegen_tool_catalog_max_tools", 8)
+        data.setdefault("codegen_tool_catalog_max_chars", 4500)
+        return cls(
+            project_root=project_root,
+            mcp_server_commands=commands,
+            mcp_server_urls=urls,
+            mcp_server_tools=server_tools,
+            **data,
+        )
+
+    @classmethod
+    def for_figma_mcp(
+        cls,
+        *,
+        project_root: str | None = None,
+        url: str = "https://mcp.figma.com/mcp",
+        authorization: str = "",
+        headers: dict[str, str] | None = None,
+        tools: list[str] | None = None,
+        **kwargs: Any,
+    ) -> "DynamicRunOptions":
+        """Return options preconfigured for Figma's remote MCP endpoint."""
+        data = dict(kwargs)
+        urls = dict(data.pop("mcp_server_urls", {}) or {})
+        server_tools = dict(data.pop("mcp_server_tools", {}) or {})
+        server_headers = dict(data.pop("mcp_server_headers", {}) or {})
+
+        urls.setdefault("figma", url)
+        server_tools.setdefault(
+            "figma",
+            tools or [
+                "get_design_context",
+                "get_variable_defs",
+                "get_metadata",
+                "get_screenshot",
+                "create_design_system_rules",
+                "whoami",
+            ],
+        )
+        merged_headers = dict(headers or {})
+        if authorization:
+            merged_headers.setdefault("Authorization", authorization)
+        if merged_headers:
+            server_headers.setdefault("figma", merged_headers)
+
+        data.setdefault("include_builtin_tools", True)
+        data.setdefault("allowed_shell_modes", ["readonly", "project_exec"])
+        data.setdefault("codegen_tool_catalog_max_tools", 8)
+        data.setdefault("codegen_tool_catalog_max_chars", 4500)
+        return cls(
+            project_root=project_root,
+            mcp_server_urls=urls,
+            mcp_server_tools=server_tools,
+            mcp_server_headers=server_headers,
+            **data,
+        )

@@ -149,16 +149,21 @@ Visual encoding in the output SVG:
 
 ---
 
-## Compare: Full DAG vs Executed Path
+## Executed Path Report
 
-The most useful view when debugging is seeing **what the agent could have run** versus **what it actually ran**.  
-Use `compare_mermaid()` or the `--compare` flag to get both diagrams in one Markdown document.
+The most useful saved Markdown artifact is usually the executed path from the
+latest run. Use `compare_mermaid()` or the `--compare` flag to generate a
+compact report with one Mermaid diagram. Pass `include_full_dag=True` when you
+need the full compiled DAG for deeper debugging.
 
 ```python
 await engine.run(my_input)
 
-# Returns a Markdown string — two mermaid blocks + legend
+# Returns a Markdown string — executed path + legend
 md = engine.compare_mermaid()
+
+# Optional: include the full compiled DAG too
+full_md = engine.compare_mermaid(include_full_dag=True)
 
 # Save it
 with open("viz.md", "w") as f:
@@ -168,28 +173,9 @@ with open("viz.md", "w") as f:
 The output looks like:
 
 ```
-# FlowForge — DAG vs Executed Path
+# FlowForge — Executed Path
 
-## 1. Full DAG Structure
-> Every node compiled from the annotations.
-
-```mermaid
-graph TD
-  global_main["global: MyAgent"]
-  main_flow["flow: main_flow"]
-  ingest["task: ingest"]
-  fetch_1_["step: fetch"]
-  transform["task: transform"]
-  clean_1_["step: clean"]
-
-  global_main --> main_flow
-  main_flow --> ingest
-  ingest --> fetch_1_
-  main_flow --> transform
-  transform --> clean_1_
-```
-
-## 2. Executed Path — Run `run-a3f8c1d2`
+## Run `run-a3f8c1d2`
 > Status: ✓ OK · Duration: 95 ms · Executed: 4 / 6 nodes
 >
 > - Colored nodes ran (dark = global/flow/task/step, red = error)
@@ -227,7 +213,7 @@ graph TD
 ```
 ```
 
-Open `viz.md` in **VS Code** (with the Markdown Preview), **GitHub**, or paste each mermaid block into [mermaid.live](https://mermaid.live).
+Open `viz.md` in **VS Code** (with the Markdown Preview), **GitHub**, or paste the Mermaid block into [mermaid.live](https://mermaid.live).
 
 ---
 
@@ -240,13 +226,16 @@ flowforge run agent.py -q "input" --trace
 # Print only the executed path as Mermaid
 flowforge run agent.py -q "input" --viz-mermaid
 
-# Print full DAG + executed path side by side
+# Print executed-path report
 flowforge run agent.py -q "input" --compare
 
-# Save the comparison to a Markdown file (recommended)
+# Save the executed-path report to a Markdown file (recommended)
 flowforge run agent.py -q "input" --compare-output viz.md
 
-# Combine: trace table + save comparison
+# Include the full DAG only when needed
+flowforge run agent.py -q "input" --compare-output viz.md --include-full-dag
+
+# Combine: trace table + save report
 flowforge run agent.py -q "input" --trace --compare-output viz.md
 
 # Render executed path to SVG (needs graphviz; falls back to .md)

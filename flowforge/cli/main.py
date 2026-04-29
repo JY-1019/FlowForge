@@ -41,7 +41,7 @@ def _find_agent_class(module):
     return None
 
 
-def _compile(agent_file: Path):
+def _compile(agent_file: Path, dynamic_options=None):
     """Load module, find agent class, compile DAG."""
     from flowforge import FlowForge
 
@@ -50,7 +50,7 @@ def _compile(agent_file: Path):
     if cls is None:
         console.print("[red]No @global_config class found in the file.[/red]")
         raise typer.Exit(1)
-    return FlowForge.compile(cls)
+    return FlowForge.compile(cls, dynamic_options=dynamic_options)
 
 
 @app.command()
@@ -134,8 +134,12 @@ def run(
     viz_output: Path = typer.Option(Path("run.svg"), "--viz-output", help="Subtree SVG output path"),
     viz_fmt: str = typer.Option("svg", "--viz-fmt", help="svg | png | pdf"),
     viz_mermaid: bool = typer.Option(False, "--viz-mermaid", help="Print executed-path Mermaid to stdout"),
-    compare: bool = typer.Option(False, "--compare", help="Print full DAG + executed path side by side"),
-    compare_output: Optional[Path] = typer.Option(None, "--compare-output", help="Save comparison to a .md file"),
+    compare: bool = typer.Option(False, "--compare", help="Print executed-path Mermaid report"),
+    compare_output: Optional[Path] = typer.Option(None, "--compare-output", help="Save executed-path Mermaid report to a .md file"),
+    include_full_dag: bool = typer.Option(False, "--include-full-dag", help="Include full DAG Mermaid in compare output"),
+    planning_mode: str = typer.Option("deterministic", "--planning-mode", help="deterministic | autonomous | hybrid"),
+    allow_dynamic: bool = typer.Option(False, "--allow-dynamic", help="Allow dynamic flow/tool generation for this run"),
+    dynamic_dir: Path = typer.Option(Path("flowforge/generated"), "--dynamic-dir", help="Directory for generated flow/tool files"),
 ) -> None:
     """Run the agent with a user query.
 
@@ -144,14 +148,26 @@ def run(
     --------
     flowforge run agent.py -q "hello" --trace
     flowforge run agent.py -q "hello" --viz-mermaid          # executed path only
-    flowforge run agent.py -q "hello" --compare              # full DAG + executed path
+    flowforge run agent.py -q "hello" --compare              # executed path report
     flowforge run agent.py -q "hello" --compare-output viz.md
+    flowforge run agent.py -q "hello" --compare-output viz.md --include-full-dag
     flowforge run agent.py -q "hello" --viz --viz-output run.svg
     """
-    engine = _compile(agent_file)
+    from flowforge import DynamicRunOptions
+
+    dynamic_options = DynamicRunOptions(
+        enabled=allow_dynamic,
+        project_root=str(agent_file.resolve().parent),
+        generated_dir=str(dynamic_dir),
+    )
+    engine = _compile(agent_file, dynamic_options=dynamic_options)
 
     async def _run():
-        result, run_trace = await engine.run_traced(query)
+        result, run_trace = await engine.run_traced(
+            query,
+            planning_mode=planning_mode,
+            dynamic_options=dynamic_options,
+        )
 
         console.print("[bold green]Result:[/bold green]")
         console.print(result)
@@ -167,12 +183,15 @@ def run(
             print(mmd)
 
         if compare or compare_output:
-            md = engine.compare_mermaid(run_trace)
+            md = engine.compare_mermaid(
+                run_trace,
+                include_full_dag=include_full_dag,
+            )
             if compare_output:
                 compare_output.write_text(md)
-                console.print(f"[green]✓ Comparison saved to {compare_output}[/green]")
+                console.print(f"[green]✓ Mermaid report saved to {compare_output}[/green]")
             else:
-                console.print("\n[bold]Full DAG vs Executed Path:[/bold]")
+                console.print("\n[bold]Executed Path:[/bold]")
                 print(md)
 
         if viz_run:
@@ -307,6 +326,85 @@ def docs(
         )
     except KeyboardInterrupt:
         pass
+
+
+skills_app = typer.Typer(
+    name="skills",
+    help="Manage vendored Anthropic Agent Skills (anthropics/skills).",
+    no_args_is_help=True,
+)
+app.add_typer(skills_app)
+
+
+@skills_app.command("list")
+def skills_list() -> None:
+    """Show vendored skills and the curated default bundle."""
+    from flowforge.skills import bundled_skill_names
+    from flowforge.skills.sync import DEFAULT_BUNDLED_SKILLS, UPSTREAM_REPO
+
+    vendored = set(bundled_skill_names())
+    default = set(DEFAULT_BUNDLED_SKILLS)
+    table = Table(title=f"Anthropic Agent Skills  ({UPSTREAM_REPO})")
+    table.add_column("name", style="cyan")
+    table.add_column("vendored", justify="center", style="green")
+    table.add_column("in default bundle", justify="center", style="magenta")
+
+    for name in sorted(vendored | default):
+        table.add_row(
+            name,
+            "✓" if name in vendored else "",
+            "✓" if name in default else "",
+        )
+    console.print(table)
+    if not vendored:
+        console.print(
+            "[dim]No skills vendored yet.  Run "
+            "`flowforge skills sync` to install the default bundle.[/dim]"
+        )
+
+
+@skills_app.command("sync")
+def skills_sync(
+    name: Optional[str] = typer.Argument(
+        None,
+        help=(
+            "Upstream skill name (folder under anthropics/skills/skills/). "
+            "Omit to vendor the curated default bundle."
+        ),
+    ),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Re-download even if already vendored."
+    ),
+    insecure: bool = typer.Option(
+        False,
+        "--insecure",
+        help="Disable TLS verification (e.g. behind the LG CNS proxy).",
+    ),
+) -> None:
+    """Download upstream Anthropic skills into the local bundle."""
+    import urllib.error
+
+    from flowforge.skills.sync import (
+        DEFAULT_BUNDLED_SKILLS,
+        sync_default_skills,
+        sync_skill,
+    )
+
+    verify_ssl = not insecure
+    try:
+        if name is None:
+            console.print(
+                "[bold]Syncing default bundle:[/bold] "
+                f"{', '.join(DEFAULT_BUNDLED_SKILLS)}"
+            )
+            for path in sync_default_skills(force=force, verify_ssl=verify_ssl):
+                console.print(f"  [green]✓[/green] {path}")
+        else:
+            path = sync_skill(name, force=force, verify_ssl=verify_ssl)
+            console.print(f"[green]✓[/green] {path}")
+    except (FileNotFoundError, urllib.error.URLError, OSError) as exc:
+        console.print(f"[red]✗ sync failed: {exc}[/red]")
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

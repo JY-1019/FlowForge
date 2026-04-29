@@ -145,10 +145,10 @@ class ToolExecutor:
             seen_urls.add(url)
 
             if url not in self._mcp_initialized:
-                await self._mcp_initialize(url)
+                await self._mcp_initialize(url, config.headers)
 
             try:
-                data = await self._mcp_rpc(url, "tools/list", {})
+                data = await self._mcp_rpc(url, "tools/list", {}, config.headers)
                 tools = data.get("tools", [])
                 for tool in tools:
                     name = tool.get("name", "")
@@ -174,11 +174,16 @@ class ToolExecutor:
         self._mcp_request_id += 1
         return self._mcp_request_id
 
-    def _mcp_headers(self, url: str) -> dict[str, str]:
+    def _mcp_headers(
+        self,
+        url: str,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         headers = {
             "Content-Type": "application/json",
             "Accept": _MCP_ACCEPT,
         }
+        headers.update(extra_headers or {})
         session_id = self._mcp_sessions.get(url)
         if session_id:
             headers["Mcp-Session-Id"] = session_id
@@ -213,7 +218,11 @@ class ToolExecutor:
         return data.get("result", {})
 
     async def _mcp_rpc(
-        self, url: str, method: str, params: dict[str, Any],
+        self,
+        url: str,
+        method: str,
+        params: dict[str, Any],
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Send a single JSON-RPC request and return ``result``."""
         payload = {
@@ -226,7 +235,7 @@ class ToolExecutor:
 
         client = await self._get_client()
         resp = await client.post(
-            url, json=payload, headers=self._mcp_headers(url),
+            url, json=payload, headers=self._mcp_headers(url, headers),
         )
         resp.raise_for_status()
         result = self._parse_mcp_response(resp)
@@ -237,12 +246,13 @@ class ToolExecutor:
 
         return result
 
-    async def _mcp_initialize(self, url: str) -> None:
+    async def _mcp_initialize(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         """Perform the MCP initialize handshake + initialized notification."""
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": _MCP_ACCEPT,
-        }
+        base_headers = self._mcp_headers(url, headers)
 
         # 1) initialize
         init_payload = {
@@ -257,7 +267,9 @@ class ToolExecutor:
         }
 
         client = await self._get_client()
-        resp = await client.post(url, json=init_payload, headers=headers, timeout=10.0)
+        resp = await client.post(
+            url, json=init_payload, headers=base_headers, timeout=10.0,
+        )
         resp.raise_for_status()
 
         sid = resp.headers.get("mcp-session-id")
@@ -266,7 +278,7 @@ class ToolExecutor:
 
         # 2) notifications/initialized (no id → notification, no response expected)
         notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-        notif_headers = dict(headers)
+        notif_headers = dict(base_headers)
         if sid:
             notif_headers["Mcp-Session-Id"] = sid
         try:
@@ -287,12 +299,12 @@ class ToolExecutor:
         url = config.url
 
         if url not in self._mcp_initialized:
-            await self._mcp_initialize(url)
+            await self._mcp_initialize(url, config.headers)
 
         result = await self._mcp_rpc(url, "tools/call", {
             "name": tool_name,
             "arguments": tool_input,
-        })
+        }, config.headers)
 
         # Extract text from MCP content blocks.
         content = result.get("content", [])
