@@ -23,6 +23,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import logging
+import re
 import sys
 import tempfile
 import textwrap
@@ -357,6 +358,16 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
         `@step` and include `<tool_name>` in the `ctx.call_llm(...)` prompt.
         A tool listed only in "Available tools" but never referenced in
         generated code is not considered used.
+    13b. Tool and Skill names MUST be copied verbatim from the
+        "Available tools" / "Available Agent Skills" lists in the user
+        message. Do NOT paraphrase, translate, or invent new names — every
+        `<name>` marker, `tools=["name"]` literal, and `ctx.call_tool("name",
+        ...)` call is checked against the registered registry, and unknown
+        names trigger a compile-retry. Pay special attention: the flow's own
+        name is not a Skill name. If you need design guidance, look in the
+        Available Agent Skills list for an entry whose description matches
+        and use that exact name (e.g. ``frontend-design``) rather than
+        guessing a name derived from the flow purpose.
 
     TOOL USAGE — TWO METHODS:
     There are two ways to use available tools in generated code:
@@ -402,11 +413,54 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
         markdown_write, chart_create, pdf_read_text) over raw `open()` calls.
         These tools enforce project_root sandboxing.
     17. For web requests, ALWAYS use the `web_fetch_url` tool instead of
-        writing urllib/httpx/requests code directly.
+        writing urllib/httpx/requests code directly.  This rule is
+        ABSOLUTE — NEVER ask the LLM via ``ctx.call_llm`` to "fetch the
+        page" / "list the top stories on <url>" / "summarise the news at
+        <url>" without first calling ``ctx.call_tool("web_fetch_url",
+        url=...)`` and passing the resulting body to the LLM.  The model
+        has NO direct internet access; if you skip the fetch step it
+        WILL fabricate content that looks plausible but does not exist
+        on the live page.  Pattern:
+        ```python
+        @step(order=1, prompt="Fetch the live HTML",
+              tools=["web_fetch_url"])
+        async def fetch(ctx):
+            result = await ctx.call_tool("web_fetch_url",
+                                         url=ctx.input["source_url"],
+                                         max_chars=50000)
+            if not result.get("ok"):
+                raise RuntimeError(f"fetch failed: {{{{result.get('error')}}}}")
+            if result.get("truncated"):
+                raise RuntimeError("web_fetch_url returned truncated content")
+            ctx.shared_data["raw_html"] = result["body"]
+            return {{"ok": True, "bytes": len(result["body"])}}
+        ```
+        For news/listing extraction, use a large ``max_chars`` (e.g.
+        50000) or ``max_chars=0``.  If the fetched body does not contain
+        real items, RAISE.  Do NOT fabricate placeholder titles like
+        "HTML unavailable", "could not extract", or "page truncated".
     18. For Python package installation, use `pip_install` when the dependency
         policy allows it. For project package-manager installs such as
         `npm install`, use `shell_install_dependency` when that shell mode is
-        available.
+        available.  Several builtin tools require native Python packages
+        that are NOT pre-installed (e.g. ``docx_create`` needs
+        ``python-docx``, ``pptx_create`` needs ``python-pptx``,
+        ``pdf_read_text`` needs ``pypdf``).  When the planned flow uses
+        any of these tools, emit a ``pip_install`` step at ``order=1``
+        BEFORE the consumer step, e.g.
+        ```python
+        @step(order=1, prompt="Install python-docx for the docx_create tool",
+              tools=["pip_install"])
+        async def install_deps(ctx):
+            result = await ctx.call_tool("pip_install",
+                                         packages="python-docx")
+            if not result.get("ok"):
+                raise RuntimeError(f"pip_install failed: {{{{result.get('error')}}}}")
+            return {{"ok": True}}
+        ```
+        Skipping this step causes the consumer tool to return an
+        ``ImportError``-style failure that the self-repair loop cannot
+        easily recover from.
     19. Use builtin runtime tools (python_import_check, shell_*) only when the
         generated flow's actual job needs them. Do NOT add project inspection
         or test-running steps unless explicitly requested.
@@ -419,8 +473,244 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
     21. Do NOT wrap deterministic file writes, package installation, or build
         commands in one large `ctx.call_llm()` call when direct tools are
         available. Split them into direct `ctx.call_tool()` steps.
+    21b. MULTI-PHASE DECOMPOSITION: when the user request involves multiple
+        distinct phases (fetch source data → analyse → generate artefacts →
+        install/build → verify), produce one `@step` per phase rather than
+        cramming them into a single mega-step. Specifically:
+          * HARD RULE — NEVER ask the LLM to return all project files at
+            once as a single JSON object/array (e.g. ``{{"files": [{{"path":
+            ..., "content": ...}}, ...]}}``).  This anti-pattern is BANNED
+            because (a) escaping multi-line HTML/CSS/JS inside JSON strings
+            is error-prone, (b) the response gets cut by ``max_tokens`` and
+            yields truncated stubs, (c) LLMs reliably emit short
+            placeholder content under JSON pressure (empty ``<body></body>``,
+            one-line stylesheets, dependency-less ``package.json``).  If
+            you generate this pattern, the run will produce empty stubs —
+            do not generate it.
+          * REQUIRED PATTERN — one `@step` per file (or per tightly-coupled
+            pair like ``index.html`` + ``main.css``).  Each step calls
+            ``ctx.call_llm(...)`` to author ONLY THAT file's full content
+            as plain text (no JSON wrapper), then immediately calls
+            ``ctx.call_tool("files_write_text", path=full_path,
+            content=result)`` to persist it.  Use ``ctx.previous_results``
+            to thread the design specification into each authoring step.
+          * One `ctx.call_llm(...)` should focus on a single responsibility
+            (e.g. "design the layout structure" OR "write the full
+            index.html for the homepage" OR "write the full main.css").
+            Each authored file should be a substantial artefact, not a
+            stub.
+          * Always include a final verification step that reads back at
+            least the entrypoint file (e.g. `index.html`) via
+            `ctx.call_tool("files_read_text", ...)` and asserts the body is
+            non-trivial (rough size or required-substring check).  An empty
+            ``<body></body>`` stub must fail this check.
+          * For binary/document artefacts such as ``.docx``, ``.pptx``,
+            ``.pdf``, images, and charts, do NOT use ``files_read_text``.
+            Verify via the creator tool's returned ``size`` / count fields
+            or ``files_list_dir`` on the parent directory, and raise on
+            missing/tiny files instead of returning warning notes as success.
+          * Reserve `ctx.call_llm()` for reasoning, design choices, and
+            content authoring — not for orchestration that direct tool
+            calls already handle deterministically.
     22. If a tool returns structured JSON needed by downstream flows, instruct
         the model to return ONLY that JSON payload without extra commentary
+    21d. ``ctx.input`` SEMANTICS — read carefully, this trips up almost
+         every generated flow:
+           * For step ``order=1`` only, ``ctx.input`` is the task's original
+             input — but the TYPE is NOT guaranteed to be a dict.  It may be
+             a ``str`` (raw user request), a ``dict``, a Pydantic model, or
+             ``None``.  NEVER call ``ctx.input.get(...)`` blindly — that
+             raises ``AttributeError: 'str' object has no attribute 'get'``
+             when the user passes ``engine.run("some question")``.  Always
+             coerce defensively:
+             ```python
+             raw = ctx.input
+             if hasattr(raw, "model_dump"):
+                 raw = raw.model_dump()
+             params = raw if isinstance(raw, dict) else {{}}
+             num = params.get("num_papers", 3)
+             ```
+             Use sensible defaults (e.g. 3 papers, default category list)
+             when the field is absent — DO NOT fail just because the user
+             passed a free-form string.
+           * For step ``order=2`` and later, ``ctx.input`` is **the previous
+             step's return value** — NOT the original task input.
+         If a downstream step needs an original input field (e.g.
+         ``project_dir``, ``target_url``, ``query``), DO NOT read it from
+         ``ctx.input``.  Instead use:
+           * ``ctx.task_input["project_dir"]`` — original task input
+           * ``ctx.flow_input["project_dir"]`` — original flow input
+         Both are stable across all steps.  Apply the same defensive
+         coercion to ``ctx.task_input`` / ``ctx.flow_input`` — they may also
+         be a string or model.  Alternatively, the producer step may
+         explicitly thread the field forward:
+         ``return {{"project_dir": ctx.task_input["project_dir"], ...}}``.
+         Forgetting this rule is the leading cause of
+         ``KeyError: 'project_dir'`` (or similar) on parallel write/install
+         steps.
+    21e. PREFER ``ctx.shared_data`` FOR DATA THREADING — because input/output
+         types between dynamically generated steps and flows are NOT strictly
+         enforced (no shared schema), the safest way to pass data forward is
+         the run-wide mutable dict ``ctx.shared_data``.  USE IT FIRST,
+         BEFORE relying on ``ctx.input``, ``ctx.previous_results``, or return
+         chaining.  Rules:
+           * The first step of the dynamic flow MUST extract any usable
+             parameters from ``ctx.input`` / ``ctx.task_input`` /
+             ``ctx.flow_input`` defensively (string, dict, model, or None)
+             and write the normalised values into ``ctx.shared_data`` with
+             descriptive keys.  Example:
+             ```python
+             async def init(ctx):
+                 raw = ctx.input
+                 if hasattr(raw, "model_dump"):
+                     raw = raw.model_dump()
+                 params = raw if isinstance(raw, dict) else {{}}
+                 ctx.shared_data["num_papers"] = int(params.get("num_papers", 3))
+                 ctx.shared_data["query"] = params.get("query", "cs.AI")
+                 return {{"ok": True}}
+             ```
+           * Every subsequent step reads inputs from ``ctx.shared_data`` with
+             explicit defaults — NEVER assume the previous step returned the
+             exact dict shape you need:
+             ```python
+             num = ctx.shared_data.get("num_papers", 3)
+             papers = ctx.shared_data.get("papers", [])
+             ```
+           * Each step writes its primary output back into ``ctx.shared_data``
+             under a stable key (e.g. ``papers``, ``query_url``,
+             ``raw_response``, ``digest``) so downstream flows generated
+             later can also read it.  The step's ``return`` value remains a
+             small status dict (e.g. ``{{"ok": True, "count": n}}``).
+           * ``ctx.shared_data`` survives across flow boundaries within a
+             single ``engine.run()``, so a dynamic upstream fetch flow can
+             populate keys consumed by a downstream static pipeline.  When
+             chaining into an existing pipeline whose first step expects a
+             specific payload shape, the LAST step of the dynamic flow MUST
+             return that exact shape (so it becomes ``ctx.input`` for the
+             pipeline's first step) AND also write it to
+             ``ctx.shared_data`` for redundancy.
+    21f. RAISE ON TOOL FAILURE — every builtin tool returns
+         ``{{"ok": True, ...}}`` on success and ``{{"ok": False, "error": ...}}``
+         on failure.  The runner's self-repair loop only triggers on
+         exceptions, so generated steps MUST convert ok=False into a
+         RuntimeError.  Pattern, REQUIRED after every write/install/shell/
+         build tool call (and recommended for fetch tools):
+         ```python
+         result = await ctx.call_tool("files_write_text", path=p, content=c)
+         if not result.get("ok"):
+             raise RuntimeError(
+                 f"files_write_text failed for {{{{p}}}}: {{{{result.get('error')}}}}"
+             )
+         ```
+         This is what lets a generated flow self-correct when, for example,
+         ``files_write_text`` refuses an empty content payload because the
+         upstream design step returned a structural spec instead of the
+         actual file body.  Without the raise, the failure is silent and
+         the project ships empty files.
+    21g. NON-EMPTY CONTENT GUARD — before EVERY ``files_write_text`` call,
+         the generated step MUST verify the content payload is a non-empty,
+         non-trivial string and RAISE if it is not.  This is the single most
+         important guard against the "empty stubs" anti-pattern.  Required
+         pattern at every file-write site:
+         ```python
+         body = (await ctx.call_llm(authoring_prompt) or "").strip()
+         if len(body) < 50:
+             raise RuntimeError(
+                 f"author step produced empty/trivial content for {{{{path}}}} "
+                 f"(len={{{{len(body)}}}}); refusing to write"
+             )
+         result = await ctx.call_tool(
+             "files_write_text",
+             path=f"{{{{project_dir}}}}/{{{{path}}}}",
+             content=body,
+         )
+         if not result.get("ok"):
+             raise RuntimeError(
+                 f"files_write_text failed for {{{{path}}}}: "
+                 f"{{{{result.get('error')}}}}"
+             )
+         ```
+         Adjust the minimum length to fit the file type (e.g. 200 for HTML,
+         50 for package.json, 100 for CSS).  An empty `<body></body>`,
+         a stylesheet with no rules, or a `package.json` with no
+         dependencies all violate this rule and MUST raise — the
+         self-repair loop will then regenerate the flow with this exact
+         error as feedback.  Authoring prompts MUST also explicitly
+         demand the FULL FILE BODY ("Return ONLY the complete file
+         content as plain text, no markdown fences, no commentary, no
+         JSON wrapper — the response is written to disk verbatim.").
+    21c. TOOL RESULTS ARE ALWAYS DICTS — every ``ctx.call_tool(...)`` returns
+         a Python ``dict``.  Read the tool's "Returns" line in the catalog
+         and extract the text field by key BEFORE storing or slicing.
+
+         WRONG (causes ``KeyError: slice(None, N, None)`` at runtime):
+         ```python
+         async def fetch(ctx):
+             result = await ctx.call_tool("web_fetch_url", url="...")
+             return {{"raw_html": result}}              # storing the dict
+
+         async def analyse(ctx):
+             html = ctx.previous_results.get(1).get("raw_html", "")
+             return await ctx.call_llm(f"... {{html[:15000]}}")  # slices a dict
+         ```
+
+         RIGHT — extract immediately at the producer step:
+         ```python
+         async def fetch(ctx):
+             result = await ctx.call_tool("web_fetch_url", url="...")
+             body = result.get("body", "") if result.get("ok") else ""
+             return {{"raw_html": body}}                # storing a string
+
+         async def analyse(ctx):
+             html = ctx.previous_results.get(1).get("raw_html", "")
+             return await ctx.call_llm(f"... {{html[:15000]}}")  # slices a str
+         ```
+
+         Common tool → key mapping:
+           * ``web_fetch_url``        → ``result["body"]``
+           * ``files_read_text``      → ``result["content"]``
+           * ``shell_*``              → ``result["stdout"]`` / ``result["stderr"]``
+           * ``files_list_dir``       → ``result["entries"]``
+         Never ``str(result)``, never f-string a raw dict, never slice the
+         raw result.
+    22a. JSON FROM ``ctx.call_llm`` — FlowForge automatically strips markdown
+         fences and parses JSON-looking LLM responses.  A prompt asking for
+         ``ONLY valid JSON`` may therefore return a Python ``dict`` or
+         ``list`` rather than a string.  NEVER blindly call ``.strip()``,
+         ``json.loads()``, or regex functions on a ``ctx.call_llm`` result.
+         First branch on the runtime type:
+         ```python
+         raw = await ctx.call_llm("Output ONLY valid JSON ...")
+         if isinstance(raw, (dict, list)):
+             data = raw
+         elif isinstance(raw, str):
+             text = raw.strip()
+             data = json.loads(text)
+         else:
+             raise RuntimeError(f"unexpected LLM response type: {{type(raw).__name__}}")
+         ```
+         When a step relies on a downstream step parsing textual JSON
+         manually, BOTH sides must be hardened:
+           * The producing step's prompt MUST end with an instruction such as
+             "Output ONLY valid JSON. No prose, no preamble, no markdown
+             fences. Your entire response must parse with ``json.loads``."
+           * The consuming step MUST robustly parse the response: strip
+             leading/trailing whitespace, strip markdown fences
+             ("```json" / "```"), then ``json.loads``.  On parse failure the
+             step MUST raise (``raise ValueError(f"...")``) — NEVER swallow
+             the error with ``except: data = {{}}``.  A silent fallback to an
+             empty dict masks bugs and produces "0 files written" runs.
+           * Prefer using ``response_format`` semantics implicitly by passing
+             a Pydantic ``output_schema=`` to ``ctx.call_llm`` whenever the
+             output is structured.  If ``output_schema`` is set, the response
+             is already a parsed object — do NOT json.loads it again.
+    22b. PATH AND DIRECTORY THREADING — when the input dict contains a
+         project directory field (commonly named ``project_dir``,
+         ``project_root``, ``output_dir``, or similar), use that exact key
+         from ``ctx.input`` in EVERY step that writes files, installs deps,
+         or runs shell commands.  Do NOT invent a different default like
+         ``"./clone_project"`` or ``"project"``.  Read the field once at the
+         top of each consuming step and pass it through.
     23. When you need earlier step outputs, use `ctx.previous_results` or
         `ctx.step_results` instead of inventing new context fields
     24. Generate ONLY the missing flow named {flow_name}; do NOT recreate
@@ -436,8 +726,10 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
            `await ctx.call_tool("mcp_start_server", server_name="...")`.
         b. Register the server's known tool names with
            `await ctx.call_tool("mcp_register_server", server_name="...",
-           tool_names="tool_a,tool_b")`. If only a remote/local URL is
-           declared, skip start and register directly.
+           tool_names="tool_a,tool_b")`. This registration tool auto-starts
+           declared server commands by default if the endpoint is not already
+           reachable. If only a remote/local URL is declared, skip start and
+           register directly.
         c. Later steps can scope those newly registered tool names with
            `tools=["tool_a"]` and use them through
            `ctx.call_llm("... <tool_a>")`.
@@ -492,6 +784,73 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
                 )
     ```
 
+    FILE-AUTHORING TEMPLATE (one step per file, no JSON wrapper, hard guards):
+    ```python
+    from flowforge import flow, task, step
+
+    @flow(name="{flow_name}", prompt="{flow_prompt}",
+          tools=["files_write_text", "files_read_text"])
+    class {class_name}:
+        @task(name="materialise",
+              prompt="Author each project file as plain text and write it",
+              tools=["files_write_text", "files_read_text"])
+        class Materialise:
+            @step(order=1, prompt="Resolve project_dir and shared params")
+            async def init(ctx):
+                raw = ctx.input
+                if hasattr(raw, "model_dump"):
+                    raw = raw.model_dump()
+                params = raw if isinstance(raw, dict) else {{}}
+                ctx.shared_data["project_dir"] = params.get(
+                    "project_dir", "./out_project"
+                )
+                return {{"ok": True}}
+
+            @step(order=2, prompt="Author the full index.html body as plain text")
+            async def write_index(ctx):
+                project_dir = ctx.shared_data["project_dir"]
+                body = (await ctx.call_llm(
+                    "Write the COMPLETE index.html for the homepage. "
+                    "Return ONLY the file body as plain text — no markdown "
+                    "fences, no commentary, no JSON wrapper. The response "
+                    "is written to disk verbatim."
+                ) or "").strip()
+                if len(body) < 200:
+                    raise RuntimeError(
+                        f"index.html author returned trivial content "
+                        f"(len={{{{len(body)}}}})"
+                    )
+                result = await ctx.call_tool(
+                    "files_write_text",
+                    path=f"{{{{project_dir}}}}/index.html",
+                    content=body,
+                )
+                if not result.get("ok"):
+                    raise RuntimeError(
+                        f"write index.html failed: {{{{result.get('error')}}}}"
+                    )
+                ctx.shared_data["index_html_len"] = len(body)
+                return {{"ok": True, "path": "index.html", "bytes": len(body)}}
+
+            @step(order=3, prompt="Verify the entrypoint file is non-trivial")
+            async def verify(ctx):
+                project_dir = ctx.shared_data["project_dir"]
+                read = await ctx.call_tool(
+                    "files_read_text",
+                    path=f"{{{{project_dir}}}}/index.html",
+                )
+                if not read.get("ok"):
+                    raise RuntimeError(
+                        f"verify read failed: {{{{read.get('error')}}}}"
+                    )
+                content = read.get("content", "")
+                if "<body></body>" in content or len(content) < 200:
+                    raise RuntimeError(
+                        f"index.html appears to be a stub (len={{{{len(content)}}}})"
+                    )
+                return {{"ok": True, "verified": True}}
+    ```
+
     COMPLEX TEMPLATE (child flows + tasks):
     ```python
     from flowforge import flow, task, step
@@ -522,7 +881,8 @@ _CODEGEN_SYSTEM = textwrap.dedent("""\
 """)
 
 _FIX_SYSTEM = textwrap.dedent("""\
-    The following FlowForge code failed to compile.  Fix the error and
+    The following FlowForge code failed during compile-time validation or
+    runtime execution.  Fix the error and
     return ONLY the corrected Python code (no markdown, no explanation).
 
     Error:
@@ -543,6 +903,157 @@ _TOOL_CODEGEN_SYSTEM = textwrap.dedent("""\
     4. Define a function named {tool_name} with typed parameters.
     5. Return JSON-serialisable values only.
     6. Generate ONLY Python code, no markdown fences, no explanation.
+""")
+
+
+# Plan-driven code synthesis (Phase 4).  The plan + capability selection
+# eliminate most of the freedom from `_CODEGEN_SYSTEM`, so this template is
+# focused on translation rules rather than design guidance.
+_PLAN_SYNTHESIS_SYSTEM = textwrap.dedent("""\
+    You are FlowForge's code synthesiser.  A workflow plan and per-step
+    capability decision are provided in the user message — your sole job
+    is to translate them into FlowForge decorator code.  Do NOT invent
+    new steps, rename them, change orders, or pick different tools.
+
+    REQUIRED STRUCTURE — follow this skeleton EXACTLY.  ``@flow`` and
+    ``@task`` decorate CLASSES, never functions.  ``@step`` decorates
+    nested ``async def`` functions.  ``@flow`` and ``@task`` BOTH require
+    keyword-only ``name=`` and ``prompt=``; there is no ``model=`` argument
+    on any decorator.  Skeleton:
+    ```python
+    from flowforge import flow, task, step
+    import json
+
+    @flow(name="<flow_name from plan>", prompt="<flow_prompt from plan>")
+    class <TopClass>:
+        @task(name="<task_name>", prompt="<task_prompt>")
+        class <TaskClass>:
+            @step(order=1, prompt="<step1.purpose>", tools=[...])
+            async def <step1.name>(ctx):
+                ...
+                return {"...": ...}
+
+            @step(order=2, prompt="<step2.purpose>")
+            async def <step2.name>(ctx):
+                ...
+    ```
+    HARD RULES (violations cause an immediate compile failure that wastes
+    a retry attempt):
+    - NEVER write ``@flow`` or ``@task`` on an ``async def``.  They MUST
+      decorate ``class`` blocks.
+    - NEVER omit ``prompt=`` on ``@flow`` or ``@task``.  The plan provides
+      both ``flow_prompt`` and ``task_prompt`` — use them verbatim.
+    - NEVER pass ``model=``, ``llm_config=``, or any unknown kwarg to a
+      FlowForge decorator.  Only the documented kwargs are allowed.
+    - NEVER repeat tools=[] on the @flow/@task — declare ``tools=[...]``
+      ONLY on each ``@step`` that needs a tool, copying the names from
+      the capability decision verbatim.
+    - The class names must be valid Python identifiers (PascalCase OK).
+
+    OUTPUT
+    - One ``@flow`` class named exactly as ``top_class``.  Its decorator
+      uses ``name`` and ``prompt`` from the plan.
+    - One ``@task`` inside the flow with ``name=task_name`` and
+      ``prompt=task_prompt``.
+    - One ``@step`` per planned step, in the given ``order``.  Use the
+      step's ``purpose`` as the step ``prompt`` (rephrase only for clarity).
+    - All classes at module level.  Step functions are ``async def name(ctx):``.
+
+    TOOL REFERENCES (per the capability decision)
+    - mode='llm_only'      → step body calls ``await ctx.call_llm(...)`` with
+                              instructions; do NOT add tools=[...] to the
+                              decorator.
+    - mode='builtin_tool'  → declare ``tools=[...]`` on the @step with the
+                              capability's tool_names.  When the work is
+                              deterministic, call the tool directly via
+                              ``await ctx.call_tool("name", **kwargs)``.
+                              When the LLM needs to decide arguments, use
+                              ``await ctx.call_llm("instruction <name>")``.
+    - mode='claude_skill' / 'agent_skill' →
+                              declare ``tools=[...]`` and reference the
+                              skill name with ``<name>`` inside a
+                              ``ctx.call_llm(...)`` instruction.  Skills are
+                              prompt-only — never use ``ctx.call_tool`` for
+                              them.
+    - mode='mcp'           → emit a setup step at the very start of the
+                              flow that calls
+                              ``ctx.call_tool("mcp_register_server",
+                              server_name="<mcp_server_name>",
+                              tool_names="<comma-separated tool_names>")``.
+                              In the consuming step, declare ``tools=[...]``
+                              with the MCP tool_names and call them through
+                              ``ctx.call_llm("instruction <tool_name>")``
+                              (LLM-mediated) or ``ctx.call_tool`` (direct).
+
+    BRANCH DISPATCH
+    - When a step's plan entry has a ``branch``: emit
+      ``@step(order=N, prompt=..., condition=BranchCondition(field="X",
+      enum=[...]), branches={{"value": target_step_func, ...}},
+      fallback=target_step_func)`` and import ``BranchCondition`` from
+      ``flowforge``.  ``target_step_func`` is the bare async function for
+      a step defined later in the same task.
+
+    HARD RULES
+    - Do NOT create any tool / skill / MCP names that are not listed in
+      the capability decision.  Names must be copied verbatim.
+    - Do NOT recreate existing flows.  Generate ONLY the missing flow.
+    - Do NOT use ``@global_config``.
+    - Step functions return JSON-serialisable dicts.
+    - When the plan declares a downstream output contract, the FINAL
+      step's return value MUST match that JSON Schema's top-level keys.
+    - Use ``ctx.previous_results.get(<order>)`` to read upstream output
+      (use the integer order, not a name).
+    - ``ctx.input`` changes after every step.  For step order > 1, NEVER
+      read stable request fields such as ``project_dir``, ``project_root``,
+      ``target_url``, ``reference_url``, ``project_name``, or ``request``
+      from ``ctx.input``.  Read them from ``ctx.task_input``,
+      ``ctx.flow_input``, or values normalised into ``ctx.shared_data`` by
+      the first step.
+    - The first step should normalise any dict/model/string input into
+      ``ctx.shared_data``.  Later steps should use ``ctx.shared_data`` with
+      explicit defaults for cross-step fields.
+    - Every builtin tool returns a dict.  After deterministic tool calls
+      that affect files, installs, builds, shells, or fetches, check
+      ``result.get("ok")`` and raise ``RuntimeError`` on failure.  Silent
+      ``ok=False`` results are bugs.
+    - For ``web_fetch_url`` used to extract page listings or article bodies,
+      pass ``max_chars=50000`` or ``max_chars=0``.  If the response is
+      truncated or lacks the required real data, raise ``RuntimeError``.
+      Never return placeholder records saying the HTML was unavailable,
+      truncated, empty, or impossible to parse.
+    - ``ctx.call_llm(...)`` may return parsed JSON as a Python ``dict`` or
+      ``list`` when the model responds with valid JSON, even without an
+      explicit output schema.  Do NOT blindly call string methods
+      (``.strip()``, regex search, ``json.loads``) on the result.  Always
+      handle ``dict`` / ``list`` first, then parse strings only when the
+      result is a string.
+
+    FILE / FRONTEND PROJECT RULES
+    - NEVER ask the LLM for all project files as one JSON object, file map,
+      or array.  Author one substantial file at a time as plain text, or
+      use a separate author step and write step per file when the selected
+      capability mode is prompt-only.
+    - Do NOT swallow JSON parse failures with ``except: data = {}`` or
+      ``except: files = []``.  Raise with the parse error so runtime repair
+      can regenerate the code.
+    - Do NOT substitute fallback stub file contents.  If an authoring step
+      returns empty/trivial content, raise before writing.  Empty
+      ``<body></body>``, one-line CSS, placeholder JavaScript, and minimal
+      package.json files are failures, not defaults.
+    - Before every ``files_write_text`` call, verify the content is a
+      non-empty string with a file-appropriate minimum length.  After the
+      call, check ``ok`` and raise on failure.
+    - File-producing workflows must include a verification step that uses
+      ``files_read_text`` to read back at least the entrypoint file and
+      assert it is non-trivial.  Clone-coding/build workflows should also
+      verify build output after install/build.
+    - Binary/document artefacts such as ``.docx``, ``.pptx``, ``.pdf``,
+      images, and charts MUST NOT be verified with ``files_read_text``.
+      Use the creator tool's returned ``size`` / count fields and, when
+      needed, ``files_list_dir`` on the parent directory to confirm the
+      file exists and has a non-trivial byte size.  Raise on missing or
+      tiny files; do not return warning notes as success.
+    - Generate ONLY the Python code — no markdown fences, no narration.
 """)
 
 
@@ -572,10 +1083,19 @@ class DynamicFlowGenerator:
         self._docs = docs if docs is not None else {}
         self._tool_configs = tool_configs or []
         self._dynamic_options = dynamic_options
+        # Cache: (query_str, flow_signature) -> gap_analysis result.
+        # The flow signature changes whenever flows are added or their docs
+        # change, which correctly invalidates a cached "covered=true" result.
+        self._gap_cache: dict[tuple[str, str], dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    # Truncation budgets for the gap-analysis prompt.  These keep the
+    # request token cost bounded even on projects with hundreds of flows.
+    _GAP_PER_FLOW_MAX_CHARS = 240
+    _GAP_FLOWS_TOTAL_MAX_CHARS = 4000
 
     async def analyse_gap(self, user_query: str | Any) -> dict[str, Any]:
         """Check if the user query is covered by existing flows.
@@ -589,20 +1109,38 @@ class DynamicFlowGenerator:
 
         query_str = str(user_query)
 
-        # Build a summary of existing flows for the LLM.
-        flow_summaries: list[str] = []
+        # Build a summary of existing flows for the LLM, with per-entry and
+        # total length caps so the prompt cost stays bounded.
+        flow_entries: list[str] = []
         for node in self._dag.get_all_nodes():
             if node.type != NodeType.FLOW:
                 continue
             doc = self._docs.get(node.id)
             summary = getattr(doc, "summary", "") if doc else ""
             prompt_text = getattr(node.meta, "prompt", "")
-            flow_summaries.append(
+            entry = (
                 f"- {node.id}: {prompt_text}"
                 + (f" (doc: {summary})" if summary else "")
             )
+            if len(entry) > self._GAP_PER_FLOW_MAX_CHARS:
+                entry = entry[: self._GAP_PER_FLOW_MAX_CHARS - 1].rstrip() + "…"
+            flow_entries.append(entry)
 
-        flows_text = "\n".join(flow_summaries) if flow_summaries else "(no flows)"
+        flow_signature_basis = "\n".join(flow_entries)
+        flows_text = flow_signature_basis if flow_entries else "(no flows)"
+        if len(flows_text) > self._GAP_FLOWS_TOTAL_MAX_CHARS:
+            flows_text = (
+                flows_text[: self._GAP_FLOWS_TOTAL_MAX_CHARS].rstrip()
+                + "\n[…flow list truncated by FlowForge gap-analysis budget]"
+            )
+
+        # Cache check: same query against the same flow set short-circuits
+        # the LLM round-trip entirely.
+        cache_key = (query_str, flow_signature_basis)
+        cached = self._gap_cache.get(cache_key)
+        if cached is not None:
+            logger.info("gap analysis cache hit for query (%d chars)", len(query_str))
+            return dict(cached)
 
         user_prompt = (
             f"User query: {query_str}\n\n"
@@ -636,14 +1174,23 @@ class DynamicFlowGenerator:
             },
         }
 
-        result = await call_with_tool(
-            prompt=user_prompt,
-            tool_schema=tool_schema,
-            llm_config=self._llm_config,
-            system_prompt=_GAP_ANALYSIS_SYSTEM,
-            max_tokens=512,
-        )
+        try:
+            result = await call_with_tool(
+                prompt=user_prompt,
+                tool_schema=tool_schema,
+                llm_config=self._llm_config,
+                system_prompt=_GAP_ANALYSIS_SYSTEM,
+                max_tokens=512,
+            )
+        except Exception as exc:
+            logger.warning(
+                "gap analysis LLM failed; using heuristic gap analysis: %s",
+                exc,
+            )
+            result = _heuristic_gap_analysis(query_str, str(exc))
         logger.info("gap analysis result: %s", result)
+        if isinstance(result, dict):
+            self._gap_cache[cache_key] = dict(result)
         return result
 
     async def generate_flow_code(
@@ -745,6 +1292,199 @@ class DynamicFlowGenerator:
         # Strip markdown fences if the LLM included them.
         code = _strip_markdown_fences(str(code))
         return code
+
+    # ------------------------------------------------------------------
+    # Plan-driven synthesis (Phase 4 of the dynamic pipeline)
+    # ------------------------------------------------------------------
+
+    async def generate_flow_code_from_plan(
+        self,
+        *,
+        plan: Any,
+        selection: Any,
+        downstream_contract: dict[str, Any] | None = None,
+        downstream_flow_name: str | None = None,
+        project_context: str | None = None,
+    ) -> str:
+        """Synthesise FlowForge code from a plan + capability decision.
+
+        Unlike :meth:`generate_flow_code`, the LLM is told *what* every
+        step must do (plan) and *which* capability it must use
+        (selection).  The system prompt focuses purely on translation
+        rules, which keeps the prompt small and the failure modes narrow.
+        """
+        from flowforge.execution.llm import call_llm_api
+        import json
+
+        plan_text = _format_plan_for_synthesis(plan)
+        capability_text = _format_selection_for_synthesis(selection)
+
+        contract_block = ""
+        if downstream_contract:
+            pretty = json.dumps(
+                downstream_contract, ensure_ascii=False, indent=2,
+            )
+            downstream_hint = (
+                f" (consumed by `{downstream_flow_name}`)"
+                if downstream_flow_name else ""
+            )
+            contract_block = (
+                f"## Downstream input contract{downstream_hint}\n"
+                f"The final step of `{plan.flow_name}` MUST return a dict "
+                f"matching this JSON Schema exactly:\n"
+                f"```json\n{pretty}\n```\n\n"
+            )
+
+        user_prompt = (
+            f"## Workflow plan\n{plan_text}\n\n"
+            f"## Capability decision\n{capability_text}\n\n"
+            f"{contract_block}"
+            f"{self._format_project_context(project_context)}"
+            "Translate the plan + capabilities into a FlowForge module.  "
+            "Return ONLY the Python code."
+        )
+
+        # Generous budget — agentic synthesis is slow regardless and a
+        # truncated module is worse than a slow one.
+        synthesis_config = self._llm_config_for_synthesis(min_tokens=12000)
+
+        code = await call_llm_api(
+            system_prompt=_PLAN_SYNTHESIS_SYSTEM,
+            user_prompt=user_prompt,
+            llm_config=synthesis_config,
+            tool_configs=self._codegen_tool_configs(),
+            max_tool_rounds=3,
+        )
+        return _strip_markdown_fences(str(code))
+
+    def _llm_config_for_synthesis(self, min_tokens: int):
+        """Return an ``LLMConfig`` with at least ``min_tokens`` budget."""
+        cfg = self._llm_config
+        current = getattr(cfg, "max_tokens", 0) or 0
+        if current >= min_tokens:
+            return cfg
+        if hasattr(cfg, "model_copy"):
+            return cfg.model_copy(update={"max_tokens": min_tokens})
+        # Fallback for non-pydantic configs in tests.
+        try:
+            cfg.max_tokens = min_tokens  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return cfg
+
+    async def generate_and_compile_from_plan(
+        self,
+        *,
+        plan: Any,
+        selection: Any,
+        user_query: str | Any,
+        downstream_contract: dict[str, Any] | None = None,
+        downstream_flow_name: str | None = None,
+        project_context: str | None = None,
+    ) -> tuple[FlowMeta, str]:
+        """Synthesise → compile → retry from a plan + capability decision."""
+        from flowforge.errors import CompileError
+
+        code = await self.generate_flow_code_from_plan(
+            plan=plan,
+            selection=selection,
+            downstream_contract=downstream_contract,
+            downstream_flow_name=downstream_flow_name,
+            project_context=project_context,
+        )
+        logger.info(
+            "synthesised code for flow '%s' (%d chars)",
+            plan.flow_name, len(code),
+        )
+        logger.debug("synthesised code:\n%s", code)
+
+        last_error: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                meta = self.compile_flow_code(code)
+                compatibility_error = self.check_contract_compatibility(
+                    meta, downstream_contract,
+                )
+                if compatibility_error is not None:
+                    raise CompileError(compatibility_error)
+                tool_ref_error = self.check_tool_ref_validity(code)
+                if tool_ref_error is not None:
+                    raise CompileError(tool_ref_error)
+                tool_usage_error = self.check_required_tool_usage(
+                    code, user_query,
+                )
+                if tool_usage_error is not None:
+                    raise CompileError(tool_usage_error)
+                quality_error = self.check_generated_code_quality(
+                    code, user_query,
+                )
+                if quality_error is not None:
+                    raise CompileError(quality_error)
+                logger.info(
+                    "synthesised flow '%s' compiled on attempt %d",
+                    plan.flow_name, attempt + 1,
+                )
+                return meta, code
+            except (CompileError, Exception) as exc:
+                last_error = exc
+                logger.warning(
+                    "synthesis attempt %d/%d failed for '%s': %s",
+                    attempt + 1, _MAX_RETRIES, plan.flow_name, exc,
+                )
+                if attempt + 1 < _MAX_RETRIES:
+                    code = await self.fix_code(
+                        code, str(exc), user_query,
+                        downstream_contract=downstream_contract,
+                        downstream_flow_name=downstream_flow_name,
+                        project_context=project_context,
+                    )
+                    logger.debug(
+                        "fixed synthesised code (attempt %d):\n%s",
+                        attempt + 2, code,
+                    )
+
+        raise CompileError(
+            f"Failed to synthesise dynamic flow '{plan.flow_name}' after "
+            f"{_MAX_RETRIES} attempts. Last error: {last_error}"
+        )
+
+    async def generate_compile_and_persist_from_plan(
+        self,
+        *,
+        plan: Any,
+        selection: Any,
+        user_query: str | Any,
+        downstream_contract: dict[str, Any] | None = None,
+        downstream_flow_name: str | None = None,
+        downstream_flow_route: str = "",
+        project_context: str | None = None,
+    ) -> tuple[FlowMeta, str]:
+        """Plan-driven equivalent of :meth:`generate_compile_and_persist`."""
+        meta, code = await self.generate_and_compile_from_plan(
+            plan=plan,
+            selection=selection,
+            user_query=user_query,
+            downstream_contract=downstream_contract,
+            downstream_flow_name=downstream_flow_name,
+            project_context=project_context,
+        )
+
+        if (
+            self._dynamic_options is not None
+            and self._dynamic_options.persist_generated
+        ):
+            from flowforge.dynamic.manifest import persist_flow_code
+
+            persist_flow_code(
+                flow_name=meta.name,
+                code=code,
+                options=self._dynamic_options,
+                class_name=meta.cls.__name__,
+                inject_before=downstream_flow_route,
+                downstream_flow_route=downstream_flow_route,
+            )
+
+        return meta, code
 
     async def generate_tool_code(
         self,
@@ -999,11 +1739,19 @@ class DynamicFlowGenerator:
                 )
                 if compatibility_error is not None:
                     raise CompileError(compatibility_error)
+                tool_ref_error = self.check_tool_ref_validity(code)
+                if tool_ref_error is not None:
+                    raise CompileError(tool_ref_error)
                 tool_usage_error = self.check_required_tool_usage(
                     code, user_query,
                 )
                 if tool_usage_error is not None:
                     raise CompileError(tool_usage_error)
+                quality_error = self.check_generated_code_quality(
+                    code, user_query,
+                )
+                if quality_error is not None:
+                    raise CompileError(quality_error)
                 logger.info(
                     "flow '%s' compiled successfully on attempt %d",
                     flow_name, attempt + 1,
@@ -1249,6 +1997,41 @@ class DynamicFlowGenerator:
             )
         return None
 
+    def check_tool_ref_validity(self, code: str) -> str | None:
+        """Reject generated code that references unknown tool/skill names.
+
+        Scans every ``<name>`` marker inside ``ctx.call_llm(...)`` strings
+        and every ``ctx.call_tool("name", ...)`` call.  If a name does not
+        match a registered ``ToolConfig`` (FunctionTool, MCPServer, HTTPTool,
+        ClaudeSkill, AgentSkill), returns an error message that the retry
+        loop feeds back to the LLM.
+
+        Empty registry → no validation (the loop relies on other checks).
+        """
+        registered = {
+            _tool_config_name(tc)
+            for tc in self._tool_configs
+        }
+        registered.discard("")
+        if not registered:
+            return None
+
+        _, runtime_used = _collect_generated_tool_usage(
+            code,
+            known_tool_refs=registered,
+        )
+        unknown = sorted(name for name in runtime_used if name not in registered)
+        if not unknown:
+            return None
+
+        catalog = ", ".join(sorted(registered)) or "(none)"
+        return (
+            "Generated flow references unknown tool/skill names: "
+            + ", ".join(unknown)
+            + f". Use ONLY these registered names verbatim — do not invent "
+            f"or paraphrase: {catalog}"
+        )
+
     def check_required_tool_usage(
         self,
         code: str,
@@ -1266,7 +2049,10 @@ class DynamicFlowGenerator:
         if not required:
             return None
 
-        scoped, runtime_used = _collect_generated_tool_usage(code)
+        scoped, runtime_used = _collect_generated_tool_usage(
+            code,
+            known_tool_refs=set(required) | set(self._tool_names()),
+        )
         missing_scope = [name for name in required if name not in scoped]
 
         prompt_only = self._prompt_only_tool_names()
@@ -1294,6 +2080,22 @@ class DynamicFlowGenerator:
             "Generated flow did not satisfy required tool usage. "
             + " ".join(messages)
         )
+
+    def check_generated_code_quality(
+        self,
+        code: str,
+        user_query: str | Any,
+    ) -> str | None:
+        """Reject common dynamic-code patterns that compile but ship junk.
+
+        The compiler already catches syntax errors, unknown tool names, and
+        missing required tools.  This pass catches higher-level anti-patterns
+        observed in generated examples: reading stable request fields from
+        ``ctx.input`` after step 1, swallowing JSON parse errors into empty
+        dicts, substituting fallback stub file bodies, and writing files
+        without raising when a tool returns ``ok=False``.
+        """
+        return _check_generated_code_quality(code, user_query)
 
     def _format_tool_catalog(
         self,
@@ -1500,13 +2302,18 @@ class DynamicFlowGenerator:
             f"- Missing flow name: {flow_name}",
             f"- Missing flow purpose: {flow_prompt}",
             f"- User request/scope: {user_query}",
-            "- Prefer one @flow with one @task and 1-3 @step functions.",
+            "- Prefer one @flow with one @task and focused @step functions.",
+            "- For file/project generation, use one author/write phase per substantial file; never one giant JSON file map.",
+            "- Normalise stable request fields into ctx.shared_data in the first step; later steps should not read project_dir/target_url from ctx.input.",
             "- Give every @task and @step a specific prompt; avoid placeholder prompts.",
             "- Put intended tool names in decorator tools=[\"tool_name\"] as string references.",
             "- Use Python code for small deterministic shaping only.",
             "- Use ctx.call_tool(name, **kwargs) for DIRECT tool calls (deterministic).",
             "- Use ctx.call_llm('instruction <tool_name>') when LLM reasoning is needed; the angle-bracket name is required for LLM-mediated tools.",
             "- ALWAYS prefer existing builtin tools over writing custom code.",
+            "- Always raise on builtin tool results with ok=False; do not silently return failed tool payloads.",
+            "- Before files_write_text, reject empty/trivial content; after writing text artefacts, verify with files_read_text.",
+            "- For binary/document artefacts (.docx, .pptx, .pdf, images, charts), verify with creator-tool size/count fields or files_list_dir; never files_read_text.",
             "- If a domain tool exists for external data, prefer it over raw HTTP code.",
         ]
         if domain_tools:
@@ -1664,6 +2471,571 @@ class DynamicFlowGenerator:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_STABLE_REQUEST_KEYS: set[str] = {
+    "project_dir",
+    "project_root",
+    "output_dir",
+    "target_url",
+    "reference_url",
+    "project_name",
+    "request",
+    "required_tools",
+    "expected_commands",
+    "expected_output",
+}
+
+_CONTENT_NAME_HINTS: tuple[str, ...] = (
+    "content",
+    "body",
+    "html",
+    "css",
+    "js",
+    "json",
+    "markdown",
+    "source",
+    "text",
+)
+
+
+def _check_generated_code_quality(
+    code: str,
+    user_query: str | Any,
+) -> str | None:
+    """Return a human-readable quality error for generated FlowForge code.
+
+    These checks are intentionally conservative and targeted at code produced
+    by the dynamic generator.  They reject patterns that compile successfully
+    but commonly produce empty clone-coding artefacts or silent partial runs.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # The normal compile path will report the syntax error.
+        return None
+
+    for func in _iter_step_functions(tree):
+        order = _step_order(func)
+        if order is not None and order > 1:
+            stable_keys = sorted(_ctx_input_stable_key_reads(func))
+            if stable_keys:
+                return (
+                    f"Step {func.name!r} reads stable request field(s) "
+                    f"{stable_keys} from ctx.input at order {order}. "
+                    "For order > 1, ctx.input is the previous step output. "
+                    "Read these fields from ctx.task_input, ctx.flow_input, "
+                    "or ctx.shared_data instead."
+                )
+
+        if _swallows_json_parse_to_empty(func):
+            return (
+                f"Step {func.name!r} catches a JSON parse failure and "
+                "falls back to an empty dict/list. Generated flows must raise "
+                "on parse failure so runtime repair can fix the malformed "
+                "LLM output instead of writing zero files."
+            )
+
+        unsafe_llm_text = _unsafe_call_llm_text_handling(func)
+        if unsafe_llm_text:
+            return (
+                f"Step {func.name!r} treats ctx.call_llm() output as text "
+                f"without first handling parsed dict/list responses: "
+                f"{unsafe_llm_text}. FlowForge auto-parses JSON-looking "
+                "LLM responses, so generated code must branch on isinstance "
+                "before calling string methods or json.loads."
+            )
+
+        placeholder = _placeholder_success_literal(func)
+        if placeholder:
+            return (
+                f"Step {func.name!r} contains a placeholder failure string "
+                f"{placeholder!r} outside a raise path. Generated flows must "
+                "raise when real web/listing data cannot be extracted; they "
+                "must not return placeholder stories or summaries as success."
+            )
+
+        if _uses_project_file_map_antipattern(func):
+            return (
+                f"Step {func.name!r} uses the banned project-file map pattern "
+                "(one JSON object/loop for many files). Author/write one "
+                "substantial file at a time and verify the entrypoint."
+            )
+
+        if _calls_tool(func, "files_write_text"):
+            fallback_name = _content_fallback_assignment(func)
+            if fallback_name:
+                return (
+                    f"Step {func.name!r} substitutes fallback content for "
+                    f"{fallback_name!r}. Empty/trivial authored content must "
+                    "raise before files_write_text; do not write placeholder "
+                    "HTML/CSS/JS/package stubs."
+                )
+            if not _function_has_content_guard(func):
+                return (
+                    f"Step {func.name!r} calls files_write_text without a "
+                    "non-empty/trivial-content guard. Check len(content) or "
+                    "truthiness for the file body and raise before writing."
+                )
+            if not _function_has_raise(func):
+                return (
+                    f"Step {func.name!r} calls files_write_text without any "
+                    "raise path. Check content length before writing and "
+                    "raise RuntimeError when files_write_text returns ok=False."
+                )
+            if not _function_checks_ok(func):
+                return (
+                    f"Step {func.name!r} calls files_write_text without "
+                    "checking result.get('ok'). Builtin tool failures must "
+                    "raise instead of being returned as successful step output."
+                )
+
+    _, runtime_used = _collect_generated_tool_usage(code)
+    required_tools = set(_extract_required_tools(user_query))
+    if (
+        "files_write_text" in runtime_used
+        and "files_read_text" in required_tools
+        and "files_read_text" not in runtime_used
+    ):
+        return (
+            "Generated flow writes files but does not read any file back with "
+            "files_read_text even though files_read_text is required. Add a "
+            "verification step that reads the entrypoint and rejects empty "
+            "or placeholder-only output."
+        )
+
+    return None
+
+
+def _iter_step_functions(tree: ast.AST) -> list[ast.AsyncFunctionDef]:
+    steps: list[ast.AsyncFunctionDef] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        if _step_order(node) is not None:
+            steps.append(node)
+    return steps
+
+
+def _step_order(func: ast.AsyncFunctionDef) -> int | None:
+    for decorator in func.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        if _call_name(decorator.func) != "step":
+            continue
+        for keyword in decorator.keywords:
+            if keyword.arg != "order":
+                continue
+            value = keyword.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, int):
+                return value.value
+    return None
+
+
+def _ctx_input_stable_key_reads(func: ast.AsyncFunctionDef) -> set[str]:
+    keys: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call):
+            call = node.func
+            if (
+                isinstance(call, ast.Attribute)
+                and call.attr == "get"
+                and _is_ctx_attr(call.value, "input")
+                and node.args
+            ):
+                key = _literal_str(node.args[0])
+                if key in _STABLE_REQUEST_KEYS:
+                    keys.add(key)
+        elif isinstance(node, ast.Subscript) and _is_ctx_attr(node.value, "input"):
+            key = _literal_str(node.slice)
+            if key in _STABLE_REQUEST_KEYS:
+                keys.add(key)
+    return keys
+
+
+def _is_ctx_attr(node: ast.AST, attr: str) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == attr
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "ctx"
+    )
+
+
+def _literal_str(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _swallows_json_parse_to_empty(func: ast.AsyncFunctionDef) -> bool:
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Try):
+            continue
+        if not _nodes_call_json_loads(node.body):
+            continue
+        for handler in node.handlers:
+            if _body_assigns_empty_collection(handler.body):
+                return True
+    return False
+
+
+def _unsafe_call_llm_text_handling(func: ast.AsyncFunctionDef) -> str:
+    llm_vars = _call_llm_assigned_names(func)
+    if not llm_vars:
+        return ""
+
+    guarded_as_str = _isinstance_guarded_names(func, "str")
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call):
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"strip", "split", "splitlines"}
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in llm_vars
+                and node.func.value.id not in guarded_as_str
+            ):
+                return f"{node.func.value.id}.{node.func.attr}()"
+            if _dotted_name(node.func) in {"json.loads", "_json.loads"}:
+                if (
+                    node.args
+                    and isinstance(node.args[0], ast.Name)
+                    and node.args[0].id in llm_vars
+                    and node.args[0].id not in guarded_as_str
+                ):
+                    return f"json.loads({node.args[0].id})"
+            if _dotted_name(node.func) in {"re.search", "re.findall", "re.sub"}:
+                for arg in node.args[1:]:
+                    if (
+                        isinstance(arg, ast.Name)
+                        and arg.id in llm_vars
+                        and arg.id not in guarded_as_str
+                    ):
+                        return f"{_dotted_name(node.func)}(..., {arg.id})"
+    return ""
+
+
+_PLACEHOLDER_FAILURE_PHRASES: tuple[str, ...] = (
+    "html 본문 데이터 없음",
+    "html이 잘려",
+    "페이지가 잘렸",
+    "기사 제목을 추출할 수 없습니다",
+    "html unavailable",
+    "page truncated",
+    "docx 파일 읽기 실패",
+    ".docx 파일 읽기 실패",
+    "파일 검증 중 오류",
+)
+
+
+def _placeholder_success_literal(func: ast.AsyncFunctionDef) -> str:
+    parents = _parent_map(func)
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        text = node.value.strip()
+        lowered = text.lower()
+        if not any(phrase in lowered for phrase in _PLACEHOLDER_FAILURE_PHRASES):
+            continue
+        if _has_ancestor(node, parents, ast.Raise):
+            continue
+        return text[:80]
+    return ""
+
+
+def _parent_map(root: ast.AST) -> dict[ast.AST, ast.AST]:
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(root):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    return parents
+
+
+def _has_ancestor(
+    node: ast.AST,
+    parents: dict[ast.AST, ast.AST],
+    ancestor_type: type[ast.AST],
+) -> bool:
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, ancestor_type):
+            return True
+        current = parents.get(current)
+    return False
+
+
+def _call_llm_assigned_names(func: ast.AsyncFunctionDef) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if isinstance(value, ast.Await) and _is_ctx_call(value.value, "call_llm"):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+    return names
+
+
+def _is_ctx_call(node: ast.AST, method: str) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == method
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "ctx"
+    )
+
+
+def _isinstance_guarded_names(
+    func: ast.AsyncFunctionDef,
+    type_name: str,
+) -> set[str]:
+    guarded: set[str] = set()
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        if _call_name(node.func) != "isinstance" or len(node.args) < 2:
+            continue
+        subject, type_expr = node.args[0], node.args[1]
+        if not isinstance(subject, ast.Name):
+            continue
+        if _type_expr_contains(type_expr, type_name):
+            guarded.add(subject.id)
+    return guarded
+
+
+def _type_expr_contains(node: ast.AST, type_name: str) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == type_name
+    if isinstance(node, ast.Tuple):
+        return any(_type_expr_contains(elt, type_name) for elt in node.elts)
+    return False
+
+
+def _nodes_call_json_loads(nodes: list[ast.stmt]) -> bool:
+    for stmt in nodes:
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Call):
+                continue
+            dotted = _dotted_name(node.func)
+            if dotted in {"json.loads", "_json.loads"}:
+                return True
+    return False
+
+
+def _dotted_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _dotted_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    if isinstance(node, ast.Call):
+        return _dotted_name(node.func)
+    return ""
+
+
+def _body_assigns_empty_collection(nodes: list[ast.stmt]) -> bool:
+    for stmt in nodes:
+        if isinstance(stmt, ast.Assign) and _is_empty_collection(stmt.value):
+            return True
+        if isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            if _is_empty_collection(stmt.value):
+                return True
+        if isinstance(stmt, ast.Return) and _is_empty_collection(stmt.value):
+            return True
+    return False
+
+
+def _is_empty_collection(node: ast.AST | None) -> bool:
+    if isinstance(node, ast.Dict):
+        return not node.keys
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return not node.elts
+    return False
+
+
+def _uses_project_file_map_antipattern(func: ast.AsyncFunctionDef) -> bool:
+    text = "\n".join(_literal_strings_in(func)).lower()
+    if (
+        "json object" in text
+        and "file" in text
+        and ("relative file path" in text or "file content" in text)
+    ):
+        return True
+    if "mapping of relative file path to file content" in text:
+        return True
+
+    for node in ast.walk(func):
+        if not isinstance(node, ast.For):
+            continue
+        iter_text = _dotted_name(node.iter)
+        if ".items" not in iter_text:
+            continue
+        if any(token in iter_text for token in ("project_files", "file_map", "files")):
+            if _calls_tool(node, "files_write_text"):
+                return True
+    return False
+
+
+def _calls_tool(node: ast.AST, tool_name: str) -> bool:
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        if _call_name(child.func) != "call_tool" or not child.args:
+            continue
+        first = child.args[0]
+        if isinstance(first, ast.Constant) and first.value == tool_name:
+            return True
+    return False
+
+
+def _content_fallback_assignment(func: ast.AsyncFunctionDef) -> str:
+    for node in ast.walk(func):
+        if not isinstance(node, ast.If):
+            continue
+        tested_names = {
+            name for name in _names_in(node.test)
+            if _looks_like_file_content_name(name)
+        }
+        if not tested_names:
+            continue
+        for stmt in node.body:
+            for target_name in _assigned_names(stmt):
+                if target_name in tested_names:
+                    return target_name
+    return ""
+
+
+def _names_in(node: ast.AST) -> set[str]:
+    return {
+        child.id
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name)
+    }
+
+
+def _assigned_names(stmt: ast.stmt) -> set[str]:
+    targets: list[ast.AST] = []
+    if isinstance(stmt, ast.Assign):
+        targets.extend(stmt.targets)
+    elif isinstance(stmt, ast.AnnAssign):
+        targets.append(stmt.target)
+    elif isinstance(stmt, ast.AugAssign):
+        targets.append(stmt.target)
+
+    names: set[str] = set()
+    for target in targets:
+        for child in ast.walk(target):
+            if isinstance(child, ast.Name):
+                names.add(child.id)
+    return names
+
+
+def _looks_like_file_content_name(name: str) -> bool:
+    lowered = name.lower()
+    return any(hint in lowered for hint in _CONTENT_NAME_HINTS)
+
+
+def _function_has_raise(func: ast.AsyncFunctionDef) -> bool:
+    return any(isinstance(node, ast.Raise) for node in ast.walk(func))
+
+
+def _function_has_content_guard(func: ast.AsyncFunctionDef) -> bool:
+    for node in ast.walk(func):
+        if not isinstance(node, ast.If):
+            continue
+        if not any(isinstance(stmt, ast.Raise) for stmt in ast.walk(node)):
+            continue
+        if _test_checks_content(node.test):
+            return True
+    return False
+
+
+def _test_checks_content(node: ast.AST) -> bool:
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        if isinstance(node.operand, ast.Name):
+            return _looks_like_file_content_name(node.operand.id)
+
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call) and _call_name(child.func) == "len":
+            if child.args and _expr_mentions_content_name(child.args[0]):
+                return True
+    return False
+
+
+def _expr_mentions_content_name(node: ast.AST) -> bool:
+    return any(
+        isinstance(child, ast.Name)
+        and _looks_like_file_content_name(child.id)
+        for child in ast.walk(node)
+    )
+
+
+def _function_checks_ok(func: ast.AsyncFunctionDef) -> bool:
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call):
+            call = node.func
+            if (
+                isinstance(call, ast.Attribute)
+                and call.attr == "get"
+                and node.args
+                and _literal_str(node.args[0]) == "ok"
+            ):
+                return True
+        elif isinstance(node, ast.Subscript):
+            if _literal_str(node.slice) == "ok":
+                return True
+    return False
+
+
+def _format_plan_for_synthesis(plan: Any) -> str:
+    lines = [
+        f"flow_name: {plan.flow_name}",
+        f"flow_prompt: {plan.flow_prompt}",
+        f"task_name: {plan.task_name}",
+        f"task_prompt: {plan.task_prompt}",
+        f"top_class: {plan.top_class}",
+        "steps (in execution order):",
+    ]
+    for step in plan.steps:
+        consumes = (
+            ", ".join(str(o) for o in step.consumes_previous_orders)
+            if step.consumes_previous_orders else "(none — reads ctx.input only)"
+        )
+        branch = ""
+        if step.branch is not None:
+            targets = ", ".join(
+                f"{value!r}->{target}"
+                for value, target in step.branch.targets.items()
+            )
+            fb = step.branch.fallback or "(no fallback)"
+            branch = (
+                f"\n    branch: switch on output field '{step.branch.field}' "
+                f"with targets {{{targets}}}, fallback={fb}"
+            )
+        lines.append(
+            f"  - name: {step.name}\n"
+            f"    order: {step.order}\n"
+            f"    needs_llm_reasoning: {step.needs_llm_reasoning}\n"
+            f"    purpose: {step.purpose}\n"
+            f"    consumes_previous_orders: {consumes}{branch}"
+        )
+    return "\n".join(lines)
+
+
+def _format_selection_for_synthesis(selection: Any) -> str:
+    lines = []
+    for sel in selection.selections:
+        tools = ", ".join(sel.tool_names) if sel.tool_names else "(none)"
+        mcp = (
+            f", mcp_server={sel.mcp_server_name}" if sel.mcp_server_name else ""
+        )
+        lines.append(
+            f"  - {sel.step_name}: mode={sel.mode}{mcp}, tools=[{tools}]\n"
+            f"    rationale: {sel.rationale}"
+        )
+    return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # Output artifact detection — auto-detect file output intent from user query
@@ -1829,9 +3201,15 @@ def _extract_required_tools(user_query: str | Any) -> list[str]:
     return names
 
 
-def _collect_generated_tool_usage(code: str) -> tuple[set[str], set[str]]:
+def _collect_generated_tool_usage(
+    code: str,
+    *,
+    known_tool_refs: set[str] | None = None,
+) -> tuple[set[str], set[str]]:
     """Return (decorator-scoped names, runtime-used names) from source code."""
     import re
+
+    from flowforge.execution.llm import is_html_tag_name
 
     try:
         tree = ast.parse(code)
@@ -1859,13 +3237,15 @@ def _collect_generated_tool_usage(code: str) -> tuple[set[str], set[str]]:
                     runtime_used.add(first.value)
             elif call_name == "call_llm":
                 for text in _literal_strings_in(node):
-                    runtime_used.update(
-                        match.group(1)
-                        for match in re.finditer(
-                            r"<([A-Za-z0-9_][A-Za-z0-9_-]*)>",
-                            text,
-                        )
-                    )
+                    for match in re.finditer(
+                        r"<([A-Za-z0-9_][A-Za-z0-9_-]*)>",
+                        text,
+                    ):
+                        name = match.group(1)
+                        if known_tool_refs is not None and name not in known_tool_refs:
+                            if is_html_tag_name(name):
+                                continue
+                        runtime_used.add(name)
 
     return scoped, runtime_used
 
@@ -2009,3 +3389,34 @@ def _sanitise_name(name: str) -> str:
     if name[0].isdigit():
         name = f"flow_{name}"
     return name
+
+
+def _heuristic_gap_analysis(query: str, error: str) -> dict[str, Any]:
+    """Return a conservative missing-flow record when gap LLM is unavailable."""
+
+    lowered = query.lower()
+    if "arxiv" in lowered or "paper" in lowered:
+        flow_name = "arxiv_paper_fetcher"
+        flow_prompt = "Fetch paper records and return a structured payload."
+    elif "hada" in lowered or "geeknews" in lowered or "news.hada.io" in lowered:
+        flow_name = "hada_top3_korean_docx_report"
+        flow_prompt = (
+            "Fetch GeekNews/Hada stories and produce the requested report."
+        )
+    elif "mountain" in lowered or "산" in query:
+        flow_name = "top5_highest_mountains_table"
+        flow_prompt = (
+            "Produce a verified markdown table of the world's five highest "
+            "mountains with names, heights, and locations."
+        )
+    else:
+        words = re.findall(r"[a-zA-Z][a-zA-Z0-9]+", lowered)
+        flow_name = "_".join(words[:5]) or "dynamic_generated_flow"
+        flow_prompt = f"Generate the missing workflow for this request: {query[:500]}"
+
+    return {
+        "covered": False,
+        "reason": f"Gap analysis LLM unavailable; heuristic fallback used. {error}",
+        "suggested_flow_name": _sanitise_name(flow_name),
+        "suggested_flow_prompt": flow_prompt,
+    }

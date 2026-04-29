@@ -323,5 +323,84 @@ def docs(
         pass
 
 
+skills_app = typer.Typer(
+    name="skills",
+    help="Manage vendored Anthropic Agent Skills (anthropics/skills).",
+    no_args_is_help=True,
+)
+app.add_typer(skills_app)
+
+
+@skills_app.command("list")
+def skills_list() -> None:
+    """Show vendored skills and the curated default bundle."""
+    from flowforge.skills import bundled_skill_names
+    from flowforge.skills.sync import DEFAULT_BUNDLED_SKILLS, UPSTREAM_REPO
+
+    vendored = set(bundled_skill_names())
+    default = set(DEFAULT_BUNDLED_SKILLS)
+    table = Table(title=f"Anthropic Agent Skills  ({UPSTREAM_REPO})")
+    table.add_column("name", style="cyan")
+    table.add_column("vendored", justify="center", style="green")
+    table.add_column("in default bundle", justify="center", style="magenta")
+
+    for name in sorted(vendored | default):
+        table.add_row(
+            name,
+            "✓" if name in vendored else "",
+            "✓" if name in default else "",
+        )
+    console.print(table)
+    if not vendored:
+        console.print(
+            "[dim]No skills vendored yet.  Run "
+            "`flowforge skills sync` to install the default bundle.[/dim]"
+        )
+
+
+@skills_app.command("sync")
+def skills_sync(
+    name: Optional[str] = typer.Argument(
+        None,
+        help=(
+            "Upstream skill name (folder under anthropics/skills/skills/). "
+            "Omit to vendor the curated default bundle."
+        ),
+    ),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Re-download even if already vendored."
+    ),
+    insecure: bool = typer.Option(
+        False,
+        "--insecure",
+        help="Disable TLS verification (e.g. behind the LG CNS proxy).",
+    ),
+) -> None:
+    """Download upstream Anthropic skills into the local bundle."""
+    import urllib.error
+
+    from flowforge.skills.sync import (
+        DEFAULT_BUNDLED_SKILLS,
+        sync_default_skills,
+        sync_skill,
+    )
+
+    verify_ssl = not insecure
+    try:
+        if name is None:
+            console.print(
+                "[bold]Syncing default bundle:[/bold] "
+                f"{', '.join(DEFAULT_BUNDLED_SKILLS)}"
+            )
+            for path in sync_default_skills(force=force, verify_ssl=verify_ssl):
+                console.print(f"  [green]✓[/green] {path}")
+        else:
+            path = sync_skill(name, force=force, verify_ssl=verify_ssl)
+            console.print(f"[green]✓[/green] {path}")
+    except (FileNotFoundError, urllib.error.URLError, OSError) as exc:
+        console.print(f"[red]✗ sync failed: {exc}[/red]")
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()

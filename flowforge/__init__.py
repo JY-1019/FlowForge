@@ -386,6 +386,39 @@ class CompiledAgent:
 
         return node_id
 
+    def replace_flow(self, flow_cls: type) -> str:
+        """Replace an existing flow with a regenerated implementation.
+
+        Drops the old flow's subtree from the DAG and ``global_meta.flows``,
+        then re-adds *flow_cls* (which must carry the same ``@flow`` name).
+        Used by the dynamic-flow runtime-repair hook so a regenerated
+        flow takes the place of the broken one without requiring a fresh
+        ``compile()``.
+
+        Returns
+        -------
+        str
+            The DAG node ID of the newly added flow.
+        """
+        from flowforge.annotations.decorators import _FLOW_ATTR
+
+        if not hasattr(flow_cls, _FLOW_ATTR):
+            raise CompileError(
+                f"{flow_cls.__name__} is not decorated with @flow"
+            )
+        new_meta = getattr(flow_cls, _FLOW_ATTR)
+        node_id = f"global.{new_meta.name}"
+
+        # Drop the old subtree from the DAG (no-op when not present yet).
+        self._dag.remove_subtree(node_id)
+
+        # Drop the old FlowMeta from global_meta.flows by name.
+        self._global_meta.flows = [
+            f for f in self._global_meta.flows if f.name != new_meta.name
+        ]
+
+        return self.add_flow(flow_cls)
+
     def recompile(self) -> None:
         """Full recompile of the DAG from the current ``global_meta``.
 

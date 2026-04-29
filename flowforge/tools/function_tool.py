@@ -2,9 +2,72 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, get_type_hints
+import types
+import typing
+from collections.abc import Mapping, Sequence
+from typing import Any, Callable, get_args, get_origin, get_type_hints
 
 from flowforge.tools.base import ToolAdapter
+
+
+_TYPE_MAP: dict[type, str] = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+}
+
+
+def _schema_for_hint(hint: Any) -> dict[str, Any]:
+    """Return a compact JSON Schema fragment for a Python type hint."""
+    if hint is Any:
+        return {}
+
+    origin = get_origin(hint)
+    args = get_args(hint)
+
+    if origin in {typing.Union, types.UnionType}:
+        non_none = [arg for arg in args if arg is not type(None)]
+        if len(non_none) == 1:
+            return _schema_for_hint(non_none[0])
+        options = [_schema_for_hint(arg) for arg in non_none]
+        options = [option for option in options if option]
+        return {"anyOf": options} if options else {"type": "string"}
+
+    if origin is typing.Literal:
+        values = list(args)
+        prop: dict[str, Any] = {"enum": values}
+        value_types = {type(value) for value in values if value is not None}
+        if len(value_types) == 1 and next(iter(value_types)) in _TYPE_MAP:
+            prop["type"] = _TYPE_MAP[next(iter(value_types))]
+        return prop
+
+    if origin in {list, tuple, set, frozenset, Sequence}:
+        prop: dict[str, Any] = {"type": "array"}
+        if args:
+            item_schema = _schema_for_hint(args[0])
+            if item_schema:
+                prop["items"] = item_schema
+        return prop
+
+    if origin in {dict, Mapping}:
+        prop = {"type": "object"}
+        if len(args) >= 2:
+            value_schema = _schema_for_hint(args[1])
+            if value_schema:
+                prop["additionalProperties"] = value_schema
+        return prop
+
+    if hint in _TYPE_MAP:
+        return {"type": _TYPE_MAP[hint]}
+
+    if hasattr(hint, "model_json_schema"):
+        try:
+            return hint.model_json_schema()
+        except Exception:
+            pass
+
+    return {"type": "string"}
 
 
 def _infer_schema_from_hints(func: Callable[..., Any]) -> dict[str, Any]:
@@ -17,13 +80,6 @@ def _infer_schema_from_hints(func: Callable[..., Any]) -> dict[str, Any]:
 
     Parameters without a default value are added to ``required``.
     """
-    _TYPE_MAP: dict[type, str] = {
-        str: "string",
-        int: "integer",
-        float: "number",
-        bool: "boolean",
-    }
-
     try:
         hints = get_type_hints(func)
     except Exception:
@@ -36,40 +92,14 @@ def _infer_schema_from_hints(func: Callable[..., Any]) -> dict[str, Any]:
     for name, param in sig.parameters.items():
         if name in ("self", "cls", "ctx"):
             continue
+        if param.kind in {
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        }:
+            continue
 
         hint = hints.get(name)
-        prop: dict[str, Any] = {}
-
-        if hint is not None:
-            # Handle Optional[X] / X | None → unwrap to X.
-            origin = getattr(hint, "__origin__", None)
-            args = getattr(hint, "__args__", ())
-            if origin is type(int | str):  # types.UnionType (3.10+)
-                non_none = [a for a in args if a is not type(None)]
-                if len(non_none) == 1:
-                    hint = non_none[0]
-            elif origin is not None:
-                # typing.Union
-                import typing
-                if origin is typing.Union:
-                    non_none = [a for a in args if a is not type(None)]
-                    if len(non_none) == 1:
-                        hint = non_none[0]
-
-            # list[X] → {"type": "array", "items": ...}
-            list_origin = getattr(hint, "__origin__", None)
-            if list_origin is list:
-                item_args = getattr(hint, "__args__", ())
-                if item_args and item_args[0] in _TYPE_MAP:
-                    prop = {"type": "array", "items": {"type": _TYPE_MAP[item_args[0]]}}
-                else:
-                    prop = {"type": "array"}
-            elif hint in _TYPE_MAP:
-                prop = {"type": _TYPE_MAP[hint]}
-            else:
-                prop = {"type": "string"}
-        else:
-            prop = {"type": "string"}
+        prop = _schema_for_hint(hint) if hint is not None else {"type": "string"}
 
         # Default value → "default" field.
         if param.default is not inspect.Parameter.empty:

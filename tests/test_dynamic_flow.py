@@ -164,12 +164,14 @@ class TestDynamicFlowFlag:
 
         for node_id in [
             "global._dynamic_generator._generate_and_run.analyse_gap[1]",
-            "global._dynamic_generator._generate_and_run.prepare_codegen[2]",
-            "global._dynamic_generator._generate_and_run.generate_and_inject[3]",
+            "global._dynamic_generator._generate_and_run.plan_workflow[2]",
+            "global._dynamic_generator._generate_and_run.select_capability[3]",
+            "global._dynamic_generator._generate_and_run.mcp_provision[4]",
+            "global._dynamic_generator._generate_and_run.synthesise_and_inject[5]",
         ]:
             node = engine.dag.get_node(node_id)
             assert node is not None
-            assert node.meta.timeout_seconds == 300
+            assert node.meta.timeout_seconds >= 300
 
 
 # ---------------------------------------------------------------------------
@@ -290,13 +292,14 @@ class TestMetaFlowInjection:
         )
         assert task_node is not None
 
-        # Check steps exist (3 steps: analyse_gap, prepare_codegen, generate_and_inject).
+        # Check steps exist (5 steps: analyse_gap, plan_workflow,
+        # select_capability, mcp_provision, synthesise_and_inject).
         step_ids = [
             n.id for n in engine.dag.get_all_nodes()
             if n.id.startswith("global._dynamic_generator._generate_and_run.")
             and n.type == NodeType.STEP
         ]
-        assert len(step_ids) == 3
+        assert len(step_ids) == 5
 
     def test_basic_agent_has_no_meta_flow(self):
         engine = FlowForge.compile(BasicAgent)
@@ -423,6 +426,29 @@ class TestHelpers:
         assert _sanitise_name("My Flow!") == "my_flow"
         assert _sanitise_name("") == "dynamic_flow"
         assert _sanitise_name("valid_name") == "valid_name"
+
+    @pytest.mark.asyncio
+    async def test_gap_analysis_uses_heuristic_when_llm_fails(self):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+
+        engine = FlowForge.compile(BasicAgent)
+        generator = DynamicFlowGenerator(
+            llm_config=LLMConfig(model="test"),
+            dag=engine.dag,
+        )
+
+        with patch(
+            "flowforge.llm.caller.call_with_tool",
+            new_callable=AsyncMock,
+        ) as mock_call:
+            mock_call.side_effect = TimeoutError("network timeout")
+            result = await generator.analyse_gap(
+                "세계에서 가장 높은 산 Top 5를 표로 정리해줘"
+            )
+
+        assert result["covered"] is False
+        assert result["suggested_flow_name"] == "top5_highest_mountains_table"
+        assert "heuristic" in result["reason"].lower()
 
 
 class TestDynamicGeneratorPrompting:
@@ -621,6 +647,87 @@ class FetchPageFlow:
         assert code == fixed_code.strip()
         assert mock_api.await_count == 2
 
+    def test_check_tool_ref_validity_accepts_registered_names(self):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+
+        tool = FunctionTool(
+            func=lambda url: {"ok": True, "url": url},
+            name="web_fetch_url",
+            description="Fetch a public web page.",
+        )
+        generator = DynamicFlowGenerator(
+            llm_config=LLMConfig(model="test"),
+            dag=FlowForge.compile(BasicAgent).dag,
+            tool_configs=[tool],
+        )
+
+        good_code = '''
+from flowforge import flow, task, step
+
+@flow(name="fetch_page", prompt="Fetch a public page", tools=["web_fetch_url"])
+class FetchPageFlow:
+    @task(name="fetch", prompt="Fetch the page", tools=["web_fetch_url"])
+    class FetchTask:
+        @step(order=1, prompt="Use <web_fetch_url>", tools=["web_fetch_url"])
+        async def fetch(ctx):
+            return await ctx.call_tool("web_fetch_url", url="https://example.com")
+'''
+        assert generator.check_tool_ref_validity(good_code) is None
+
+    def test_check_tool_ref_validity_rejects_unknown_names(self, tmp_path):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+
+        skill_dir = tmp_path / "skills" / "frontend-design"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: frontend-design\ndescription: design.\n---\n# guidance\n",
+            encoding="utf-8",
+        )
+        agent_skill = AgentSkill(path=str(skill_dir), name="frontend-design")
+        generator = DynamicFlowGenerator(
+            llm_config=LLMConfig(model="test"),
+            dag=FlowForge.compile(BasicAgent).dag,
+            tool_configs=[agent_skill],
+        )
+
+        hallucinated_code = '''
+from flowforge import flow, task, step
+
+@flow(name="clone_site", prompt="Clone a site", tools=["frontend-design"])
+class CloneFlow:
+    @task(name="design", prompt="Design step", tools=["frontend-design"])
+    class DesignTask:
+        @step(order=1, prompt="Apply <clone-coding> to draft markup")
+        async def draft(ctx):
+            return await ctx.call_llm("Use <clone-coding> to render")
+'''
+        error = generator.check_tool_ref_validity(hallucinated_code)
+        assert error is not None
+        assert "clone-coding" in error
+        assert "frontend-design" in error
+
+    def test_check_tool_ref_validity_skipped_when_no_tools(self):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+
+        generator = DynamicFlowGenerator(
+            llm_config=LLMConfig(model="test"),
+            dag=FlowForge.compile(BasicAgent).dag,
+            tool_configs=[],
+        )
+
+        any_code = '''
+from flowforge import flow, task, step
+
+@flow(name="x", prompt="x")
+class X:
+    @task(name="t", prompt="t")
+    class T:
+        @step(order=1, prompt="call <unknown>")
+        async def s(ctx):
+            return {}
+'''
+        assert generator.check_tool_ref_validity(any_code) is None
+
     @pytest.mark.asyncio
     async def test_precomputed_gap_skips_gap_analysis(self):
         engine = FlowForge.compile(DynamicAgent)
@@ -702,6 +809,49 @@ class PersistedFlow:
         node = engine.dag.get_node("global.persisted_flow.main.run[1]")
         assert node is not None
         assert node.meta.timeout_seconds == 240
+        flow_node = engine.dag.get_node("global.persisted_flow")
+        assert flow_node is not None
+        assert getattr(flow_node.meta, "__flowforge_dynamic_source_code__", "")
+
+    @pytest.mark.asyncio
+    async def test_manifest_bridge_flow_runs_before_downstream(self, tmp_path):
+        from flowforge.dynamic.manifest import persist_flow_code
+
+        options = DynamicRunOptions(project_root=str(tmp_path))
+        persist_flow_code(
+            flow_name="manifest_fetch",
+            code="""
+from flowforge import flow, task, step
+
+@flow(name="manifest_fetch", prompt="fetch before report")
+class ManifestFetchFlow:
+    @task(name="fetch", prompt="fetch")
+    class FetchTask:
+        @step(order=1, prompt="fetch")
+        async def fetch(ctx):
+            return {"sequence": ["manifest_fetch"]}
+""",
+            options=options,
+            inject_before="paper_report_pipeline",
+            downstream_flow_route="paper_report_pipeline",
+        )
+
+        @global_config(prompt="manifest bridge agent", dynamic_flow=True)
+        class _Agent:
+            PaperReportPipelineFlow = PaperReportPipelineFlow
+
+        engine = FlowForge.compile(_Agent, dynamic_options=options)
+        roots = [
+            node.name for node in engine.dag.get_children("global")
+            if node.type == NodeType.FLOW
+        ]
+        assert roots.index("manifest_fetch") < roots.index("paper_report_pipeline")
+
+        result = await engine.run(
+            {"sequence": []},
+            route=["paper_report_pipeline", "manifest_fetch"],
+        )
+        assert result["sequence"] == ["manifest_fetch", "pipeline"]
 
     def test_compile_autoloads_generated_tool_manifest(self, tmp_path):
         from flowforge.dynamic.manifest import persist_tool_code
@@ -727,6 +877,176 @@ def project_echo(text: str) -> dict:
             if isinstance(tool, FunctionTool)
         ]
         assert "project_echo" in names
+
+    @pytest.mark.asyncio
+    async def test_autoloaded_generated_flow_repairs_and_persists(
+        self, tmp_path
+    ):
+        from flowforge.dynamic.manifest import persist_flow_code
+
+        broken_code = """
+from flowforge import flow, task, step
+
+@flow(name="repairable_flow", prompt="loaded broken flow")
+class RepairableFlow:
+    @task(name="main", prompt="main")
+    class MainTask:
+        @step(order=1, prompt="break")
+        async def run(ctx):
+            raise RuntimeError("boom from persisted flow")
+"""
+        fixed_code = """
+from flowforge import flow, task, step
+
+@flow(name="repairable_flow", prompt="fixed flow")
+class RepairableFlow:
+    @task(name="main", prompt="main")
+    class MainTask:
+        @step(order=1, prompt="fixed")
+        async def run(ctx):
+            return {"fixed_marker": True}
+"""
+        options = DynamicRunOptions(project_root=str(tmp_path))
+        persist_flow_code(
+            flow_name="repairable_flow",
+            code=broken_code,
+            options=options,
+            class_name="RepairableFlow",
+        )
+
+        @global_config(prompt="manifest repair agent", dynamic_flow=True)
+        class _Agent:
+            pass
+
+        async def fake_fix(self, code, error, user_query, **kwargs):
+            assert "boom from persisted flow" in error
+            return fixed_code
+
+        engine = FlowForge.compile(_Agent, dynamic_options=options)
+        with patch(
+            "flowforge.dynamic.generator.DynamicFlowGenerator.fix_code",
+            new=fake_fix,
+        ):
+            result = await engine.run({}, route="repairable_flow")
+
+        assert result == {"fixed_marker": True}
+        generated_file = (
+            tmp_path
+            / "flowforge"
+            / "generated"
+            / "flows"
+            / "repairable_flow.py"
+        )
+        assert "fixed_marker" in generated_file.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_autoloaded_generated_flow_preflight_repairs_quality(
+        self, tmp_path
+    ):
+        from flowforge.dynamic.manifest import persist_flow_code
+
+        stale_code = """
+from flowforge import flow, task, step
+
+@flow(name="stale_quality_flow", prompt="loaded stale flow")
+class StaleQualityFlow:
+    @task(name="main", prompt="main")
+    class MainTask:
+        @step(order=1, prompt="return placeholder")
+        async def run(ctx):
+            return {"title": "HTML 본문 데이터 없음"}
+"""
+        fixed_code = """
+from flowforge import flow, task, step
+
+@flow(name="stale_quality_flow", prompt="fixed flow")
+class StaleQualityFlow:
+    @task(name="main", prompt="main")
+    class MainTask:
+        @step(order=1, prompt="fixed")
+        async def run(ctx):
+            return {"title": "real story"}
+"""
+        options = DynamicRunOptions(project_root=str(tmp_path))
+        persist_flow_code(
+            flow_name="stale_quality_flow",
+            code=stale_code,
+            options=options,
+            class_name="StaleQualityFlow",
+        )
+
+        @global_config(prompt="manifest quality repair agent", dynamic_flow=True)
+        class _Agent:
+            pass
+
+        async def fake_fix(self, code, error, user_query, **kwargs):
+            assert "Preflight generated-code quality check failed" in error
+            return fixed_code
+
+        engine = FlowForge.compile(_Agent, dynamic_options=options)
+        with patch(
+            "flowforge.dynamic.generator.DynamicFlowGenerator.fix_code",
+            new=fake_fix,
+        ):
+            result = await engine.run({}, route="stale_quality_flow")
+
+        assert result == {"title": "real story"}
+
+    @pytest.mark.asyncio
+    async def test_generated_flow_repairs_placeholder_runtime_output(
+        self, tmp_path
+    ):
+        from flowforge.dynamic.manifest import persist_flow_code
+
+        runtime_bad_code = """
+from flowforge import flow, task, step
+
+@flow(name="runtime_placeholder_flow", prompt="runtime placeholder flow")
+class RuntimePlaceholderFlow:
+    @task(name="main", prompt="main")
+    class MainTask:
+        @step(order=1, prompt="echo title")
+        async def run(ctx):
+            return {"title": ctx.input["title"]}
+"""
+        fixed_code = """
+from flowforge import flow, task, step
+
+@flow(name="runtime_placeholder_flow", prompt="fixed flow")
+class RuntimePlaceholderFlow:
+    @task(name="main", prompt="main")
+    class MainTask:
+        @step(order=1, prompt="fixed")
+        async def run(ctx):
+            return {"title": "real story"}
+"""
+        options = DynamicRunOptions(project_root=str(tmp_path))
+        persist_flow_code(
+            flow_name="runtime_placeholder_flow",
+            code=runtime_bad_code,
+            options=options,
+            class_name="RuntimePlaceholderFlow",
+        )
+
+        @global_config(prompt="runtime quality repair agent", dynamic_flow=True)
+        class _Agent:
+            pass
+
+        async def fake_fix(self, code, error, user_query, **kwargs):
+            assert "placeholder failure output" in error
+            return fixed_code
+
+        engine = FlowForge.compile(_Agent, dynamic_options=options)
+        with patch(
+            "flowforge.dynamic.generator.DynamicFlowGenerator.fix_code",
+            new=fake_fix,
+        ):
+            result = await engine.run(
+                {"title": "HTML 잘림으로 확인 불가"},
+                route="runtime_placeholder_flow",
+            )
+
+        assert result == {"title": "real story"}
 
 
 class TestPartialGapDynamicExecution:
@@ -1032,6 +1352,19 @@ class TestSchemaContract:
         assert isinstance(payload, dict)
         assert payload["gap_analysis"]["suggested_flow_name"].startswith("dynamic_")
         assert "clone coding flow" in payload["gap_analysis"]["suggested_flow_prompt"]
+
+    def test_build_runtime_failure_dynamic_input_targets_downstream(self):
+        engine = FlowForge.compile(DynamicAgent)
+        payload = engine._engine._build_runtime_failure_dynamic_input(
+            input_data="fetch arXiv papers and make a PPT",
+            error=ValueError("Could not parse JSON-like paper payload."),
+            downstream_route="paper_report_pipeline",
+        )
+
+        assert payload["gap_analysis"]["covered"] is False
+        assert payload["downstream_flow_route"] == "paper_report_pipeline"
+        assert "paper_report_pipeline" in payload["gap_analysis"]["reason"]
+        assert "upstream" in payload["gap_analysis"]["suggested_flow_prompt"]
 
     @pytest.mark.asyncio
     async def test_meta_flow_analyse_gap_propagates_downstream_route(self):
@@ -1601,18 +1934,20 @@ class TestManifestFileLocking:
 
 class TestMetaFlowConsolidated:
 
-    def test_meta_flow_has_exactly_three_steps(self):
+    def test_meta_flow_has_five_steps(self):
         engine = FlowForge.compile(DynamicAgent)
         step_ids = [
             n.id for n in engine.dag.get_all_nodes()
             if n.id.startswith("global._dynamic_generator._generate_and_run.")
             and n.type == NodeType.STEP
         ]
-        assert len(step_ids) == 3
+        assert len(step_ids) == 5
         step_id_str = " ".join(step_ids)
         assert "analyse_gap[1]" in step_id_str
-        assert "prepare_codegen[2]" in step_id_str
-        assert "generate_and_inject[3]" in step_id_str
+        assert "plan_workflow[2]" in step_id_str
+        assert "select_capability[3]" in step_id_str
+        assert "mcp_provision[4]" in step_id_str
+        assert "synthesise_and_inject[5]" in step_id_str
 
 
 # ---------------------------------------------------------------------------
@@ -1833,6 +2168,38 @@ class TimeoutFlow:
 
         assert promoted["suggested_flow_name"] == "clone_coding"
         assert promoted["suggested_flow_prompt"] == "Create a clone coding frontend."
+
+    def test_planner_infers_gap_from_requirement_metadata(self):
+        from flowforge.planner.llm_planner import LLMPlanner
+
+        data = {
+            "routes": ["paper_report_pipeline"],
+            "gap_detected": False,
+            "reason": "",
+            "suggested_flow_name": "",
+            "suggested_flow_prompt": "",
+            "requirements": [
+                {
+                    "description": "Fetch arXiv papers before reporting",
+                    "covered": False,
+                    "needs_flow": True,
+                    "suggested_flow_name": "arxiv_paper_fetcher",
+                    "suggested_flow_prompt": "Fetch recent arXiv AI papers.",
+                    "downstream_flow_route": "paper_report_pipeline",
+                },
+                {
+                    "description": "Create the report deck",
+                    "covered": True,
+                    "matched_route": "paper_report_pipeline",
+                },
+            ],
+        }
+
+        promoted = LLMPlanner._promote_gap_from_requirements(data)
+
+        assert promoted["gap_detected"] is True
+        assert promoted["suggested_flow_name"] == "arxiv_paper_fetcher"
+        assert promoted["downstream_flow_route"] == "paper_report_pipeline"
 
     def test_prompt_builder_marks_empty_route_tree(self):
         from flowforge.planner.prompt_builder import PromptBuilder

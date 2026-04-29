@@ -424,6 +424,23 @@ class StepContext:
         return self.task_ctx.flow_ctx
 
     @property
+    def task_input(self) -> Any:
+        """Original input to the enclosing task.
+
+        ``ctx.input`` is the previous step's output (or the task input for
+        the first step).  ``ctx.task_input`` is always the task's original
+        input, regardless of step position.  Use this to read fields that
+        are set once at task entry (e.g. ``project_dir``, ``target_url``)
+        from any step.
+        """
+        return self.task_ctx.task_input
+
+    @property
+    def flow_input(self) -> Any:
+        """Original input to the enclosing flow."""
+        return self.task_ctx.flow_ctx.flow_input
+
+    @property
     def global_ctx(self) -> GlobalContext:
         """Shortcut to the shared ``GlobalContext``."""
         return self.task_ctx.global_ctx
@@ -475,17 +492,37 @@ class StepContext:
     def _resolve_tool_configs(self, tool_names: list[str]) -> list[ToolConfig]:
         """Resolve tool names referenced via ``<tool_name>`` in a prompt.
 
-        Searches ``merged_tools`` for configs whose name matches. If a name
-        is not found, it is silently skipped (the LLM may still know about
-        the tool from the global registry).
+        Each unresolved name is logged at WARNING level so that hallucinated
+        tool/skill markers (e.g. an Agent Skill name the LLM invented from
+        the flow name) do not silently degrade the runtime call into a
+        toolless prompt.
         """
+        import logging as _logging
+
         result: list[ToolConfig] = []
+        unresolved: list[str] = []
         for name in tool_names:
+            matched = False
             for tc in self.merged_tools:
                 tc_name = _tool_ref_name(tc)
                 if tc_name == name:
                     result.append(tc)
+                    matched = True
                     break
+            if not matched:
+                unresolved.append(name)
+
+        if unresolved:
+            available = sorted(
+                {_tool_ref_name(tc) for tc in self.merged_tools}
+                - {""}
+            )
+            _logging.getLogger(__name__).warning(
+                "call_llm: unresolved tool/skill markers %s — dropped from "
+                "the request. Registered names: %s",
+                unresolved,
+                available or "(none)",
+            )
         return result
 
     async def call_tool(self, tool_name: str, **kwargs: Any) -> Any:
@@ -514,6 +551,7 @@ class StepContext:
         """
         import inspect
         from flowforge.types import FunctionTool as _FT
+        from flowforge.execution.tool_result import wrap_tool_result
 
         for tc in self.merged_tools:
             if isinstance(tc, _FT) and tc.name == tool_name:
@@ -525,8 +563,10 @@ class StepContext:
                 except (TypeError, ValueError):
                     pass
                 if inspect.iscoroutinefunction(tc.func):
-                    return await tc.func(**call_kwargs)
-                return tc.func(**call_kwargs)
+                    raw = await tc.func(**call_kwargs)
+                else:
+                    raw = tc.func(**call_kwargs)
+                return wrap_tool_result(raw)
         available = [
             tc.name for tc in self.merged_tools if isinstance(tc, _FT)
         ]
@@ -707,10 +747,32 @@ class StepContext:
         ExecutionError
             On LLM call failure.
         """
-        from flowforge.execution.llm import render_prompt, parse_tool_refs, call_llm_api
+        from flowforge.execution.llm import (
+            call_llm_api,
+            find_tool_refs,
+            is_html_tag_name,
+            parse_tool_refs,
+            render_prompt,
+        )
 
-        # 1. Parse <tool_name> references and strip them from prompt text.
-        clean_prompt, tool_names = parse_tool_refs(prompt)
+        available_tool_names = sorted(
+            {_tool_ref_name(tc) for tc in self.merged_tools} - {""}
+        )
+
+        # 1. Parse <tool_name> references and strip only registered tools from
+        # prompt text.  Unknown angle-bracket text is preserved so code prompts
+        # containing literal HTML like <div> or <button> remain intact.
+        clean_prompt, tool_names = parse_tool_refs(
+            prompt,
+            known_names=available_tool_names,
+        )
+        unknown_tool_like = [
+            name
+            for name in find_tool_refs(prompt)
+            if name not in available_tool_names and not is_html_tag_name(name)
+        ]
+        if unknown_tool_like:
+            self._resolve_tool_configs(unknown_tool_like)
 
         # 2. Template {var} with input fields.
         rendered = render_prompt(clean_prompt, self.input)

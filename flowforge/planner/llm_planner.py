@@ -219,17 +219,29 @@ class LLMPlanner(AbstractPlanner):
     @staticmethod
     def _promote_gap_from_requirements(data: dict[str, Any]) -> dict[str, Any]:
         """Use requirement-level gap metadata when top-level fields are empty."""
+        requirements = data.get("requirements") or []
+        missing_requirements = [
+            requirement
+            for requirement in requirements
+            if isinstance(requirement, dict)
+            and not requirement.get("covered", False)
+            and (
+                requirement.get("needs_flow", False)
+                or requirement.get("suggested_flow_name")
+                or requirement.get("suggested_flow_prompt")
+            )
+        ]
+
+        if missing_requirements and not data.get("gap_detected"):
+            data = dict(data)
+            data["gap_detected"] = True
+
         if not data.get("gap_detected"):
             return data
         if data.get("suggested_flow_name") and data.get("suggested_flow_prompt"):
             return data
 
-        requirements = data.get("requirements") or []
-        for requirement in requirements:
-            if not isinstance(requirement, dict):
-                continue
-            if requirement.get("covered", False):
-                continue
+        for requirement in missing_requirements:
             flow_name = requirement.get("suggested_flow_name")
             flow_prompt = requirement.get("suggested_flow_prompt")
             if not flow_name or not flow_prompt:

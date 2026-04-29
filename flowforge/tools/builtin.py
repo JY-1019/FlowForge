@@ -12,10 +12,12 @@ Two categories of tools are provided:
 from __future__ import annotations
 
 import shlex
+import socket
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from flowforge.types import DynamicRunOptions, FunctionTool
 
@@ -55,7 +57,9 @@ def create_builtin_tool_pack(options: DynamicRunOptions) -> list[FunctionTool]:
         description=(
             "Register one or more MCP tool names from a declared MCP server "
             "URL into the current FlowForge run so later steps can use them "
-            "with <tool_name> in ctx.call_llm()."
+            "with <tool_name> in ctx.call_llm(). If a server command is "
+            "declared and the endpoint is not reachable, this tool starts it "
+            "automatically by default."
         ),
     ))
 
@@ -142,8 +146,10 @@ def _create_utility_tools(options: DynamicRunOptions) -> list[FunctionTool]:
             func=_make_web_fetch_url_tool(max_output),
             name="web_fetch_url",
             description=(
-                "Fetch the content of a URL via HTTP GET and return the "
-                "response body as text. Supports HTML, JSON, and plain text."
+                "Fetch a URL via HTTP GET. Returns dict {ok, status, "
+                "content_type, body, truncated, url}; use result['body'] "
+                "for the response text. Pass max_chars to request a larger "
+                "or smaller body slice; max_chars<=0 returns the full body."
             ),
         ),
         FunctionTool(
@@ -158,17 +164,18 @@ def _create_utility_tools(options: DynamicRunOptions) -> list[FunctionTool]:
             func=_make_files_read_text_tool(project_root, max_output),
             name="files_read_text",
             description=(
-                "Read a text file inside the project and return its contents. "
-                "Path must be relative to the project root."
+                "Read a text file in the project (path relative to project "
+                "root). Returns dict {ok, content, truncated, path, size} "
+                "or {ok: False, error}; use result['content'] for the text."
             ),
         ),
         FunctionTool(
             func=_make_files_write_text_tool(project_root),
             name="files_write_text",
             description=(
-                "Write text content to a file inside the project. "
-                "Path must be relative to the project root. Creates parent "
-                "directories if they do not exist."
+                "Write text to a file in the project (path relative to "
+                "project root or absolute under it). Creates parent dirs. "
+                "Returns dict {ok, path, size} or {ok: False, error}."
             ),
         ),
         FunctionTool(
@@ -182,28 +189,72 @@ def _create_utility_tools(options: DynamicRunOptions) -> list[FunctionTool]:
     ]
 
 
-def _make_web_fetch_url_tool(max_chars: int):
-    def _tool(url: str, timeout_seconds: int = 30) -> dict[str, Any]:
-        import urllib.request
-        import urllib.error
-
+def _make_web_fetch_url_tool(default_max_chars: int):
+    def _tool(
+        url: str,
+        timeout_seconds: int = 30,
+        max_chars: int | None = None,
+    ) -> dict[str, Any]:
+        # Use httpx instead of urllib so we can:
+        #   * disable TLS verification behind corporate proxies that
+        #     re-sign certs (matches the LLMConfig.verify_ssl=False
+        #     pattern used elsewhere);
+        #   * follow redirects automatically;
+        #   * honour HTTP_PROXY / HTTPS_PROXY environment variables.
+        # urllib silently returns an empty body in some proxy setups,
+        # which is the failure mode we hit in production.
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "FlowForge/1.0"})
-            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
-                content_type = resp.headers.get("Content-Type", "")
-                return {
-                    "ok": True,
-                    "status": resp.status,
-                    "content_type": content_type,
-                    "body": body[:max_chars],
-                    "truncated": len(body) > max_chars,
-                    "url": url,
-                }
-        except urllib.error.HTTPError as e:
+            import httpx
+        except ImportError as e:
             return {
                 "ok": False,
-                "status": e.code,
+                "status": 0,
+                "error": f"httpx not available: {e}",
+                "url": url,
+            }
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0 Safari/537.36 FlowForge/1.0"
+            ),
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "application/json;q=0.8,*/*;q=0.7"
+            ),
+            "Accept-Language": "en-US,en;q=0.9,ko;q=0.8",
+        }
+
+        try:
+            with httpx.Client(
+                verify=False,
+                follow_redirects=True,
+                timeout=timeout_seconds,
+                trust_env=True,
+            ) as client:
+                resp = client.get(url, headers=headers)
+            body = resp.text or ""
+            content_type = resp.headers.get("Content-Type", "")
+            limit = default_max_chars if max_chars is None else int(max_chars)
+            if limit <= 0:
+                returned_body = body
+                truncated = False
+            else:
+                returned_body = body[:limit]
+                truncated = len(body) > limit
+            return {
+                "ok": True,
+                "status": resp.status_code,
+                "content_type": content_type,
+                "body": returned_body,
+                "truncated": truncated,
+                "url": str(resp.url),
+            }
+        except httpx.HTTPStatusError as e:
+            return {
+                "ok": False,
+                "status": e.response.status_code,
                 "error": str(e),
                 "url": url,
             }
@@ -1380,39 +1431,98 @@ def _make_pip_install_tool(options: DynamicRunOptions):
 
 def _make_mcp_start_tool(options: DynamicRunOptions):
     def _tool(server_name: str, cwd: str | None = None) -> dict[str, Any]:
-        command = options.mcp_server_commands.get(server_name)
-        if not command:
-            return {
-                "ok": False,
-                "server_name": server_name,
-                "stderr": (
-                    "MCP server is not declared in DynamicRunOptions."
-                ),
-            }
-
-        project_root = Path(options.project_root or Path.cwd()).expanduser().resolve()
-        run_cwd = _resolve_cwd(project_root, cwd)
-        proc = subprocess.Popen(
-            command,
-            cwd=run_cwd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        time.sleep(min(options.mcp_start_timeout_seconds, 2))
-        running = proc.poll() is None
-        return {
-            "ok": running,
-            "server_name": server_name,
-            "pid": proc.pid,
-            "command": command,
-            "cwd": str(run_cwd),
-            "url": options.mcp_server_urls.get(server_name, ""),
-            "stderr": "" if running else "MCP server command exited immediately.",
-        }
+        return _start_declared_mcp_server(options, server_name, cwd=cwd)
 
     _tool.__name__ = "builtin_mcp_start_server"
     return _tool
+
+
+def _mcp_endpoint_ready(url: str, timeout_seconds: float = 0.5) -> bool:
+    """Return True when an MCP HTTP endpoint host/port accepts connections."""
+    if not url:
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection(
+            (parsed.hostname, port),
+            timeout=timeout_seconds,
+        ):
+            return True
+    except OSError:
+        return False
+
+
+def _wait_for_mcp_endpoint(
+    url: str,
+    proc: subprocess.Popen[Any] | None,
+    timeout_seconds: int,
+) -> bool:
+    """Wait until a local MCP endpoint is reachable or the process exits."""
+    deadline = time.monotonic() + max(0, timeout_seconds)
+    while time.monotonic() <= deadline:
+        if _mcp_endpoint_ready(url):
+            return True
+        if proc is not None and proc.poll() is not None:
+            return False
+        time.sleep(0.2)
+    return _mcp_endpoint_ready(url)
+
+
+def _start_declared_mcp_server(
+    options: DynamicRunOptions,
+    server_name: str,
+    cwd: str | None = None,
+) -> dict[str, Any]:
+    command = options.mcp_server_commands.get(server_name)
+    endpoint = options.mcp_server_urls.get(server_name, "")
+    if not command:
+        return {
+            "ok": False,
+            "server_name": server_name,
+            "url": endpoint,
+            "already_running": _mcp_endpoint_ready(endpoint),
+            "stderr": "MCP server is not declared in DynamicRunOptions.",
+        }
+
+    if endpoint and _mcp_endpoint_ready(endpoint):
+        return {
+            "ok": True,
+            "server_name": server_name,
+            "pid": None,
+            "command": command,
+            "cwd": None,
+            "url": endpoint,
+            "already_running": True,
+            "stderr": "",
+        }
+
+    project_root = Path(options.project_root or Path.cwd()).expanduser().resolve()
+    run_cwd = _resolve_cwd(project_root, cwd)
+    proc = subprocess.Popen(
+        command,
+        cwd=run_cwd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    ready = (
+        _wait_for_mcp_endpoint(endpoint, proc, options.mcp_start_timeout_seconds)
+        if endpoint
+        else proc.poll() is None
+    )
+    return {
+        "ok": ready,
+        "server_name": server_name,
+        "pid": proc.pid,
+        "command": command,
+        "cwd": str(run_cwd),
+        "url": endpoint,
+        "already_running": False,
+        "stderr": "" if ready else "MCP server command exited or endpoint was not ready.",
+    }
 
 
 def _make_mcp_register_tool(options: DynamicRunOptions):
@@ -1421,6 +1531,8 @@ def _make_mcp_register_tool(options: DynamicRunOptions):
         tool_names: str = "",
         url: str = "",
         description: str = "",
+        auto_start: bool = True,
+        cwd: str | None = None,
         ctx: Any = None,
     ) -> dict[str, Any]:
         if ctx is None:
@@ -1440,6 +1552,26 @@ def _make_mcp_register_tool(options: DynamicRunOptions):
                     "DynamicRunOptions.mcp_server_urls[server_name]."
                 ),
             }
+
+        start_result: dict[str, Any] | None = None
+        if (
+            auto_start
+            and server_name in options.mcp_server_commands
+            and not _mcp_endpoint_ready(endpoint)
+        ):
+            start_result = _start_declared_mcp_server(
+                options, server_name, cwd=cwd,
+            )
+            if not start_result.get("ok"):
+                return {
+                    "ok": False,
+                    "server_name": server_name,
+                    "url": endpoint,
+                    "start": start_result,
+                    "stderr": (
+                        "MCP server could not be started before registration."
+                    ),
+                }
 
         declared = options.mcp_server_tools.get(server_name, [])
         raw_names = tool_names or ",".join(declared)
@@ -1486,6 +1618,7 @@ def _make_mcp_register_tool(options: DynamicRunOptions):
             "server_name": server_name,
             "url": endpoint,
             "registered_tools": registered,
+            "start": start_result,
         }
 
     _tool.__name__ = "builtin_mcp_register_server"
@@ -1530,6 +1663,22 @@ def _run_shell_command(
     project_root = Path(options.project_root or Path.cwd()).expanduser().resolve()
     run_cwd = _resolve_cwd(project_root, cwd)
     timeout = _coerce_timeout(timeout_seconds, options.shell_timeout_seconds)
+
+    if not run_cwd.is_dir():
+        return {
+            "ok": False,
+            "returncode": 127,
+            "exit_code": 127,
+            "stdout": "",
+            "stderr": (
+                f"cwd does not exist: {run_cwd}. Create the directory first "
+                "with files_write_text/shell_workspace_write, or use the "
+                "project name from this flow's input."
+            ),
+            "command": command,
+            "cwd": str(run_cwd),
+            "mode": mode,
+        }
 
     error = _validate_command(command, mode, options)
     if error:

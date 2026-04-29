@@ -50,6 +50,13 @@ class DynamicManifest(BaseModel):
     version: int = 1
     flows: list[GeneratedFlowRecord] = Field(default_factory=list)
     tools: list[GeneratedToolRecord] = Field(default_factory=list)
+    # ``mcp_servers`` is populated by Phase 3 of dynamic generation.  It
+    # records auto-provisioned MCP servers so subsequent compiles know
+    # which external services the persisted flows depend on.  The element
+    # type is a forward reference (``Any`` here) to avoid an import cycle
+    # with ``flowforge.dynamic.mcp_provision``; that module's
+    # ``McpProvisionRecord`` matches this shape.
+    mcp_servers: list[Any] = Field(default_factory=list)
 
 
 def resolve_project_root(options: DynamicRunOptions) -> Path:
@@ -219,8 +226,40 @@ def load_generated_assets(global_meta: Any, options: DynamicRunOptions) -> None:
             from flowforge.dynamic.defaults import apply_dynamic_defaults
 
             apply_dynamic_defaults(flow_meta, options)
-            global_meta.flows.append(flow_meta)
+            source_path = root / record.file
+            try:
+                source_code = source_path.read_text(encoding="utf-8")
+            except OSError:
+                source_code = ""
+            setattr(flow_meta, "__flowforge_dynamic_source_code__", source_code)
+            setattr(flow_meta, "__flowforge_dynamic_manifest_record__", record)
+            setattr(
+                flow_meta,
+                "__flowforge_dynamic_downstream_flow_route__",
+                record.downstream_flow_route,
+            )
+            _insert_generated_flow(global_meta.flows, flow_meta, record)
             existing_flow_names.add(flow_meta.name)
+
+
+def _insert_generated_flow(
+    flows: list[Any],
+    flow_meta: Any,
+    record: GeneratedFlowRecord,
+) -> None:
+    """Insert generated bridge flows before their declared downstream flow."""
+
+    target = (
+        record.inject_before
+        or record.downstream_flow_route
+        or ""
+    ).removeprefix("global.").split(".", 1)[0]
+    if target:
+        for index, existing in enumerate(flows):
+            if getattr(existing, "name", "") == target:
+                flows.insert(index, flow_meta)
+                return
+    flows.append(flow_meta)
 
 
 def _load_flow_record(record: GeneratedFlowRecord, root: Path) -> Any:

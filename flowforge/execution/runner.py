@@ -123,6 +123,41 @@ def _group_by_order(items: list[Any], get_order: Any) -> list[list[Any]]:
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+_DYNAMIC_PLACEHOLDER_OUTPUT_PHRASES: tuple[str, ...] = (
+    "html 본문 데이터 없음",
+    "html이 잘려",
+    "html 잘림",
+    "페이지가 잘렸",
+    "확인 불가",
+    "추출 불가",
+    "추출할 수 없습니다",
+    "could not extract",
+    "cannot extract",
+    "unable to extract",
+    "placeholder",
+    "docx 파일 읽기 실패",
+    ".docx 파일 읽기 실패",
+    "파일 검증 중 오류",
+)
+
+
+def _contains_dynamic_placeholder_output(value: Any) -> bool:
+    if isinstance(value, str):
+        lowered = value.lower()
+        return any(
+            phrase in lowered
+            for phrase in _DYNAMIC_PLACEHOLDER_OUTPUT_PHRASES
+        )
+    if isinstance(value, dict):
+        return any(
+            _contains_dynamic_placeholder_output(item)
+            for item in value.values()
+        )
+    if isinstance(value, (list, tuple, set)):
+        return any(_contains_dynamic_placeholder_output(item) for item in value)
+    return False
+
+
 def _to_validated(schema: type, result: Any) -> Any:
     """Coerce *result* into *schema* (a Pydantic ``BaseModel`` subclass).
 
@@ -995,12 +1030,28 @@ class FlowRunner:
             except ExecutionError as e:
                 last_exc = e
                 if attempt < _max_retries:
-                    wait = 2 ** attempt
+                    # Self-repair hook: if this flow was dynamically generated
+                    # and registered a ``runtime_repair`` callable, ask the LLM
+                    # to fix the code given the error before retrying.  When
+                    # repair succeeds the meta is mutated in place, so the next
+                    # ``_run_once`` runs the regenerated implementation.
+                    repair = getattr(meta, "runtime_repair", None)
+                    repaired = False
+                    if callable(repair):
+                        try:
+                            repaired = bool(await repair(str(e)))
+                        except Exception as repair_exc:
+                            logger.warning(
+                                "flow repair failed  name=%s error=%s",
+                                meta.name, repair_exc,
+                            )
+                    wait = 0 if repaired else 2 ** attempt
                     logger.warning(
-                        "flow retry  name=%s attempt=%d/%d wait=%ds error=%s",
-                        meta.name, attempt + 1, _max_retries, wait, e,
+                        "flow retry  name=%s attempt=%d/%d wait=%ds repaired=%s error=%s",
+                        meta.name, attempt + 1, _max_retries, wait, repaired, e,
                     )
-                    await asyncio.sleep(wait)
+                    if wait:
+                        await asyncio.sleep(wait)
 
         # Preserve trace_path and step_input from the underlying error.
         final_err = ExecutionError(
@@ -1134,6 +1185,16 @@ class FlowRunner:
                             results        = await run_parallel(coros)
                             current_output = results[-1] if results else current_output
 
+            if (
+                getattr(meta, "__flowforge_dynamic_source_code__", "")
+                and _contains_dynamic_placeholder_output(current_output)
+            ):
+                raise ExecutionError(
+                    meta.name,
+                    "generated flow returned placeholder failure output; "
+                    "it must raise and repair instead of treating missing "
+                    "data as success",
+                )
             if tracer:
                 tracer.finish_node(node_id, current_output)
             logger.info("flow finish name=%s", meta.name)

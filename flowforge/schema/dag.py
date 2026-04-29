@@ -150,6 +150,24 @@ class FlowForgeDAG:
             edge_type=edge.edge_type,
         )
 
+    def remove_subtree(self, node_id: str) -> list[str]:
+        """Remove ``node_id`` and every descendant from the graph and index.
+
+        Returns the IDs that were removed.  No-op when ``node_id`` is not
+        present.  Used by dynamic-flow runtime repair to drop a broken
+        flow's subtree before re-adding the regenerated version.
+        """
+        if node_id not in self._nodes:
+            return []
+        to_remove: list[str] = [node_id]
+        to_remove.extend(
+            nid for nid in nx.descendants(self._graph, node_id)
+        )
+        for nid in to_remove:
+            self._graph.remove_node(nid)
+            self._nodes.pop(nid, None)
+        return to_remove
+
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------

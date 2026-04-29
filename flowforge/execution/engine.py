@@ -143,6 +143,20 @@ class ExecutionEngine:
         if self._compiled_agent is not None:
             global_ctx.shared_data["_compiled_agent"] = self._compiled_agent
 
+        if (
+            self._global_meta.dynamic_flow
+            and run_dynamic_options.enabled
+            and self._compiled_agent is not None
+        ):
+            self._install_dynamic_runtime_repairs(
+                global_ctx=global_ctx,
+                input_data=input_data,
+            )
+            await self._repair_stale_dynamic_flows(
+                global_ctx=global_ctx,
+                input_data=input_data,
+            )
+
         # ── Resume: restore checkpoint for skip logic ────────────────────
         if resume_from is not None:
             global_ctx.checkpoint = resume_from
@@ -195,10 +209,18 @@ class ExecutionEngine:
                             "falling back to deterministic execution"
                         )
                     for dynamic_input in dynamic_payloads:
-                        dynamic_result = await self._execute_dynamic_generator(
-                            global_ctx,
-                            dynamic_input,
-                        )
+                        try:
+                            dynamic_result = await self._execute_dynamic_generator(
+                                global_ctx,
+                                dynamic_input,
+                            )
+                        except Exception as dynamic_exc:
+                            dynamic_result = {
+                                "success": False,
+                                "injected": False,
+                                "reason": str(dynamic_exc),
+                                "error": str(dynamic_exc),
+                            }
                         dynamic_results.append(dynamic_result)
 
                         if not dynamic_result.get("success", False):
@@ -244,9 +266,21 @@ class ExecutionEngine:
         try:
             current_output = await self._run_root_flows(global_ctx, input_data)
         except Exception as e:
-            if tracer:
-                tracer.finish_run(current_output, error=str(e))
-            raise
+            recovered = await self._try_dynamic_recovery_after_failure(
+                global_ctx=global_ctx,
+                input_data=input_data,
+                error=e,
+                planning_mode=planning_mode,
+                route=route,
+                run_dynamic_options=run_dynamic_options,
+                planned_root_flow_ids=planned_root_flow_ids,
+            )
+            if recovered:
+                current_output = await self._run_root_flows(global_ctx, input_data)
+            else:
+                if tracer:
+                    tracer.finish_run(current_output, error=str(e))
+                raise
 
         # Record this run in session memory for cross-run context.
         self.memory.record_run(
@@ -258,6 +292,66 @@ class ExecutionEngine:
 
         run_trace = tracer.finish_run(current_output) if tracer else RunTrace()
         return current_output, run_trace
+
+    async def _try_dynamic_recovery_after_failure(
+        self,
+        *,
+        global_ctx: GlobalContext,
+        input_data: Any,
+        error: Exception,
+        planning_mode: str,
+        route: str | list[str] | None,
+        run_dynamic_options: DynamicRunOptions,
+        planned_root_flow_ids: list[str] | None,
+    ) -> bool:
+        """Generate a missing upstream flow when planner under-reported a gap."""
+        if (
+            route is not None
+            or planning_mode == "deterministic"
+            or not self._global_meta.dynamic_flow
+            or not run_dynamic_options.enabled
+            or self._compiled_agent is None
+            or not planned_root_flow_ids
+        ):
+            return False
+        if global_ctx.shared_data.get("_dynamic_runtime_failure_recovered", False):
+            return False
+
+        downstream_route = planned_root_flow_ids[0].removeprefix("global.")
+        dynamic_input = self._build_runtime_failure_dynamic_input(
+            input_data=input_data,
+            error=error,
+            downstream_route=downstream_route,
+        )
+        _logger.warning(
+            "execution failed after planning; attempting dynamic upstream "
+            "generation before %s: %s",
+            downstream_route, error,
+        )
+        try:
+            dynamic_result = await self._execute_dynamic_generator(
+                global_ctx,
+                dynamic_input,
+            )
+        except Exception as dynamic_exc:
+            dynamic_result = {
+                "success": False,
+                "injected": False,
+                "reason": str(dynamic_exc),
+                "error": str(dynamic_exc),
+            }
+        self._set_last_dynamic_generation(dynamic_result)
+        if not dynamic_result.get("success", False):
+            return False
+
+        replanned = await self._plan_with_llm(input_data, planning_mode)
+        planned_node_ids, planned_root_flow_ids, _user_flow_ids = (
+            self._extract_plan_selection(replanned)
+        )
+        global_ctx.planned_node_ids = planned_node_ids
+        global_ctx.planned_root_flow_ids = planned_root_flow_ids
+        global_ctx.shared_data["_dynamic_runtime_failure_recovered"] = True
+        return True
 
     async def _plan_with_llm(
         self,
@@ -366,6 +460,7 @@ class ExecutionEngine:
             node for node in self._dag.get_children("global")
             if node.type == NodeType.FLOW
         ]
+        root_flows = self._order_dynamic_bridge_flows(root_flows)
 
         planned_node_ids = global_ctx.planned_node_ids
         if planned_node_ids is not None:
@@ -384,8 +479,173 @@ class ExecutionEngine:
                 if node.id not in {flow.id for flow in ordered}
             ]
             root_flows = ordered + remaining
+            root_flows = self._order_dynamic_bridge_flows(root_flows)
 
         return root_flows
+
+    @staticmethod
+    def _order_dynamic_bridge_flows(root_flows: list[Any]) -> list[Any]:
+        """Honor generated-flow bridge metadata during fallback execution."""
+
+        ordered = list(root_flows)
+        for node in list(ordered):
+            downstream = getattr(
+                node.meta,
+                "__flowforge_dynamic_downstream_flow_route__",
+                "",
+            )
+            if not downstream:
+                continue
+            target = downstream.removeprefix("global.").split(".", 1)[0]
+            if not target:
+                continue
+            target_id = f"global.{target}"
+            node_index = next(
+                (i for i, candidate in enumerate(ordered) if candidate.id == node.id),
+                None,
+            )
+            target_index = next(
+                (i for i, candidate in enumerate(ordered) if candidate.id == target_id),
+                None,
+            )
+            if node_index is None or target_index is None or node_index < target_index:
+                continue
+            bridge = ordered.pop(node_index)
+            target_index = next(
+                i for i, candidate in enumerate(ordered) if candidate.id == target_id
+            )
+            ordered.insert(target_index, bridge)
+        return ordered
+
+    def _install_dynamic_runtime_repairs(
+        self,
+        *,
+        global_ctx: GlobalContext,
+        input_data: Any,
+    ) -> None:
+        """Attach repair hooks to persisted generated flows loaded at compile time."""
+        try:
+            from flowforge.dynamic.generator import DynamicFlowGenerator
+            from flowforge.dynamic.meta_flow import _install_runtime_repair
+        except Exception as exc:
+            _logger.warning("dynamic runtime repair unavailable: %s", exc)
+            return
+
+        generator = DynamicFlowGenerator(
+            llm_config=self._global_meta.llm_config,
+            dag=self._dag,
+            docs=self._docs,
+            tool_configs=self._global_meta.tools,
+            dynamic_options=global_ctx.dynamic_options,
+        )
+
+        for flow_meta in list(self._global_meta.flows):
+            if getattr(flow_meta, "runtime_repair", None) is not None:
+                continue
+            source_code = getattr(
+                flow_meta,
+                "__flowforge_dynamic_source_code__",
+                "",
+            )
+            if not source_code:
+                continue
+
+            downstream_route = getattr(
+                flow_meta,
+                "__flowforge_dynamic_downstream_flow_route__",
+                "",
+            )
+            downstream_contract, downstream_name = (
+                generator.resolve_downstream_contract(downstream_route)
+            )
+            project_context = generator.build_code_generation_context(
+                flow_name=flow_meta.name,
+                flow_prompt=flow_meta.prompt,
+                user_query=input_data,
+                downstream_contract=downstream_contract,
+                downstream_flow_name=downstream_name,
+            )
+            _install_runtime_repair(
+                flow_meta=flow_meta,
+                agent=self._compiled_agent,
+                generator=generator,
+                global_ctx=global_ctx,
+                initial_code=source_code,
+                user_query=input_data,
+                downstream_contract=downstream_contract,
+                downstream_flow_name=downstream_name,
+                project_context=project_context,
+                downstream_flow_route=downstream_route,
+            )
+
+    async def _repair_stale_dynamic_flows(
+        self,
+        *,
+        global_ctx: GlobalContext,
+        input_data: Any,
+    ) -> None:
+        """Preflight persisted generated code and repair stale bad patterns."""
+        try:
+            from flowforge.dynamic.generator import DynamicFlowGenerator
+        except Exception as exc:
+            _logger.warning("dynamic preflight repair unavailable: %s", exc)
+            return
+
+        generator = DynamicFlowGenerator(
+            llm_config=self._global_meta.llm_config,
+            dag=self._dag,
+            docs=self._docs,
+            tool_configs=self._global_meta.tools,
+            dynamic_options=global_ctx.dynamic_options,
+        )
+
+        for flow_meta in list(self._global_meta.flows):
+            source_code = getattr(
+                flow_meta,
+                "__flowforge_dynamic_source_code__",
+                "",
+            )
+            if not source_code:
+                continue
+            quality_error = generator.check_generated_code_quality(
+                source_code,
+                input_data,
+            )
+            if quality_error is None:
+                continue
+            repair = getattr(flow_meta, "runtime_repair", None)
+            if not callable(repair):
+                continue
+            _logger.warning(
+                "preflight repair for generated flow %s: %s",
+                flow_meta.name, quality_error,
+            )
+            repaired = False
+            try:
+                repaired = bool(await repair(
+                    "Preflight generated-code quality check failed: "
+                    f"{quality_error}"
+                ))
+            except Exception as exc:
+                _logger.warning(
+                    "preflight repair failed for generated flow %s: %s",
+                    flow_meta.name, exc,
+                )
+            if not repaired:
+                self._drop_dynamic_flow(flow_meta.name)
+
+    def _drop_dynamic_flow(self, flow_name: str) -> None:
+        """Remove an unusable generated flow so planning can regenerate it."""
+        node_id = f"global.{flow_name}"
+        self._dag.remove_subtree(node_id)
+        self._global_meta.flows = [
+            flow for flow in self._global_meta.flows
+            if flow.name != flow_name
+        ]
+        _logger.warning(
+            "dropped stale generated flow %s after failed preflight repair",
+            flow_name,
+        )
 
     async def _run_root_flows(
         self,
@@ -451,6 +711,38 @@ class ExecutionEngine:
                 "downstream_flow_route": metadata.get("downstream_flow_route", ""),
             }
         return input_data
+
+    def _build_runtime_failure_dynamic_input(
+        self,
+        *,
+        input_data: Any,
+        error: Exception,
+        downstream_route: str,
+    ) -> dict[str, Any]:
+        reason = (
+            f"The selected downstream flow '{downstream_route}' could not "
+            f"consume the original request directly. Runtime error: {error}"
+        )
+        flow_name = self._synthesise_flow_name(
+            input_data,
+            {"reason": f"{input_data} before {downstream_route}"},
+        )
+        flow_prompt = (
+            "Create an upstream FlowForge flow that satisfies the data "
+            f"collection/preparation part of this request and returns a "
+            f"payload consumable by `{downstream_route}`. Original request: "
+            f"{str(input_data)[:700]}. Downstream failure: {str(error)[:400]}"
+        )
+        return {
+            "user_query": str(input_data),
+            "gap_analysis": {
+                "covered": False,
+                "reason": reason,
+                "suggested_flow_name": flow_name,
+                "suggested_flow_prompt": flow_prompt,
+            },
+            "downstream_flow_route": downstream_route,
+        }
 
     @staticmethod
     def _synthesise_flow_name(input_data: Any, metadata: dict[str, Any]) -> str:
@@ -579,12 +871,25 @@ class ExecutionEngine:
                 "reason": "Internal _dynamic_generator flow is not available.",
             }
 
-        result = await self._flow_runner.run(
-            node.meta,
-            global_ctx,
-            dynamic_input,
-            parent_node_id="global",
-        )
+        previous_planned = global_ctx.planned_node_ids
+        previous_roots = global_ctx.planned_root_flow_ids
+        try:
+            internal_ids = {
+                n.id for n in self._dag.get_all_nodes()
+                if n.id == "global._dynamic_generator"
+                or n.id.startswith("global._dynamic_generator.")
+            }
+            global_ctx.planned_node_ids = internal_ids
+            global_ctx.planned_root_flow_ids = ["global._dynamic_generator"]
+            result = await self._flow_runner.run(
+                node.meta,
+                global_ctx,
+                dynamic_input,
+                parent_node_id="global",
+            )
+        finally:
+            global_ctx.planned_node_ids = previous_planned
+            global_ctx.planned_root_flow_ids = previous_roots
         if isinstance(result, dict):
             return result
         return {

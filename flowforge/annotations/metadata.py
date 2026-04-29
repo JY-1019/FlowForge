@@ -390,6 +390,13 @@ class FlowMeta:
     # FlowMeta used when no key matches the condition value.
     fallback: FlowMeta | None = None
 
+    # Optional runtime self-repair hook for dynamically generated flows.
+    # Signature: ``async def repair(error: str) -> bool``.  Returns True
+    # when the generated code has been regenerated and the meta mutated in
+    # place (so the next retry runs the fixed version).  FlowRunner calls
+    # it on ``ExecutionError`` before each retry attempt.
+    runtime_repair: Callable[..., Any] | None = None
+
     @property
     def is_branch(self) -> bool:
         """``True`` when this flow is a branch dispatcher.

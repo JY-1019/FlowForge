@@ -37,7 +37,9 @@ import os
 import re
 import textwrap
 import time
+import weakref
 from pathlib import Path
+from collections.abc import Collection
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -117,7 +119,47 @@ def render_prompt(template: str, input_data: Any) -> str:
 # Tool reference parsing
 # ---------------------------------------------------------------------------
 
-def parse_tool_refs(prompt: str) -> tuple[str, list[str]]:
+_TOOL_REF_RE = re.compile(r"<([A-Za-z0-9_][A-Za-z0-9_-]*)>")
+_HTML_TAG_NAMES = {
+    "a", "abbr", "address", "area", "article", "aside", "audio", "b", "base",
+    "bdi", "bdo", "blockquote", "body", "br", "button", "canvas", "caption",
+    "cite", "code", "col", "colgroup", "data", "datalist", "dd", "del",
+    "details", "dfn", "dialog", "div", "dl", "dt", "em", "embed", "fieldset",
+    "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5",
+    "h6", "head", "header", "hgroup", "hr", "html", "i", "iframe", "img",
+    "input", "ins", "kbd", "label", "legend", "li", "link", "main", "map",
+    "mark", "menu", "meta", "meter", "nav", "noscript", "object", "ol",
+    "optgroup", "option", "output", "p", "param", "picture", "pre",
+    "progress", "q", "rp", "rt", "ruby", "s", "samp", "script", "section",
+    "select", "slot", "small", "source", "span", "strong",
+    "style", "sub", "summary", "sup", "svg", "table", "tbody", "td",
+    "template", "textarea", "tfoot", "th", "thead", "time", "title", "tr",
+    "track", "u", "ul", "var", "video", "wbr",
+}
+
+
+def is_html_tag_name(name: str) -> bool:
+    """Return ``True`` when *name* is a common HTML/SVG tag name."""
+    return name.lower() in _HTML_TAG_NAMES
+
+
+def find_tool_refs(prompt: str) -> list[str]:
+    """Return unique ``<name>`` markers from *prompt* without modifying text."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for match in _TOOL_REF_RE.finditer(prompt):
+        name = match.group(1)
+        if name not in seen:
+            names.append(name)
+            seen.add(name)
+    return names
+
+
+def parse_tool_refs(
+    prompt: str,
+    *,
+    known_names: Collection[str] | None = None,
+) -> tuple[str, list[str]]:
     """Extract ``<tool_name>`` markers from *prompt*.
 
     Each ``<tool_name>`` marker indicates that the named tool should be
@@ -128,6 +170,10 @@ def parse_tool_refs(prompt: str) -> tuple[str, list[str]]:
     ----------
     prompt:
         Raw prompt possibly containing ``<tool_name>`` references.
+    known_names:
+        Optional allow-list of registered tool/skill names.  When supplied,
+        only matching markers are removed; all other angle-bracket text is
+        left in place.
 
     Returns
     -------
@@ -138,16 +184,22 @@ def parse_tool_refs(prompt: str) -> tuple[str, list[str]]:
     tool_names: list[str] = []
     seen: set[str] = set()
 
+    known = set(known_names) if known_names is not None else None
+
     def _collect(match: re.Match[str]) -> str:
         name = match.group(1)
+        if known is not None and name not in known:
+            return match.group(0)
         if name not in seen:
             tool_names.append(name)
             seen.add(name)
         return ""  # remove marker from prompt
 
     # Match Agent Skill/tool identifiers, including standard hyphenated skill
-    # names, but not HTML-like closing/self-closing tags.
-    cleaned = re.sub(r"<([A-Za-z0-9_][A-Za-z0-9_-]*)>", _collect, prompt)
+    # names.  When ``known_names`` is provided, unknown angle-bracket text is
+    # preserved so literal HTML such as ``<div>`` does not get stripped from
+    # frontend/code-generation prompts.
+    cleaned = _TOOL_REF_RE.sub(_collect, prompt)
     # Clean up extra whitespace left by marker removal.
     cleaned = re.sub(r"  +", " ", cleaned).strip()
 
@@ -158,8 +210,16 @@ def parse_tool_refs(prompt: str) -> tuple[str, list[str]]:
 # LLM API call
 # ---------------------------------------------------------------------------
 
-def _tool_config_to_anthropic(tool_config: Any) -> dict[str, Any]:
-    """Convert a ``ToolConfig`` to an Anthropic tool-use schema dict."""
+# Tool configs are immutable Pydantic models; once converted to an
+# Anthropic schema the result can be reused for the lifetime of the
+# config.  Pydantic v2 models are unhashable so we key by ``id()`` and
+# attach a finalizer to evict the entry when the tool config is
+# garbage-collected, preventing stale entries when ids are reused.
+_TOOL_SCHEMA_CACHE: dict[int, dict[str, Any]] = {}
+
+
+def _build_tool_config_to_anthropic(tool_config: Any) -> dict[str, Any]:
+    """Build the Anthropic tool-use schema dict for a ``ToolConfig``."""
     from flowforge.types import MCPServer, FunctionTool, HTTPTool
 
     if isinstance(tool_config, FunctionTool):
@@ -188,6 +248,27 @@ def _tool_config_to_anthropic(tool_config: Any) -> dict[str, Any]:
     if hasattr(tool_config, "to_anthropic_tool"):
         return tool_config.to_anthropic_tool()
     return {}
+
+
+def _tool_config_to_anthropic(tool_config: Any) -> dict[str, Any]:
+    """Convert a ``ToolConfig`` to an Anthropic tool-use schema dict.
+
+    Results are memoised per tool-config instance so repeated ``call_llm``
+    invocations don't reflect-and-rebuild schemas every round-trip.  The
+    caller receives a shallow copy so it can mutate the dict freely.
+    """
+    key = id(tool_config)
+    cached = _TOOL_SCHEMA_CACHE.get(key)
+    if cached is None:
+        cached = _build_tool_config_to_anthropic(tool_config)
+        _TOOL_SCHEMA_CACHE[key] = cached
+        try:
+            weakref.finalize(tool_config, _TOOL_SCHEMA_CACHE.pop, key, None)
+        except TypeError:
+            # Object does not support weakref — keep the entry but accept
+            # the slow leak on this rare type.
+            pass
+    return dict(cached)
 
 
 def _split_claude_skill_configs(
