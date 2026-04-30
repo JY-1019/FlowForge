@@ -40,6 +40,12 @@ The object returned by `FlowForge.compile()`. Holds the DAG, docs, and a default
 For **single-user / CLI** usage, call `run()` directly on this object.
 For **multi-user / server** usage, call `create_session()` to get isolated per-user sessions.
 
+!!! important "Concurrent server requests"
+    Treat the default `CompiledAgent` engine as the convenient single-user
+    runner. In a web server or any multi-user environment, create one
+    `AgentSession` per user/request stream. Sessions share the compiled DAG
+    and docs, but keep memory and `last_trace` isolated.
+
 ---
 
 ### Properties

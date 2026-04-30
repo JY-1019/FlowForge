@@ -96,6 +96,10 @@ the order-1 group completes.
 The same grouping model applies to sibling flows and sibling tasks with the
 same explicit `order`.
 
+Root flows under `@global_config` follow this same model: `order=None` root
+flows run sequentially in declaration order, while root flows with the same
+explicit order run in parallel and forward the last result in that order group.
+
 ## Route Filtering
 
 Use `route` to execute only a subset:
