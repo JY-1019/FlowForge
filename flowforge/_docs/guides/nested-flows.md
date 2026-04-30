@@ -1,175 +1,102 @@
 # Nested Flows & Tasks
 
-FlowForge supports recursive nesting: flows can contain flows, tasks can contain tasks.
-
----
+Flows can contain flows and tasks. Tasks can contain tasks or steps. Use
+nesting to keep large agents readable without manual graph wiring.
 
 ## Nested Flows
 
-Use nested flows to split a complex pipeline into logical sub-pipelines:
-
 ```python
-@global_config(prompt="Data pipeline agent")
+@global_config(prompt="ETL agent")
 class PipelineAgent:
 
-    @flow(name="pipeline", prompt="Full ETL pipeline")
+    @flow(name="pipeline", prompt="Run the full ETL pipeline")
     class PipelineFlow:
 
-        # Sub-flow 1: data ingestion
-        @flow(name="ingest", prompt="Ingest raw data from external sources")
+        @flow(name="ingest", prompt="Load raw data")
         class IngestFlow:
-
-            @task(name="fetch", prompt="Fetch raw data")
+            @task(name="fetch", prompt="Fetch data")
             class FetchTask:
-                @step(order=1, prompt="Validate source URL")
-                async def validate_source(ctx): ...
+                @step(order=1, prompt="Fetch")
+                async def fetch(ctx):
+                    return {"raw": ctx.input}
 
-                @step(order=2, prompt="Download raw data")
-                async def download(ctx): ...
-
-        # Sub-flow 2: transformation (runs AFTER ingest output)
-        @flow(name="transform", prompt="Clean and transform ingested data")
+        @flow(name="transform", prompt="Clean and shape data")
         class TransformFlow:
-
-            @task(name="clean", prompt="Remove nulls and duplicates")
+            @task(name="clean", prompt="Clean records")
             class CleanTask:
-                @step(order=1, prompt="Drop empty rows")
-                async def drop_nulls(ctx): ...
+                @step(order=1, prompt="Clean")
+                async def clean(ctx):
+                    return {"clean": ctx.input}
 
-                @step(order=2, prompt="Deduplicate records")
-                async def deduplicate(ctx): ...
-
-        # Final task (runs after both sub-flows)
-        @task(name="export", prompt="Export to destination")
+        @task(name="export", prompt="Export final result")
         class ExportTask:
-            @step(order=1, prompt="Write output")
-            async def write_output(ctx): ...
+            @step(order=1, prompt="Export")
+            async def export(ctx):
+                return {"exported": ctx.input}
 ```
 
-**Execution order:**
-1. `IngestFlow` runs (receives original input)
-2. `TransformFlow` runs (receives `IngestFlow` output)
-3. `ExportTask` runs (receives `TransformFlow` output)
+Execution is insertion-order sequential by default:
 
----
-
-## `depends_on` — Explicit Ordering
-
-For flows at the same level under `@global_config`, use `depends_on` to enforce order:
-
-```python
-@global_config(prompt="agent")
-class MyAgent:
-
-    @flow(name="auth", prompt="Authenticate the user")
-    class AuthFlow: ...
-
-    @flow(name="fetch", prompt="Fetch data", depends_on=["auth"])
-    class FetchFlow: ...
-
-    @flow(name="process", prompt="Process data", depends_on=["fetch"])
-    class ProcessFlow: ...
+```text
+ingest -> transform -> export
 ```
 
-DAG edges: `auth → fetch → process`
-
----
-
-## Parallel Flows
+## Container Tasks
 
 ```python
-@flow(name="multi_search", prompt="Search multiple sources in parallel",
-      parallel=True)
-class MultiSearchFlow:
+@task(name="analyze", prompt="Analyze in stages")
+class AnalyzeTask:
 
-    @flow(name="web", prompt="Web search")
-    class WebSearchFlow: ...
-
-    @flow(name="db", prompt="Database search")
-    class DbSearchFlow: ...
-
-    @flow(name="api", prompt="API search")
-    class ApiSearchFlow: ...
-    # All three receive the same input; last result is the output
-```
-
----
-
-## Nested Tasks (Container Tasks)
-
-A task that contains other tasks is called a **container task**.
-It runs child tasks sequentially, passing each output to the next.
-
-```python
-@task(name="analyze_and_format", prompt="Analyze and format the document")
-class AnalyzeAndFormatTask:
-
-    @task(name="analyze", prompt="Analyze content and extract structure")
-    class AnalyzeTask:          # leaf task — has steps directly
-        @step(order=1, prompt="Classify document type")
-        async def classify(ctx): ...
-
-        @step(order=2, prompt="Extract key entities")
+    @task(name="extract", prompt="Extract facts")
+    class ExtractTask:
+        @step(order=1, prompt="Extract")
         async def extract(ctx): ...
 
-    @task(name="format", prompt="Format the analysis into a report")
-    class FormatTask:           # leaf task — has steps directly
-        @step(order=1, prompt="Draft summary paragraph")
-        async def draft(ctx): ...
-
-        @step(order=2, prompt="Add citations and references")
-        async def cite(ctx): ...
+    @task(name="score", prompt="Score facts")
+    class ScoreTask:
+        @step(order=1, prompt="Score")
+        async def score(ctx): ...
 ```
 
-**Data flow:** `AnalyzeTask output → FormatTask input`
+`AnalyzeTask` is a container task. `ExtractTask` and `ScoreTask` are leaf
+tasks.
 
----
+## Explicit Order And Parallel Groups
 
-## Deep Nesting Example
+```python
+@task(name="web", prompt="Search web", order=1)
+class WebTask: ...
 
-```
-PipelineAgent (global)
-└─ pipeline (flow)
-     ├─ ingest (flow)
-     │    └─ fetch (task, leaf)
-     │         ├─ validate_source (step, order=1)
-     │         └─ download (step, order=2)
-     ├─ transform (flow)
-     │    └─ clean (task, leaf)
-     │         ├─ drop_nulls (step, order=1)
-     │         └─ deduplicate (step, order=2)
-     └─ export (task, leaf)
-          └─ write_output (step, order=1)
+@task(name="docs", prompt="Search docs", order=1)
+class DocsTask: ...
+
+@task(name="merge", prompt="Merge results", order=2)
+class MergeTask: ...
 ```
 
-Resulting node IDs:
-```
-global
-global.pipeline
-global.pipeline.ingest
-global.pipeline.ingest.fetch
-global.pipeline.ingest.fetch.validate_source[1]
-global.pipeline.ingest.fetch.download[2]
-global.pipeline.transform
-global.pipeline.transform.clean
-global.pipeline.transform.clean.drop_nulls[1]
-global.pipeline.transform.clean.deduplicate[2]
-global.pipeline.export
-global.pipeline.export.write_output[1]
+`web` and `docs` run in parallel with the same input. `merge` runs after both.
+
+## `unique=True`
+
+```python
+@task(name="canonical_search", prompt="Use this implementation", order=1, unique=True)
+class CanonicalSearch: ...
 ```
 
----
+If a same-order group includes a `unique=True` node, only that node runs and
+its siblings are skipped. Two `unique=True` nodes in the same group raise
+`OrderConflictError`.
 
-## Best Practices
+## `depends_on`
 
-!!! tip "When to use nested flows vs nested tasks"
-    - Use **nested flows** when the sub-pipeline represents a distinct, reusable capability (e.g., "search", "auth", "ingest").
-    - Use **nested tasks** when the sub-steps are tightly coupled and share the same data context.
+Use `depends_on` for flow dependency edges:
 
-!!! tip "Keep leaf tasks focused"
-    A leaf task should do one thing (validate, parse, summarize, etc.) with 2–5 steps.
-    If you find yourself with 8+ steps in a task, consider splitting into child tasks or flows.
+```python
+@flow(name="auth", prompt="Authenticate")
+class AuthFlow: ...
 
-!!! warning "Parallel flows share the same input"
-    All parallel child flows receive the **same input** (the parent's current output).
-    They do not receive each other's output. Only the last result is forwarded.
+@flow(name="fetch", prompt="Fetch data", depends_on=["auth"])
+class FetchFlow: ...
+```
+
+`depends_on` participates in DAG cycle detection and topological ordering.

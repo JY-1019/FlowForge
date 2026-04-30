@@ -79,6 +79,7 @@ from flowforge.annotations.metadata import (
 )
 from flowforge.annotations.validators import (
     validate_order_uniqueness,
+    validate_sibling_order_uniqueness,
     validate_io_chain,
     validate_step_branch_handlers,
 )
@@ -376,6 +377,7 @@ def task(
             # Run compile-time validators immediately so errors are reported
             # at the point where the decorator is applied, not at run time.
             validate_order_uniqueness(meta)
+            validate_sibling_order_uniqueness(name, meta.child_tasks)
             validate_io_chain(meta)
 
         setattr(cls, _TASK_ATTR, meta)
@@ -537,6 +539,8 @@ def flow(
                 unique=unique,
                 tools=tools or [],
             )
+            validate_sibling_order_uniqueness(name, meta.child_flows)
+            validate_sibling_order_uniqueness(name, meta.tasks)
 
         setattr(cls, _FLOW_ATTR, meta)
         return cls
@@ -614,6 +618,7 @@ def global_config(
             dynamic_flow=dynamic_flow,
             include_builtin_tools=include_builtin_tools,
         )
+        validate_sibling_order_uniqueness(cls.__name__, meta.flows)
         setattr(cls, _GLOBAL_ATTR, meta)
         return cls
 

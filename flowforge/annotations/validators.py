@@ -13,6 +13,10 @@ Validators
     Only having two or more ``unique=True`` steps at the same order is
     an error (it would be ambiguous which one should run exclusively).
 
+``validate_sibling_order_uniqueness``
+    Applies the same ``unique=True`` rule to sibling tasks and flows,
+    including root flows collected by ``@global_config``.
+
 ``validate_io_chain``
     Ensures that *between-group* transitions have compatible I/O schemas:
     the ``output_schema`` of the last step in order group *N* must equal
@@ -33,7 +37,7 @@ from typing import Any, get_type_hints, TYPE_CHECKING
 from flowforge.errors import OrderConflictError, IOBindingError, BranchOutputMismatchError
 
 if TYPE_CHECKING:
-    from flowforge.annotations.metadata import TaskMeta, StepMeta
+    from flowforge.annotations.metadata import TaskMeta, StepMeta, FlowMeta
 
 
 def validate_order_uniqueness(task_meta: TaskMeta) -> None:
@@ -73,6 +77,30 @@ def validate_order_uniqueness(task_meta: TaskMeta) -> None:
         unique_count = sum(1 for s in group if s.unique)
         if unique_count > 1:
             raise OrderConflictError(task_meta.name, order)
+
+
+def validate_sibling_order_uniqueness(
+    parent_name: str,
+    siblings: list["TaskMeta"] | list["FlowMeta"],
+) -> None:
+    """Ensure at most one sibling per explicit order group is unique.
+
+    FlowForge allows same-order sibling tasks/flows to run in parallel, but
+    only one member of a same-order group may declare ``unique=True``.
+    ``order=None`` siblings are intentionally excluded because each one is
+    assigned its own sequential group at runtime.
+    """
+    order_groups: dict[int, list[Any]] = {}
+    for sibling in siblings:
+        order = getattr(sibling, "order", None)
+        if order is None:
+            continue
+        order_groups.setdefault(order, []).append(sibling)
+
+    for order, group in order_groups.items():
+        unique_count = sum(1 for sibling in group if sibling.unique)
+        if unique_count > 1:
+            raise OrderConflictError(parent_name, order)
 
 
 def validate_io_chain(task_meta: TaskMeta) -> None:

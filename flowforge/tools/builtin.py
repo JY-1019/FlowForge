@@ -1779,11 +1779,10 @@ def _make_claude_skill_tool(options: DynamicRunOptions):
             }
 
         full_prompt = f"/{skill_name} {prompt}"
-        cmd = [claude_bin, "--print", "--no-input"]
+        cmd = [claude_bin, "--print"]
         if model:
             cmd.extend(["--model", model])
-        cmd.extend(["--max-tokens", "4096"])
-        cmd.extend(["--prompt", full_prompt])
+        cmd.append(full_prompt)
 
         run_cwd = options.project_root or None
 

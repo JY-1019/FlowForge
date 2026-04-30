@@ -26,7 +26,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from flowforge import DynamicRunOptions, FlowForge, global_config
+from flowforge import DynamicRunOptions, FlowForge, flow, global_config, step, task
 from flowforge.types import AgentSkill, ClaudeSkill, DependencyPolicy, LLMConfig
 
 
@@ -50,6 +50,79 @@ FIGMA_TOOLS = [
     "create_design_system_rules",
     "whoami",
 ]
+
+
+@flow(
+    name="mcp_brief",
+    prompt=(
+        "Register declared MCP tool names when possible and write a compact "
+        "markdown brief for the requested target."
+    ),
+)
+class McpBriefFlow:
+    @task(name="write_brief", prompt="Create a compact MCP setup/result brief")
+    class WriteBriefTask:
+        @step(
+            order=1,
+            prompt="Register MCP tools if possible, then write a markdown brief.",
+            tools=["mcp_register_server", "markdown_write"],
+            timeout_seconds=60,
+        )
+        async def write(ctx):
+            raw = ctx.input
+            if hasattr(raw, "model_dump"):
+                raw = raw.model_dump()
+            params = raw if isinstance(raw, dict) else {}
+            profile = params.get("profile", "playwright")
+            target = params.get("target", "")
+            required = params.get("required_tools", [])
+            mcp_tools = [
+                name for name in required
+                if name not in {
+                    "mcp_start_server",
+                    "mcp_register_server",
+                    "markdown_write",
+                    "pptx",
+                }
+            ]
+
+            registered = {"ok": False, "registered_tools": []}
+            if mcp_tools:
+                registered = await ctx.call_tool(
+                    "mcp_register_server",
+                    server_name=profile,
+                    tool_names=",".join(mcp_tools),
+                )
+
+            content = (
+                "# Dynamic Skill + MCP brief\n\n"
+                f"- profile: {profile}\n"
+                f"- target: {target}\n"
+                f"- requested_tools: {', '.join(required)}\n"
+                f"- registered_ok: {registered.get('ok')}\n"
+                f"- registered_tools: {', '.join(registered.get('registered_tools', []))}\n"
+                "- note: This stable example flow avoids spending a long run "
+                "on dynamic code generation while still exercising MCP registration "
+                "and markdown output plumbing.\n"
+            )
+            written = await ctx.call_tool(
+                "markdown_write",
+                path=f"reports/{profile}_mcp_brief.md",
+                content=content,
+            )
+            if not written.get("ok"):
+                raise RuntimeError(written.get("error", "markdown_write failed"))
+
+            return {
+                "profile": profile,
+                "target": target,
+                "registered_tools": registered.get("registered_tools", []),
+                "artifact_path": written.get("path"),
+                "notes": [
+                    registered.get("error")
+                    or "MCP registration attempted"
+                ],
+            }
 
 
 def _llm_config_from_env() -> LLMConfig:
@@ -139,8 +212,8 @@ def _dynamic_options(profile: str) -> DynamicRunOptions:
 def _build_agent(skill_dir: Path, llm_config: LLMConfig) -> type:
     @global_config(
         prompt=(
-            "You are a token-efficient dynamic FlowForge agent. No static "
-            "business flow exists. Generate the missing flow only when needed. "
+            "You are a token-efficient dynamic FlowForge agent. A compact "
+            "static MCP brief flow exists for the common demo path. "
             "Use <mcp-orchestration> for MCP setup, register MCP server tools "
             "before calling them, and keep outputs compact. If the user asks "
             "for slides, use the <pptx> Claude Skill rather than generating "
@@ -162,7 +235,7 @@ def _build_agent(skill_dir: Path, llm_config: LLMConfig) -> type:
         include_builtin_tools=True,
     )
     class DynamicSkillMcpAgent:
-        """No static flows. Dynamic generation builds the MCP workflow."""
+        McpBriefFlow = McpBriefFlow
 
     return DynamicSkillMcpAgent
 
@@ -226,7 +299,6 @@ async def main() -> None:
     options = _dynamic_options(args.profile)
     agent = _build_agent(skill_dir, _llm_config_from_env())
     engine = FlowForge.compile(agent, dynamic_options=options)
-    await engine.generate_docs(planning_only=True)
 
     request = _build_request(args.profile, args.target, args.deck)
     print("Dynamic Skill + MCP agent")
@@ -236,14 +308,14 @@ async def main() -> None:
     print(f"  Required tools: {', '.join(request['required_tools'])}")
     print()
 
-    result, trace = await engine.run_traced(request, planning_mode="autonomous")
+    result, trace = await engine.run_traced(request, route="mcp_brief")
     print("Result:")
     print(result)
     print()
     print("Executed nodes:")
-    for event in trace.events:
-        if event.event == "finish":
-            print(f"  - {event.node_id}")
+    for node in trace.nodes:
+        if node.succeeded:
+            print(f"  - {node.node_id}")
 
 
 if __name__ == "__main__":

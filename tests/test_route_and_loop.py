@@ -4,10 +4,12 @@ Covers:
 - Route: resolve_route on DAG, engine.run(route=...) filtering
 - Loop: @task(max_loops=N, loop_condition=...) retry behavior
 """
+import asyncio
+
 import pytest
 from pydantic import BaseModel
 
-from flowforge import global_config, flow, task, step, FlowForge
+from flowforge import global_config, flow, task, step, FlowForge, OrderConflictError
 from flowforge.types import LLMConfig
 
 
@@ -132,6 +134,80 @@ class TestRunWithRoute:
         assert "global.beta" in executed_ids
         assert "global.alpha" not in executed_ids
         assert "global.gamma" not in executed_ids
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Root-flow order-group parallelism
+# ═══════════════════════════════════════════════════════════════════════
+
+root_parallel_log: list[str] = []
+
+
+@flow(name="root_a", prompt="root flow a", order=1)
+class RootAFlow:
+    @task(name="a", prompt="a")
+    class ATask:
+        @step(order=1, prompt="slow a")
+        async def slow(ctx):
+            root_parallel_log.append("a:start")
+            await asyncio.sleep(0.05)
+            root_parallel_log.append("a:end")
+            return "a"
+
+
+@flow(name="root_b", prompt="root flow b", order=1)
+class RootBFlow:
+    @task(name="b", prompt="b")
+    class BTask:
+        @step(order=1, prompt="fast b")
+        async def fast(ctx):
+            root_parallel_log.append("b:start")
+            root_parallel_log.append("b:end")
+            return "b"
+
+
+@flow(name="root_c", prompt="root flow c", order=2)
+class RootCFlow:
+    @task(name="c", prompt="c")
+    class CTask:
+        @step(order=1, prompt="consume result from root order group")
+        async def consume(ctx):
+            root_parallel_log.append(f"c:{ctx.input}")
+            return ctx.input
+
+
+@global_config(prompt="root parallel agent")
+class RootParallelAgent:
+    RootAFlow = RootAFlow
+    RootBFlow = RootBFlow
+    RootCFlow = RootCFlow
+
+
+@pytest.mark.asyncio
+async def test_root_flows_with_same_order_run_in_parallel():
+    """Root flows should follow the same order-group semantics as nested flows."""
+    root_parallel_log.clear()
+    engine = FlowForge.compile(RootParallelAgent)
+
+    result = await engine.run("input")
+
+    assert result == "b"
+    assert root_parallel_log.index("b:start") < root_parallel_log.index("a:end")
+    assert root_parallel_log[-1] == "c:b"
+
+
+def test_root_flow_duplicate_unique_conflict_raises():
+    """Only one root flow in a same-order group may declare unique=True."""
+    with pytest.raises(OrderConflictError):
+        @global_config(prompt="bad root unique agent")
+        class BadRootUniqueAgent:
+            @flow(name="first", prompt="first", order=1, unique=True)
+            class First:
+                pass
+
+            @flow(name="second", prompt="second", order=1, unique=True)
+            class Second:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════════════

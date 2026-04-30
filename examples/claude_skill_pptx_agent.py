@@ -186,10 +186,17 @@ async def main() -> None:
     file_id = _extract_first_file_id(result_text)
     pptx_path = ARTIFACT_DIR / "claude_skill_deck.pptx"
     if not file_id:
-        raise RuntimeError(
-            "Claude did not return a file_id for the generated deck. "
-            f"See the raw response at: {response_path}"
+        print("=" * 72)
+        print("Claude pptx Skill FlowForge example")
+        print("=" * 72)
+        print(result_text)
+        print()
+        print(f"Response saved to: {response_path}")
+        print(
+            "Claude did not return a downloadable file_id in this run, "
+            "so no PPTX was downloaded."
         )
+        return
 
     await _download_anthropic_file(file_id, pptx_path)
 

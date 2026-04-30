@@ -1,113 +1,97 @@
 # DAG Compilation
 
-`FlowForge.compile(MyAgent)` converts the metadata tree into a `networkx.DiGraph`.
+`FlowForge.compile(MyAgent)` turns decorator metadata into a `networkx` DAG.
+The compiled DAG is the source of truth for validation, route resolution,
+planning, execution, and visualization.
 
----
+## Node Types
 
-## Node ID Scheme
+FlowForge has four DAG node types:
 
-Every node gets a **dotted-path ID** that uniquely identifies it in the DAG:
+| NodeType | Created from |
+|----------|--------------|
+| `GLOBAL` | `@global_config` |
+| `FLOW` | `@flow` |
+| `TASK` | `@task` |
+| `STEP` | `@step` |
 
-```
+Branch dispatching does not create a separate node type. A branch dispatcher is
+a normal flow, task, or step whose metadata has `condition` and `branches`.
+
+## Node IDs
+
+```text
 global
 global.{flow_name}
 global.{flow_name}.{task_name}
-global.{flow_name}.{task_name}.{func_name}[{order}]          # step
-global.{flow_name}.{task_name}.{branch_name}[{order}]        # branch
+global.{flow_name}.{task_name}.{step_func_name}[{order}]
 ```
 
-Example for the ResearchAgent from the usage example:
+Example:
 
-```
+```text
 global
 global.research
 global.research.search
-global.research.search.execute_search
-global.research.search.execute_search.optimize_query[1]
-global.research.search.execute_search.source_select[2]
-global.research.search.execute_search.deduplicate[3]
-global.research.analyze_and_format
-global.research.analyze_and_format.analyze
-global.research.analyze_and_format.analyze.classify_intent[1]
-global.research.analyze_and_format.format
-global.research.analyze_and_format.format.draft_answer[1]
-global.research.analyze_and_format.format.add_citations[2]
+global.research.search.expand_query[1]
+global.research.search.fetch_sources[2]
 ```
 
-These IDs are used by the `RunTrace` system to map runtime execution back to DAG nodes.
-
----
+Nested flows and tasks extend the dotted path in the same way.
 
 ## Edge Types
 
-| Type | Meaning | Created by |
-|------|---------|------------|
-| `parent_child` | Containment (parent → child node) | Compiler's DFS traversal |
-| `depends_on` | Cross-flow ordering (A must finish before B) | `@flow(depends_on=[...])` |
+| Edge | Meaning | Source |
+|------|---------|--------|
+| `parent_child` | A node contains another node | metadata traversal |
+| `depends_on` | A flow must run after another flow | `@flow(depends_on=[...])` |
 
----
+## Order Groups
 
-## Compile-Time Validation
+Ordering is stored on metadata and enforced by the runners:
 
-The compiler raises errors immediately if any of these checks fail:
+| `order` value | Behavior |
+|---------------|----------|
+| `None` | Auto-sequential; insertion order is preserved |
+| same explicit integer | Same-order siblings run in parallel |
+| `unique=True` | Only that node runs within its same-order group |
+
+Same-order nodes are valid. Multiple same-order nodes with `unique=True` are
+invalid.
+
+## Validation
 
 | Error | Trigger |
 |-------|---------|
-| `OrderConflictError` | Two `@step` or `@branch` share the same `order` in one task |
-| `IOBindingError` | `output_schema` of step N ≠ `input_schema` of step N+1 |
-| `BranchOutputMismatchError` | Not all branch handlers return the same type |
-| `CycleDetectedError` | `depends_on` creates a cycle in the DAG |
-| `CompileError` | Class missing `@global_config`, or other structural error |
+| `CompileError` | Missing `@global_config`, invalid branch target, duplicate flow add |
+| `CycleDetectedError` | `depends_on` creates a cycle |
+| `OrderConflictError` | More than one `unique=True` node in an order group |
+| `IOBindingError` | Consecutive step groups have incompatible schemas |
+| `BranchOutputMismatchError` | Step branch handlers advertise inconsistent return types |
 
----
-
-## Inspecting the DAG
+## Inspecting The DAG
 
 ```python
+from flowforge.schema.dag import NodeType
+
 engine = FlowForge.compile(MyAgent)
 
-# All nodes
 for node in engine.dag.get_all_nodes():
     print(node.id, node.type.value, node.name)
 
-# Nodes by type
 flows = engine.dag.nodes_by_type(NodeType.FLOW)
-
-# Children of a node
 children = engine.dag.get_children("global.research")
-
-# Topological order
 ordered = engine.dag.topological_order()
-
-# Cycle detection
-cycles = engine.dag.detect_cycles()   # empty list = no cycles
-
-# Total node count
-print(len(engine.dag))
+cycles = engine.dag.detect_cycles()
 ```
 
----
-
-## Mermaid Diagram
+## Route Resolution
 
 ```python
-print(engine.mermaid())
+node_ids = engine.dag.resolve_route("research")
+node_ids = engine.dag.resolve_route("research.search")
 ```
 
-Output (truncated):
-```
-graph TD
-    global["global\ntrace test agent"]
-    global.main_flow["main_flow\nmain"]
-    global.main_flow.step_task["step_task\nsteps"]
-    ...
-    global --> global.main_flow
-    global.main_flow --> global.main_flow.step_task
-    ...
-```
-
-Paste this into [mermaid.live](https://mermaid.live) or use the CLI:
-
-```bash
-flowforge viz my_agent.py --mermaid
-```
+`engine.run(..., route=...)` uses the same resolver. A flow route includes the
+selected flow and descendants. A task route includes its ancestors plus the
+task subtree.

@@ -19,7 +19,7 @@ flowforge validate <AGENT_FILE>
 
 Checks:
 - Class decorated with `@global_config` exists
-- No duplicate `order` values within any task
+- No invalid duplicate `unique=True` nodes in the same order group
 - No cycles in the dependency graph
 - I/O schema compatibility between consecutive steps
 
@@ -56,6 +56,7 @@ flowforge viz <AGENT_FILE> [OPTIONS]
 | `--format`, `-f` | `svg` | Output format: `svg`, `png`, `pdf` |
 | `--show-docs` | `False` | Include AI doc summaries in node labels |
 | `--mermaid` | `False` | Print Mermaid diagram to stdout instead |
+| `--save-md` | `None` | Save full DAG Mermaid to a Markdown file |
 
 **Examples:**
 
@@ -71,6 +72,9 @@ flowforge viz my_agent.py --mermaid
 
 # Include doc summaries
 flowforge viz my_agent.py --show-docs --output dag_with_docs.svg
+
+# Save Mermaid to Markdown
+flowforge viz my_agent.py --save-md dag.md
 ```
 
 ---
@@ -91,6 +95,12 @@ flowforge run <AGENT_FILE> --query <QUERY> [OPTIONS]
 | `--viz-output` | `run.svg` | Output path for the subtree SVG |
 | `--viz-fmt` | `svg` | Format: `svg`, `png`, `pdf` |
 | `--viz-mermaid` | `False` | Print Mermaid subtree to stdout |
+| `--compare` | `False` | Print a Markdown executed-path report |
+| `--compare-output` | `None` | Save the executed-path report to a Markdown file |
+| `--include-full-dag` | `False` | Include the full DAG in compare output |
+| `--planning-mode` | `deterministic` | `deterministic`, `autonomous`, or `hybrid` |
+| `--allow-dynamic` | `False` | Enable dynamic generation for this run |
+| `--dynamic-dir` | `flowforge/generated` | Directory for generated flow/tool files |
 
 **Examples:**
 
@@ -106,6 +116,12 @@ flowforge run my_agent.py -q "hello" --viz --viz-output run.svg
 
 # Run and print Mermaid subtree
 flowforge run my_agent.py -q "hello" --viz-mermaid
+
+# Run autonomous planning
+flowforge run my_agent.py -q "hello" --planning-mode autonomous
+
+# Run with dynamic generation enabled
+flowforge run my_agent.py -q "build the missing capability" --planning-mode autonomous --allow-dynamic
 
 # Run with JSON input
 flowforge run my_agent.py -q '{"text": "hello", "lang": "en"}' --trace
@@ -124,7 +140,7 @@ Run 3a1b2c4d — 8.2 ms — ✓ succeeded
 │     1 │ flow   │ research       │   7.1  │         │ ✓       │
 │     2 │ task   │ execute_search │   6.0  │         │ ✓       │
 │     3 │ step   │ optimize_query │   1.5  │         │ ✓       │
-│     4 │ branch │ source_select  │   3.2  │ web     │ ✓       │
+│     4 │ step   │ source_select  │   3.2  │ web     │ ✓       │
 │     5 │ step   │ deduplicate    │   0.8  │         │ ✓       │
 └───────┴────────┴────────────────┴────────┴─────────┴─────────┘
 ```
@@ -153,6 +169,36 @@ flowforge doc-generate my_agent.py
 
 # Force regeneration
 flowforge doc-generate my_agent.py --force
+```
+
+## flowforge docs
+
+Serve the bundled documentation locally, build it, or open the published site.
+
+```bash
+flowforge docs
+flowforge docs --port 9000
+flowforge docs --build --build-dir site
+flowforge docs --online
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--port`, `-p` | `8000` | Local server port |
+| `--host`, `-H` | `127.0.0.1` | Local server host |
+| `--online` | `False` | Open the published GitHub Pages site |
+| `--build` | `False` | Build a static site and exit |
+| `--build-dir` | `site` | Output directory for `--build` |
+| `--no-open` | `False` | Do not open the browser automatically |
+
+## flowforge skills
+
+FlowForge can sync bundled skill folders.
+
+```bash
+flowforge skills list
+flowforge skills sync <name>
+flowforge skills sync <name> --force
 ```
 
 ---

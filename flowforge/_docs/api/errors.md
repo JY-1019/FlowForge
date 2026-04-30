@@ -2,114 +2,104 @@
 
 All errors are importable from `flowforge` or `flowforge.errors`.
 
----
-
 ## Compile-Time Errors
 
-These are raised during `FlowForge.compile()` or at decoration time (import).
+### `CompileError`
 
-### OrderConflictError
+General compile failure. Common causes:
 
-Two `@step` or `@branch` decorators share the same `order` value within a single leaf task.
+- The class passed to `FlowForge.compile()` is not decorated with
+  `@global_config`.
+- A branch task target is not decorated with `@task`.
+- A branch flow target is not decorated with `@flow`.
+- A dynamically added flow is invalid or duplicates an existing name.
+
+### `CycleDetectedError`
+
+Raised when `depends_on` edges create a cycle.
 
 ```python
-@task(name="process")
-class ProcessTask:
-    @step(order=1, prompt="...")
+@flow(name="a", prompt="A", depends_on=["b"])
+class A: ...
+
+@flow(name="b", prompt="B", depends_on=["a"])
+class B: ...
+```
+
+### `OrderConflictError`
+
+Raised when more than one sibling in the same explicit order group sets
+`unique=True`.
+
+```python
+@task(name="bad", prompt="bad")
+class BadTask:
+    @step(order=1, prompt="a", unique=True)
     async def a(ctx): ...
 
-    @step(order=1, prompt="...")  # ❌ OrderConflictError!
+    @step(order=1, prompt="b", unique=True)
     async def b(ctx): ...
 ```
 
-**Fix:** Assign unique `order` values.
+Same `order` without duplicate `unique=True` is valid and means parallel
+execution.
 
----
+### `IOBindingError`
 
-### IOBindingError
-
-The `output_schema` of step N is not compatible with the `input_schema` of step N+1.
+Raised when consecutive step groups have incompatible schemas.
 
 ```python
 class A(BaseModel): x: int
 class B(BaseModel): y: str
 
-@step(order=1, output_schema=A)
-async def step1(ctx): ...
+@step(order=1, prompt="one", output_schema=A)
+async def one(ctx): ...
 
-@step(order=2, input_schema=B)  # ❌ A ≠ B → IOBindingError
-async def step2(ctx): ...
+@step(order=2, prompt="two", input_schema=B)
+async def two(ctx): ...
 ```
 
-**Fix:** Align schemas, or omit them to skip validation.
+### `BranchOutputMismatchError`
 
----
-
-### BranchOutputMismatchError
-
-Branch handlers return different types.
+Raised when handlers for a branching `@step` advertise incompatible return
+type annotations.
 
 ```python
-async def handler_a(ctx) -> TypeA: ...
-async def handler_b(ctx) -> TypeB: ...  # ❌ TypeA ≠ TypeB
+async def handle_a(ctx) -> TypeA: ...
+async def handle_b(ctx) -> TypeB: ...
 
-@branch(..., branches={"a": handler_a, "b": handler_b})
+@step(
+    order=1,
+    prompt="route",
+    condition=BranchCondition(field="kind", enum=["a", "b"]),
+    branches={"a": handle_a, "b": handle_b},
+)
 async def route(ctx): ...
 ```
 
-**Fix:** Make all handlers return the same type.
-
----
-
-### CycleDetectedError
-
-`depends_on` references create a cycle in the DAG.
-
-```python
-@flow(name="a", depends_on=["b"])
-class FlowA: ...
-
-@flow(name="b", depends_on=["a"])  # ❌ a→b→a cycle
-class FlowB: ...
-```
-
----
-
-### CompileError
-
-General compile failure — the class is not decorated with `@global_config`, or the DAG is structurally invalid.
-
-```python
-engine = FlowForge.compile(NotAnAgent)  # ❌ CompileError
-```
-
----
+Make all branch handlers return the same type or omit incompatible annotations.
 
 ## Runtime Errors
 
-### ExecutionError
+### `ExecutionError`
 
-Raised when a step, branch, task, or flow fails during execution.
+Raised when a flow/task/step fails during execution and the error is not
+handled by retries or `on_error="skip_remaining"`.
+
+### `ApprovalRequired`
+
+Raised before a step marked `approval=True` executes.
 
 ```python
 try:
-    result = await engine.run(my_input)
-except ExecutionError as e:
-    print(f"Node '{e.node_name}' failed: {e.message}")
+    await engine.run(data)
+except ApprovalRequired as exc:
+    checkpoint = exc.checkpoint
+    # after external approval:
+    result = await engine.run(data, resume_from=checkpoint)
 ```
 
----
+### `PlannerError`
 
-## Base Class
-
-All errors inherit from `FlowForgeError`:
-
-```python
-from flowforge import FlowForgeError
-
-try:
-    engine = FlowForge.compile(MyAgent)
-    result = await engine.run(data)
-except FlowForgeError as e:
-    print(f"FlowForge error: {e}")
-```
+Raised when autonomous or hybrid planning fails, returns an invalid selection,
+or requests dynamic generation without enough valid generation input.

@@ -1,6 +1,9 @@
 # Types Reference
 
-All types are importable from `flowforge.types` or `flowforge`.
+Core public types such as `LLMConfig`, `BranchCondition`, `MCPServer`,
+`ClaudeSkill`, `AgentSkill`, `DynamicRunOptions`, and `DependencyPolicy` are
+re-exported from `flowforge`. Tool-specific classes are always available from
+`flowforge.types`.
 
 ---
 
@@ -10,19 +13,33 @@ All types are importable from `flowforge.types` or `flowforge`.
 from flowforge.types import LLMConfig
 
 config = LLMConfig(
-    model="claude-sonnet-4-20250514",
+    provider="anthropic",
+    model="claude-sonnet-4-6",
     temperature=0.3,
     max_tokens=4096,
-    api_key=None,   # falls back to ANTHROPIC_API_KEY env var
+    api_key=None,
+    base_url=None,
+    verify_ssl=True,
 )
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `model` | `str` | `"claude-sonnet-4-20250514"` | Model identifier |
-| `temperature` | `float` | `0.7` | Sampling temperature (0.0–1.0) |
+| `provider` | `"anthropic" \| "openai" \| "google"` | `"anthropic"` | LLM backend |
+| `model` | `str` | `"claude-sonnet-4-6"` | Model identifier |
+| `temperature` | `float` | `0.3` | Sampling temperature |
 | `max_tokens` | `int` | `4096` | Maximum tokens in response |
-| `api_key` | `str \| None` | `None` | API key (uses env var if None) |
+| `api_key` | `str \| None` | `None` | Provider API key; SDK env vars are used when omitted |
+| `base_url` | `str \| None` | `None` | Custom base URL, useful for OpenAI-compatible endpoints |
+| `verify_ssl` | `bool` | `True` | Whether provider HTTP clients verify SSL certificates |
+
+Convenience constructors:
+
+```python
+LLMConfig.for_claude()
+LLMConfig.for_openai(model="gpt-4o")
+LLMConfig.for_gemini(model="gemini-2.0-flash")
+```
 
 ---
 
@@ -298,6 +315,7 @@ from flowforge.types import DependencyPolicy
 
 policy = DependencyPolicy(
     allow_install=True,                 # allow the pip_install tool
+    allowed_managers=["pip", "uv"],
     allowed_packages=["httpx"],         # allowlist; empty means allow all
     denied_packages=["subprocess"],     # denylist; always wins
 )
@@ -306,5 +324,6 @@ policy = DependencyPolicy(
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `allow_install` | `bool` | `False` | Whether the `pip_install` tool may be used |
+| `allowed_managers` | `list[str]` | `["pip", "uv", "npm", "pnpm", "yarn"]` | Dependency managers dynamic code may request |
 | `allowed_packages` | `list[str]` | `[]` | Package allowlist. Empty means all packages are allowed |
 | `denied_packages` | `list[str]` | `[]` | Package denylist. Takes precedence over the allowlist |

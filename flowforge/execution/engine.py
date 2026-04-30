@@ -7,7 +7,8 @@ from typing import Any, TYPE_CHECKING
 
 from flowforge.execution.context import GlobalContext
 from flowforge.execution.memory import SessionMemory
-from flowforge.execution.runner import FlowRunner
+from flowforge.execution.parallel import run_parallel
+from flowforge.execution.runner import FlowRunner, _group_by_order
 from flowforge.errors import PlannerError
 from flowforge.schema.dag import FlowForgeDAG, NodeType
 from flowforge.annotations.metadata import GlobalMeta
@@ -647,13 +648,33 @@ class ExecutionEngine:
         input_data: Any,
     ) -> Any:
         current_output = input_data
-        for flow_node in self._get_root_flows(global_ctx):
-            current_output = await self._flow_runner.run(
-                flow_node.meta,
-                global_ctx,
-                current_output,
-                parent_node_id="global",
-            )
+        groups = _group_by_order(
+            self._get_root_flows(global_ctx),
+            lambda flow_node: flow_node.meta.order,
+        )
+        for group in groups:
+            unique_flows = [flow_node for flow_node in group if flow_node.meta.unique]
+            run_group = [unique_flows[0]] if unique_flows else group
+
+            if len(run_group) == 1:
+                current_output = await self._flow_runner.run(
+                    run_group[0].meta,
+                    global_ctx,
+                    current_output,
+                    parent_node_id="global",
+                )
+            else:
+                coros = [
+                    self._flow_runner.run(
+                        flow_node.meta,
+                        global_ctx,
+                        current_output,
+                        parent_node_id="global",
+                    )
+                    for flow_node in run_group
+                ]
+                results = await run_parallel(coros)
+                current_output = results[-1] if results else current_output
         return current_output
 
     def _build_dynamic_input(

@@ -418,6 +418,112 @@ class TestHelpers:
         assert _strip_markdown_fences("```\ncode\n```") == "code"
         assert _strip_markdown_fences("code") == "code"
 
+    def test_strip_markdown_fences_keeps_inner_prompt_fences(self):
+        from flowforge.dynamic.generator import _strip_markdown_fences
+
+        text = '''```python
+from flowforge import flow, task, step
+
+@flow(name="f", prompt="f")
+class F:
+    @task(name="t", prompt="t")
+    class T:
+        @step(order=1, prompt="p")
+        async def s(ctx):
+            return await ctx.call_llm(
+                """Return JSON exactly:
+                ```json
+                {"ok": true}
+                ```
+                """
+            )
+```'''
+
+        code = _strip_markdown_fences(text)
+
+        assert '```json' in code
+        assert code.endswith(")")
+
+    def test_strip_markdown_fences_keeps_column_zero_prompt_fences(self):
+        from flowforge.dynamic.generator import _strip_markdown_fences
+
+        text = '''```python
+from flowforge import flow, task, step
+
+PROMPT = """
+Return JSON exactly:
+```json
+{"ok": true}
+```
+"""
+
+@flow(name="f", prompt="f")
+class F:
+    @task(name="t", prompt="t")
+    class T:
+        @step(order=1, prompt="p")
+        async def s(ctx):
+            return await ctx.call_llm(PROMPT)
+```'''
+
+        code = _strip_markdown_fences(text)
+
+        assert '```json' in code
+        assert code.endswith(")")
+
+    def test_strip_markdown_fences_ignores_trailing_markdown_blocks(self):
+        from flowforge.dynamic.generator import _strip_markdown_fences
+
+        text = '''```python
+from flowforge import flow
+
+@flow(name="f", prompt="f")
+class F:
+    pass
+```
+
+Explanation follows.
+
+```text
+not python
+```'''
+
+        code = _strip_markdown_fences(text)
+
+        assert code == (
+            'from flowforge import flow\n\n'
+            '@flow(name="f", prompt="f")\n'
+            'class F:\n'
+            '    pass'
+        )
+
+    def test_normalise_generated_flow_code_fills_bare_top_level_flow(self):
+        from flowforge.dynamic.generator import (
+            DynamicFlowGenerator,
+            _normalise_generated_flow_code,
+        )
+
+        code = """from flowforge import flow, task, step
+
+@flow()
+class DynamicFlow:
+    @task(name="t", prompt="t")
+    class T:
+        @step(order=1, prompt="p")
+        async def s(ctx):
+            return {"ok": True}
+"""
+
+        normalised = _normalise_generated_flow_code(code, "dynamic", "do work")
+
+        assert "@flow(name='dynamic', prompt='do work')" in normalised
+        generator = DynamicFlowGenerator(
+            llm_config=LLMConfig(),
+            dag=FlowForge.compile(BasicAgent).dag,
+        )
+        meta = generator.compile_flow_code(normalised)
+        assert meta.name == "dynamic"
+
     def test_sanitise_name(self):
         from flowforge.dynamic.generator import _sanitise_name
 
@@ -2167,6 +2273,27 @@ class TimeoutFlow:
         assert "pptx_create" in catalog
         assert "lower-relevance tool(s) omitted" in catalog
         assert catalog.count("\n- ") <= 5
+
+    def test_tool_catalog_omits_claude_skill_unless_required(self, tmp_path):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+        from flowforge.tools.builtin import create_builtin_tool_pack
+
+        options = DynamicRunOptions(project_root=str(tmp_path))
+        tools = create_builtin_tool_pack(options)
+        gen = DynamicFlowGenerator(
+            llm_config=LLMConfig(model="test"),
+            dag=FlowForge.compile(DynamicAgent).dag,
+            tool_configs=tools,
+            dynamic_options=options,
+        )
+
+        catalog = gen._format_tool_catalog(user_query="summarise papers in Korean")
+        forced = gen._format_tool_catalog(
+            user_query={"required_tools": ["claude_skill"]},
+        )
+
+        assert "claude_skill" not in catalog
+        assert "claude_skill" in forced
 
     def test_dynamic_policy_lists_declared_mcp_servers(self, tmp_path):
         from flowforge.dynamic.generator import DynamicFlowGenerator

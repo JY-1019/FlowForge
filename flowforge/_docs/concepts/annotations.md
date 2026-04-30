@@ -1,295 +1,205 @@
 # Annotations In Depth
 
----
+FlowForge has four public decorators:
 
-## Hierarchy Rules
+| Decorator | Applies to | Purpose |
+|-----------|------------|---------|
+| `@global_config` | class | Agent root: global prompt, model, tools, dynamic settings |
+| `@flow` | class | Pipeline stage; can contain flows and tasks |
+| `@task` | class | Work unit; can contain child tasks or steps |
+| `@step` | async function | Atomic executable action |
 
-```
+!!! warning "No `@branch` Decorator"
+    Branching is implemented by adding `condition`, `branches`, and optional
+    `fallback` to `@step`, `@task`, or `@flow`. Do not import or use
+    `@branch`.
+
+## Hierarchy
+
+```text
 @global_config
-  └─ @flow                 ← 1+ flows required (supports branch dispatching)
-       ├─ @flow            ← flows nest recursively
-       └─ @task            ← leaf tasks hold steps (supports branch dispatching)
-            ├─ @task       ← container tasks hold child tasks
-            └─ @step       ← leaf only (supports branch dispatching)
+  └─ @flow
+       ├─ @flow
+       └─ @task
+            ├─ @task
+            └─ @step
 ```
 
-| Parent | Allowed Children |
-|--------|-----------------|
+| Parent | Allowed direct children |
+|--------|-------------------------|
 | `@global_config` | `@flow` |
 | `@flow` | `@flow`, `@task` |
-| `@task` (container) | `@task` |
-| `@task` (leaf) | `@step` |
-| `@step` | — (leaf) |
+| container `@task` | `@task` |
+| leaf `@task` | `@step` |
 
-!!! note "No `@branch` Decorator"
-    Branch dispatching is built into `@step`, `@task`, and `@flow` via the optional `condition`, `branches`, and `fallback` parameters. There is no separate `@branch` decorator.
+A task should be either a container task with child tasks or a leaf task with
+steps. Branch tasks and branch flows are dispatchers; their class bodies are
+ignored at runtime.
 
----
-
-## @global_config
-
-Top-level agent configuration. Every agent has exactly one.
+## `@global_config`
 
 ```python
-from flowforge import global_config
-from flowforge.types import LLMConfig, MCPServer
+from flowforge import LLMConfig, global_config
+from flowforge.types import FunctionTool
 
 @global_config(
-    prompt="You are a data processing specialist. Always respond in English.",
-    llm_config=LLMConfig(
-        model="claude-sonnet-4-20250514",
-        temperature=0.3,
-        max_tokens=4096,
-    ),
-    tools=[MCPServer("https://api.example.com/mcp")],
+    prompt="You are a data-processing assistant.",
+    llm_config=LLMConfig.for_claude(temperature=0.2),
+    tools=[FunctionTool(func=my_search, name="search")],
+    dynamic_flow=False,
+    include_builtin_tools=False,
 )
-class MyAgent: ...
-```
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `prompt` | `str` | ✅ | Global system prompt passed to every LLM call |
-| `llm_config` | `LLMConfig` | | Default LLM settings for all nodes |
-| `tools` | `list[ToolConfig]` | | MCP servers, Python functions, HTTP APIs, Claude Skills, local Agent Skills |
-
----
-
-## @flow
-
-High-level pipeline stage. Flows can nest and depend on each other.
-
-```python
-from flowforge import flow
-from pydantic import BaseModel
-
-class UserQuery(BaseModel):
-    text: str
-
-class AnalysisResult(BaseModel):
-    summary: str
-    keywords: list[str]
-
-@flow(
-    name="analyze",
-    prompt="Analyze the user query and extract structured information",
-    input_schema=UserQuery,
-    output_schema=AnalysisResult,
-    depends_on=["auth"],        # run after 'auth' flow
-    parallel=False,
-    max_retries=2,
-)
-class AnalyzeFlow:
+class MyAgent:
     ...
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `name` | `str` | ✅ | Unique identifier within the agent |
-| `prompt` | `str` | ✅ | Role description (used at runtime by LLM) |
-| `input_schema` | `Type[BaseModel]` | `None` | Pydantic model for input validation |
-| `output_schema` | `Type[BaseModel]` | `None` | Pydantic model for output validation |
-| `depends_on` | `list[str]` | `[]` | Flow names that must complete first |
-| `parallel` | `bool` | `False` | Run child nodes in parallel |
-| `max_retries` | `int` | `3` | Retry count on failure |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `prompt` | required | Global system prompt for LLM calls |
+| `llm_config` | `LLMConfig()` | Default provider, model, temperature, tokens |
+| `tools` | `[]` | Global MCP, HTTP, function, Claude Skill, or Agent Skill tools |
+| `dynamic_flow` | `False` | Allows runtime generation and injection of missing flows |
+| `include_builtin_tools` | `False` | Adds FlowForge builtin tools to the global tool list |
 
-### Nested Flows
-
-```python
-@flow(name="pipeline", prompt="Full data pipeline")
-class PipelineFlow:
-
-    @flow(name="ingest", prompt="Ingest raw data")   # child flow
-    class IngestFlow:
-        @task(name="fetch", prompt="Fetch from source")
-        class FetchTask: ...
-
-    @flow(name="transform", prompt="Transform data")  # runs after ingest
-    class TransformFlow:
-        @task(name="clean", prompt="Clean data")
-        class CleanTask: ...
-```
-
----
-
-## @task
-
-Execution unit within a flow. Can be a **container** (holds child tasks) or a **leaf** (holds steps/branches directly).
-
-```python
-from flowforge import task
-
-@task(
-    name="process_document",
-    prompt="Parse and analyze a document",
-    input_schema=RawDoc,
-    output_schema=ProcessedDoc,
-)
-class ProcessDocumentTask:
-    # Leaf task — contains steps/branches directly
-    @step(order=1, prompt="Detect document format")
-    async def detect_format(ctx): ...
-
-    @branch(order=2, ...)
-    async def route_parser(ctx): ...
-
-    @step(order=3, prompt="Normalize output")
-    async def normalize(ctx): ...
-```
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `name` | `str` | ✅ | Unique identifier within parent |
-| `prompt` | `str` | ✅ | Task role description |
-| `input_schema` | `Type[BaseModel]` | `None` | Input Pydantic model |
-| `output_schema` | `Type[BaseModel]` | `None` | Output Pydantic model |
-
-### Container Task Pattern
-
-```python
-@task(name="analyze_and_format", prompt="Analyze and format")
-class AnalyzeAndFormatTask:
-
-    @task(name="analyze", prompt="Analyze query")   # child task 1
-    class AnalyzeTask:
-        @step(order=1, prompt="Classify intent")
-        async def classify(ctx): ...
-
-    @task(name="format", prompt="Format result")    # child task 2
-    class FormatTask:
-        @step(order=1, prompt="Draft answer")
-        async def draft(ctx): ...
-        @step(order=2, prompt="Add citations")
-        async def cite(ctx): ...
-```
-
----
-
-## @step
-
-A single action within a leaf task. Steps execute in `order` sequence.
-
-```python
-from flowforge import step
-from pydantic import BaseModel
-
-class RawDoc(BaseModel):
-    content: str
-
-class ValidatedDoc(BaseModel):
-    content: str
-    format: str
-
-@step(
-    order=1,
-    prompt="Validate the document schema and detect its format",
-    input_schema=RawDoc,
-    output_schema=ValidatedDoc,
-    timeout_seconds=30,
-)
-async def validate_doc(ctx):
-    # ctx.input  → RawDoc instance
-    # ctx.tools  → ToolAccessor
-    # ctx.previous_results → {order: result} dict
-    doc = ctx.input
-    fmt = "json" if doc.content.startswith("{") else "text"
-    return ValidatedDoc(content=doc.content, format=fmt)
-```
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `order` | `int` | ✅ | Execution order within task. **Must be unique per task.** |
-| `prompt` | `str` | ✅ | What this step does |
-| `input_schema` | `Type[BaseModel]` | `None` | Validates input before calling function |
-| `output_schema` | `Type[BaseModel]` | `None` | Validates return value |
-| `tool_mode` | `bool` | `False` | Register as LLM tool instead of sequential step |
-| `timeout_seconds` | `int` | `60` | Execution timeout |
-
-!!! warning "Order Must Be Unique"
-    Within a single leaf task, every `@step` and `@branch` must have a **distinct** `order`. Steps and branches share the same order space.
-
-    ```python
-    @task(name="process")
-    class ProcessTask:
-        @step(order=1, ...)  # ✅
-        async def a(ctx): ...
-
-        @branch(order=2, ...)  # ✅ (branch also uses order)
-        async def b(ctx): ...
-
-        @step(order=3, ...)  # ✅
-        async def c(ctx): ...
-
-        @step(order=3, ...)  # ❌ OrderConflictError at import time!
-        async def d(ctx): ...
-    ```
-
----
-
-## Branch Dispatching
-
-Conditional routing is built into `@step`, `@task`, and `@flow` — there is no separate `@branch` decorator. Add `condition`, `branches`, and optionally `fallback` to any decorator.
-
-### Step-level branching
-
-```python
-from flowforge import step
-from flowforge.types import BranchCondition
-
-async def handle_web(ctx): ...
-async def handle_db(ctx): ...
-
-@step(
-    order=2,
-    prompt="Route to the appropriate data source",
-    condition=BranchCondition(field="source", enum=["web", "db"]),
-    branches={"web": handle_web, "db": handle_db},
-    fallback=handle_web,
-)
-async def route_source(ctx): ...
-```
-
-### Task-level branching
-
-```python
-@task(
-    name="dispatch",
-    prompt="Route to fast or slow processing",
-    condition=BranchCondition(field="mode", enum=["fast", "slow"]),
-    branches={"fast": FastTask, "slow": SlowTask},
-)
-class DispatchTask: ...
-```
-
-### Flow-level branching
+## `@flow`
 
 ```python
 @flow(
-    name="dispatch",
-    prompt="Route by request type",
-    condition=BranchCondition(field="type", enum=["a", "b"]),
-    branches={"a": FlowA, "b": FlowB},
+    name="research",
+    prompt="Research a topic and produce source-backed notes",
+    input_schema=Query,
+    output_schema=Notes,
+    depends_on=["auth"],
+    order=1,
+    unique=False,
+    tools=["search"],
 )
-class DispatchFlow: ...
+class ResearchFlow:
+    ...
 ```
 
-### Branch parameters
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `name` | required | Unique name within the parent scope |
+| `prompt` | required | Natural-language role description |
+| `input_schema` / `output_schema` | `None` | Optional Pydantic boundary validation |
+| `depends_on` | `[]` | Flow names or IDs that must run first |
+| `parallel` | `False` | Legacy flag to run immediate child flows concurrently |
+| `max_retries` | `3` | Retries on execution errors |
+| `order` | `None` | Execution slot within the parent; same slot runs in parallel |
+| `unique` | `False` | Exclusive runner for its order group |
+| `tools` | `[]` | Tool configs or names available to descendants |
+| `condition` / `branches` / `fallback` | `None` | Turn the flow into a branch dispatcher |
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `condition` | `BranchCondition` | `None` | `field` to inspect + valid `enum` values |
-| `branches` | `dict[str, Callable]` | `None` | Value → handler/class mapping |
-| `fallback` | `Callable` | `None` | Handler when no value matches |
+## `@task`
 
-!!! tip "Handler Context"
-    Branch handlers receive a `StepContext` with `selected_branch` and `condition_value` populated:
-    ```python
-    async def handle_web(ctx):
-        # ctx.input           → same as step input
-        # ctx.condition_value  → the resolved field value
-        # ctx.selected_branch  → "web"
-        return SearchResult(source="web", results=[...])
-    ```
+```python
+@task(
+    name="draft",
+    prompt="Draft an answer",
+    order=2,
+    on_error="raise",
+    max_loops=3,
+    loop_condition=lambda out: out.get("quality", 0) >= 0.8,
+)
+class DraftTask:
+    ...
+```
 
-!!! warning "Output Type Consistency"
-    All branch handlers **must return the same type** (or `None`).
-    The output of the selected handler becomes the input to the next `order` node.
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `name` | required | Unique name within the parent flow/task |
+| `prompt` | required | Task role description |
+| `input_schema` / `output_schema` | `None` | Optional Pydantic boundary validation |
+| `order` | `None` | Execution slot within the parent |
+| `unique` | `False` | Exclusive runner for same-order siblings |
+| `tools` | `[]` | Tool configs or names available to child tasks/steps |
+| `on_error` | `"raise"` | `"raise"` or `"skip_remaining"` |
+| `max_loops` | `1` | Maximum attempts for the task step chain |
+| `loop_condition` | `None` | `(output) -> bool`; `True` accepts the result |
+| `condition` / `branches` / `fallback` | `None` | Turn the task into a branch dispatcher |
+
+## `@step`
+
+```python
+@step(
+    order=1,
+    prompt="Fetch search results",
+    timeout_seconds=30,
+    approval=False,
+    pass_criteria="The output must include at least one citation.",
+    pass_criteria_max_retries=2,
+    tools=["search"],
+)
+async def fetch(ctx):
+    return await ctx.call_tool("search", query=ctx.input["query"])
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `order` | required | Execution slot inside a leaf task |
+| `prompt` | required | Step instruction |
+| `input_schema` / `output_schema` | `None` | Optional Pydantic validation |
+| `tool_mode` | `False` | Metadata flag for tool-oriented steps; ordered execution still applies |
+| `timeout_seconds` | `60` | Per-step timeout |
+| `unique` | `False` | Exclusive runner for same-order step group |
+| `approval` | `False` | Pause before running and raise `ApprovalRequired` |
+| `tools` | `[]` | Tool configs or names available to this step |
+| `condition` / `branches` / `fallback` | `None` | Turn the step into a branch dispatcher |
+| `pass_criteria` | `None` | LLM-judged acceptance criteria |
+| `pass_criteria_max_retries` | `3` | Retry attempts when criteria fail |
+
+## Order, Parallelism, And `unique`
+
+`order=None` preserves insertion-order sequential execution. Explicit order
+values create execution groups:
+
+```python
+@step(order=1, prompt="Search web")
+async def web(ctx): ...
+
+@step(order=1, prompt="Search docs")
+async def docs(ctx): ...
+
+@step(order=2, prompt="Merge results")
+async def merge(ctx): ...
+```
+
+`web` and `docs` run in parallel and receive the same input. The next group
+receives the final result forwarded by the group.
+
+Use `unique=True` when exactly one same-order node should run:
+
+```python
+@step(order=1, prompt="Canonical implementation", unique=True)
+async def canonical(ctx): ...
+```
+
+Only one node per same-order group may set `unique=True`; duplicates raise
+`OrderConflictError`.
+
+## Branch Dispatching
+
+```python
+from flowforge import BranchCondition
+
+async def web_handler(ctx):
+    return {"source": "web", "text": ctx.input["query"]}
+
+async def db_handler(ctx):
+    return {"source": "db", "text": ctx.input["query"]}
+
+@step(
+    order=1,
+    prompt="Route by source",
+    condition=BranchCondition(field="source", enum=["web", "db"]),
+    branches={"web": web_handler, "db": db_handler},
+    fallback=web_handler,
+)
+async def route(ctx):
+    ...
+```
+
+At runtime FlowForge reads `condition.field` from `ctx.input`, selects a
+handler, sets `ctx.condition_value` and `ctx.selected_branch`, and returns the
+handler output.

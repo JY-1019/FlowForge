@@ -45,6 +45,8 @@ ARTIFACT_DIR = ROOT_DIR / "_artifacts" / "claude_skill_custom_text"
 SKILL_SOURCE_DIR = ROOT_DIR / "skills" / "flowforge-proof"
 SKILL_ID_PATH = ARTIFACT_DIR / "skill_id.txt"
 PROOF_MARKER = "FLOWFORGE_CUSTOM_SKILL_USED"
+SKILL_DISPLAY_TITLE = "FlowForge Proof"
+SKILL_BETA = "skills-2025-10-02"
 
 
 class ProofRequest(BaseModel):
@@ -101,6 +103,13 @@ def _ensure_skill_source() -> None:
         skill_md.write_text(_skill_source_text(), encoding="utf-8")
 
 
+def _find_existing_skill_id(client: anthropic.Anthropic) -> str:
+    for skill in client.beta.skills.list(limit=100, betas=[SKILL_BETA]):
+        if getattr(skill, "display_title", "") == SKILL_DISPLAY_TITLE:
+            return str(skill.id)
+    return ""
+
+
 def _ensure_custom_skill_id() -> str:
     _ensure_skill_source()
 
@@ -114,11 +123,26 @@ def _ensure_custom_skill_id() -> str:
             return cached
 
     client = anthropic.Anthropic()
-    skill = client.beta.skills.create(
-        display_title="FlowForge Proof",
-        files=files_from_dir(SKILL_SOURCE_DIR),
-        betas=["skills-2025-10-02"],
-    )
+    existing_id = _find_existing_skill_id(client)
+    if existing_id:
+        SKILL_ID_PATH.write_text(existing_id, encoding="utf-8")
+        return existing_id
+
+    try:
+        skill = client.beta.skills.create(
+            display_title=SKILL_DISPLAY_TITLE,
+            files=files_from_dir(SKILL_SOURCE_DIR),
+            betas=[SKILL_BETA],
+        )
+    except anthropic.BadRequestError as exc:
+        if "display_title" not in str(exc):
+            raise
+        existing_id = _find_existing_skill_id(client)
+        if not existing_id:
+            raise
+        SKILL_ID_PATH.write_text(existing_id, encoding="utf-8")
+        return existing_id
+
     SKILL_ID_PATH.write_text(skill.id, encoding="utf-8")
     return skill.id
 

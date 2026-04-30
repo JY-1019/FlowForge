@@ -38,6 +38,7 @@
   출력 (AnalysisReport)
 """
 import asyncio
+import json
 import logging
 import sys
 import textwrap
@@ -85,6 +86,40 @@ class AnalysisReport(BaseModel):
     summary: str
     key_findings: list[str] = Field(default_factory=list)
     extracted_data: list[dict] = Field(default_factory=list)
+
+
+def _coerce_page_content(value, query: ValidatedQuery) -> PageContent:
+    """Make LLM/MCP responses fit PageContent, even when MCP is unavailable."""
+    if isinstance(value, PageContent):
+        return value
+    if hasattr(value, "model_dump"):
+        value = value.model_dump()
+
+    if isinstance(value, dict):
+        content = (
+            value.get("content")
+            or value.get("body")
+            or value.get("text")
+            or value.get("summary")
+            or value.get("result")
+            or json.dumps(value, ensure_ascii=False, default=str)
+        )
+        links = value.get("links", [])
+        if not isinstance(links, list):
+            links = [str(links)]
+        return PageContent(
+            url=str(value.get("url") or query.url),
+            title=str(value.get("title") or value.get("name") or ""),
+            content=str(content),
+            links=[str(link) for link in links],
+            goal=str(value.get("goal") or query.goal),
+        )
+
+    return PageContent(
+        url=query.url,
+        content=str(value or ""),
+        goal=query.goal,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -203,7 +238,7 @@ class WebAnalysisAgent:
 
                     추출된 내용을 반환해.
                 """)
-                return result
+                return _coerce_page_content(result, ctx.input)
 
             @step(
                 order=3,
@@ -452,7 +487,7 @@ class MultiFlowAgent:
                 tools=[playwright_type],
             )
             async def browse_and_extract(ctx):
-                return await ctx.call_llm("""
+                result = await ctx.call_llm("""
                     '{url}' 페이지를 분석해야 해.
                     목적: {goal}
                     도메인: {domain}
@@ -464,6 +499,7 @@ class MultiFlowAgent:
                     4. 필요하면 <browser_click> 으로 버튼 클릭
                     추출된 내용을 반환해.
                 """)
+                return _coerce_page_content(result, ctx.input)
 
             @step(
                 order=3,

@@ -3,6 +3,8 @@
 Covers:
 - validate_order_uniqueness: same-order steps are now allowed (parallel);
   only two unique=True steps at the same order raise OrderConflictError
+- validate_sibling_order_uniqueness: same-order sibling tasks/flows allow
+  parallelism, but only one unique=True sibling per order group
 - validate_io_chain: None schemas skip, matching pass, mismatching raise;
   within-group (same-order) pairs are skipped
 - validate_step_branch_handlers: consistent return types pass,
@@ -11,7 +13,7 @@ Covers:
 import pytest
 from pydantic import BaseModel
 
-from flowforge import step, task, BranchCondition
+from flowforge import global_config, flow, step, task, BranchCondition
 from flowforge.errors import OrderConflictError, IOBindingError, BranchOutputMismatchError
 from flowforge.annotations.validators import (
     validate_order_uniqueness,
@@ -96,6 +98,50 @@ def test_unique_single_passes():
 
         @step(order=1, prompt="skipped")
         async def skipped(ctx): ...
+
+
+def test_child_task_unique_conflict_raises():
+    """Two child tasks at the same order both with unique=True raise."""
+    with pytest.raises(OrderConflictError):
+        @task(name="parent", prompt="parent")
+        class ParentTask:
+            @task(name="a", prompt="a", order=1, unique=True)
+            class ATask:
+                @step(order=1, prompt="s")
+                async def s(ctx): ...
+
+            @task(name="b", prompt="b", order=1, unique=True)
+            class BTask:
+                @step(order=1, prompt="s")
+                async def s(ctx): ...
+
+
+def test_child_flow_unique_conflict_raises():
+    """Two child flows at the same order both with unique=True raise."""
+    with pytest.raises(OrderConflictError):
+        @flow(name="parent", prompt="parent")
+        class ParentFlow:
+            @flow(name="a", prompt="a", order=1, unique=True)
+            class AFlow:
+                pass
+
+            @flow(name="b", prompt="b", order=1, unique=True)
+            class BFlow:
+                pass
+
+
+def test_root_flow_unique_conflict_raises():
+    """Two root flows at the same order both with unique=True raise."""
+    with pytest.raises(OrderConflictError):
+        @global_config(prompt="agent")
+        class Agent:
+            @flow(name="a", prompt="a", order=1, unique=True)
+            class AFlow:
+                pass
+
+            @flow(name="b", prompt="b", order=1, unique=True)
+            class BFlow:
+                pass
 
 
 # ---------------------------------------------------------------------------

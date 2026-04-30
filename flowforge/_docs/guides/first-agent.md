@@ -1,327 +1,102 @@
 # Your First Agent
 
-Build a complete document-processing agent from scratch.
+This guide builds a small document parser that detects input format, branches
+to the right parser, and returns a normalized result.
 
----
-
-## What We're Building
-
-A `DocumentAgent` that:
-
-1. Validates the input document format
-2. Routes to the correct parser based on format (`json` / `csv` / `text`)
-3. Extracts key information
-4. Formats a final summary
-
----
-
-## Step 1 — Define Schemas
+## 1. Define Models
 
 ```python
-# schemas.py
 from pydantic import BaseModel
 
-class RawDocument(BaseModel):
+class Document(BaseModel):
     content: str
-    filename: str
-
-class ValidatedDocument(BaseModel):
-    content: str
-    filename: str
-    format: str           # "json" | "csv" | "text"
+    format: str
 
 class ParsedDocument(BaseModel):
     records: list[dict]
     source_format: str
-
-class DocumentSummary(BaseModel):
-    title: str
-    record_count: int
-    preview: str
 ```
 
----
-
-## Step 2 — Define Branch Handlers
-
-Branch handlers are regular async functions defined **outside** the agent class.
+## 2. Define Branch Handlers
 
 ```python
-# handlers.py
-async def parse_json(ctx):
-    import json
-    doc = ctx.input   # ValidatedDocument
-    records = json.loads(doc.content)
-    if isinstance(records, dict):
-        records = [records]
-    return ParsedDocument(records=records, source_format="json")
+import csv
+import io
 
 async def parse_csv(ctx):
-    import csv, io
     doc = ctx.input
     reader = csv.DictReader(io.StringIO(doc.content))
-    records = list(reader)
-    return ParsedDocument(records=records, source_format="csv")
+    return ParsedDocument(records=list(reader), source_format="csv")
 
 async def parse_text(ctx):
     doc = ctx.input
-    records = [{"line": line} for line in doc.content.splitlines() if line.strip()]
-    return ParsedDocument(records=records, source_format="text")
+    rows = [{"line": line} for line in doc.content.splitlines() if line.strip()]
+    return ParsedDocument(records=rows, source_format="text")
 ```
 
----
-
-## Step 3 — Define the Agent
+## 3. Define The Agent
 
 ```python
-# document_agent.py
-from flowforge import global_config, flow, task, step, branch, FlowForge
-from flowforge.types import BranchCondition
+from flowforge import BranchCondition, FlowForge, global_config, flow, task, step
 
-@global_config(prompt="You are a document processing specialist.")
+@global_config(prompt="You parse documents into normalized records.")
 class DocumentAgent:
 
-    @flow(
-        name="process",
-        prompt="Validate, parse, and summarize the document",
-        input_schema=RawDocument,
-        output_schema=DocumentSummary,
-    )
-    class ProcessFlow:
+    @flow(name="parse_document", prompt="Parse a document")
+    class ParseDocumentFlow:
 
         @task(
-            name="validate_and_parse",
-            prompt="Validate format and parse content",
+            name="parse",
+            prompt="Choose a parser and normalize output",
+            input_schema=Document,
+            output_schema=ParsedDocument,
         )
-        class ValidateAndParseTask:
+        class ParseTask:
 
             @step(
                 order=1,
-                prompt="Detect the document format from content and filename",
-                input_schema=RawDocument,
-                output_schema=ValidatedDocument,
-            )
-            async def detect_format(ctx):
-                doc: RawDocument = ctx.input
-                if doc.filename.endswith(".json") or doc.content.strip().startswith("{"):
-                    fmt = "json"
-                elif doc.filename.endswith(".csv") or "," in doc.content.splitlines()[0]:
-                    fmt = "csv"
-                else:
-                    fmt = "text"
-                return ValidatedDocument(
-                    content=doc.content,
-                    filename=doc.filename,
-                    format=fmt,
-                )
-
-            @branch(
-                order=2,
-                name="format_router",
-                prompt="Route to the correct parser based on detected format",
-                condition=BranchCondition(field="format", enum=["json", "csv", "text"]),
-                branches={
-                    "json": parse_json,
-                    "csv":  parse_csv,
-                    "text": parse_text,
-                },
+                prompt="Route to the correct parser",
+                input_schema=Document,
+                output_schema=ParsedDocument,
+                condition=BranchCondition(field="format", enum=["csv", "text"]),
+                branches={"csv": parse_csv, "text": parse_text},
                 fallback=parse_text,
             )
-            async def route_parser(ctx): ...
-
-        @task(
-            name="summarize",
-            prompt="Generate a human-readable summary of the parsed document",
-        )
-        class SummarizeTask:
-
-            @step(
-                order=1,
-                prompt="Count records and extract a preview",
-                input_schema=ParsedDocument,
-                output_schema=DocumentSummary,
-            )
-            async def summarize(ctx):
-                parsed: ParsedDocument = ctx.input
-                preview_records = parsed.records[:3]
-                preview = str(preview_records)[:200]
-                return DocumentSummary(
-                    title=f"Document ({parsed.source_format})",
-                    record_count=len(parsed.records),
-                    preview=preview,
-                )
+            async def route(ctx):
+                ...
 ```
 
----
-
-## Step 4 — Run the Agent
+## 4. Compile And Run
 
 ```python
-# run.py
 import asyncio
-from document_agent import DocumentAgent, RawDocument
-from flowforge import FlowForge
 
 async def main():
     engine = FlowForge.compile(DocumentAgent)
-
-    # Test with a CSV document
-    csv_doc = RawDocument(
-        content="name,age\nAlice,30\nBob,25",
-        filename="people.csv",
-    )
-    result = await engine.run(csv_doc)
-    print(f"Title: {result.title}")
-    print(f"Records: {result.record_count}")
-    print(f"Preview: {result.preview}")
-
-    # Test with a JSON document
-    json_doc = RawDocument(
-        content='{"product": "FlowForge", "version": "1.0"}',
-        filename="info.json",
-    )
-    result = await engine.run(json_doc)
+    result = await engine.run(Document(content="name\nAda\nGrace", format="csv"))
     print(result)
 
 asyncio.run(main())
 ```
 
----
+## 5. Inspect The Run
 
-## Step 5 — Validate and Visualize
-
-```bash
-# Validate the DAG
-flowforge validate document_agent.py
-
-# Print Mermaid diagram
-flowforge viz document_agent.py --mermaid
-
-# Run with trace table
-flowforge run document_agent.py \
-  -q '{"content": "a,b\n1,2", "filename": "data.csv"}' \
-  --trace
-
-# Render run subtree to SVG
-flowforge run document_agent.py \
-  -q '{"content": "a,b\n1,2", "filename": "data.csv"}' \
-  --viz --viz-output run.svg
+```python
+result, trace = await engine.run_traced(Document(content="hello", format="text"))
+engine.print_run_summary(trace)
+print(engine.run_mermaid(trace))
 ```
 
----
+You now have:
 
-## Complete File
+- A global agent configuration
+- A flow
+- A typed task
+- A branching step
+- Runtime trace visualization
 
-??? example "Full document_agent.py"
+## Next Steps
 
-    ```python
-    import asyncio
-    import json
-    import csv
-    import io
-    from pydantic import BaseModel
-    from flowforge import global_config, flow, task, step, branch, FlowForge
-    from flowforge.types import BranchCondition
-
-
-    # ── Schemas ────────────────────────────────────────────────────────────────
-
-    class RawDocument(BaseModel):
-        content: str
-        filename: str
-
-    class ValidatedDocument(BaseModel):
-        content: str
-        filename: str
-        format: str
-
-    class ParsedDocument(BaseModel):
-        records: list[dict]
-        source_format: str
-
-    class DocumentSummary(BaseModel):
-        title: str
-        record_count: int
-        preview: str
-
-
-    # ── Branch Handlers ─────────────────────────────────────────────────────────
-
-    async def parse_json(ctx):
-        doc = ctx.input
-        records = json.loads(doc.content)
-        if isinstance(records, dict):
-            records = [records]
-        return ParsedDocument(records=records, source_format="json")
-
-    async def parse_csv(ctx):
-        doc = ctx.input
-        reader = csv.DictReader(io.StringIO(doc.content))
-        return ParsedDocument(records=list(reader), source_format="csv")
-
-    async def parse_text(ctx):
-        doc = ctx.input
-        records = [{"line": l} for l in doc.content.splitlines() if l.strip()]
-        return ParsedDocument(records=records, source_format="text")
-
-
-    # ── Agent ───────────────────────────────────────────────────────────────────
-
-    @global_config(prompt="You are a document processing specialist.")
-    class DocumentAgent:
-
-        @flow(name="process", prompt="Validate, parse, and summarize",
-              input_schema=RawDocument, output_schema=DocumentSummary)
-        class ProcessFlow:
-
-            @task(name="validate_and_parse", prompt="Validate format and parse")
-            class ValidateAndParseTask:
-
-                @step(order=1, prompt="Detect document format",
-                      input_schema=RawDocument, output_schema=ValidatedDocument)
-                async def detect_format(ctx):
-                    doc = ctx.input
-                    if doc.filename.endswith(".json") or doc.content.strip().startswith("{"):
-                        fmt = "json"
-                    elif doc.filename.endswith(".csv"):
-                        fmt = "csv"
-                    else:
-                        fmt = "text"
-                    return ValidatedDocument(content=doc.content,
-                                             filename=doc.filename, format=fmt)
-
-                @branch(order=2, name="format_router",
-                        prompt="Route to correct parser",
-                        condition=BranchCondition(field="format",
-                                                  enum=["json", "csv", "text"]),
-                        branches={"json": parse_json, "csv": parse_csv,
-                                  "text": parse_text},
-                        fallback=parse_text)
-                async def route_parser(ctx): ...
-
-            @task(name="summarize", prompt="Generate document summary")
-            class SummarizeTask:
-
-                @step(order=1, prompt="Count records and extract preview",
-                      input_schema=ParsedDocument, output_schema=DocumentSummary)
-                async def summarize(ctx):
-                    parsed = ctx.input
-                    preview = str(parsed.records[:3])[:200]
-                    return DocumentSummary(
-                        title=f"Document ({parsed.source_format})",
-                        record_count=len(parsed.records),
-                        preview=preview,
-                    )
-
-
-    # ── Entry Point ──────────────────────────────────────────────────────────────
-
-    async def main():
-        engine = FlowForge.compile(DocumentAgent)
-        doc = RawDocument(content="name,age\nAlice,30\nBob,25", filename="data.csv")
-        result = await engine.run(doc)
-        print(result)
-
-    if __name__ == "__main__":
-        asyncio.run(main())
-    ```
+- Add `ctx.call_llm(...)` inside a step to summarize parsed records.
+- Register a `FunctionTool` or `MCPServer` in `@global_config(tools=[...])`.
+- Use `route="parse_document.parse"` to run only this capability.
