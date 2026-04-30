@@ -1,178 +1,132 @@
-# Conditional Routing (Branch Dispatching)
+# Branch Dispatching
 
-Branch dispatching is built into `@step`, `@task`, and `@flow` via the `condition`, `branches`, and `fallback` parameters. There is no separate `@branch` decorator.
-
----
-
-## Step-Level Branching
-
-The most common pattern — route execution within a task's step chain:
+FlowForge supports branching on `@step`, `@task`, and `@flow` using:
 
 ```python
-from flowforge import step
-from flowforge.types import BranchCondition
-
-async def handle_premium(ctx): ...
-async def handle_standard(ctx): ...
-async def handle_trial(ctx): ...
-
-@step(
-    order=2,
-    prompt="Route user to the correct handler based on subscription plan",
-    condition=BranchCondition(field="plan", enum=["premium", "standard", "trial"]),
-    branches={
-        "premium":  handle_premium,
-        "standard": handle_standard,
-        "trial":    handle_trial,
-    },
-    fallback=handle_standard,
-)
-async def route_plan(ctx): ...
+condition=BranchCondition(field="...", enum=[...])
+branches={...}
+fallback=...
 ```
 
----
+There is no separate `@branch` decorator.
 
-## Task-Level Branching
+## Step Branching
 
-Route to entirely different `@task`-decorated classes:
+Use step branching when a single task needs to choose one handler.
 
 ```python
-from flowforge import task
-from flowforge.types import BranchCondition
+from flowforge import BranchCondition, FlowForge, global_config, flow, task, step
+
+async def handle_web(ctx):
+    return {"source": "web", "query": ctx.input["query"]}
+
+async def handle_db(ctx):
+    return {"source": "db", "query": ctx.input["query"]}
+
+@global_config(prompt="Search agent")
+class SearchAgent:
+    @flow(name="search", prompt="Search for information")
+    class SearchFlow:
+        @task(name="dispatch", prompt="Choose backend")
+        class DispatchTask:
+            @step(
+                order=1,
+                prompt="Route by source",
+                condition=BranchCondition(field="source", enum=["web", "db"]),
+                branches={"web": handle_web, "db": handle_db},
+                fallback=handle_web,
+            )
+            async def route(ctx):
+                ...
+```
+
+At runtime:
+
+```python
+engine = FlowForge.compile(SearchAgent)
+result = await engine.run({"query": "FlowForge", "source": "db"})
+```
+
+FlowForge reads `ctx.input["source"]`, selects `handle_db`, and forwards that
+handler's return value.
+
+## Task Branching
+
+Use task branching when each branch needs its own step chain.
+
+```python
+@task(name="web_task", prompt="Search the web")
+class WebTask:
+    @step(order=1, prompt="Fetch web results")
+    async def fetch(ctx):
+        return {"backend": "web", "query": ctx.input["query"]}
+
+@task(name="db_task", prompt="Search the database")
+class DBTask:
+    @step(order=1, prompt="Fetch DB rows")
+    async def fetch(ctx):
+        return {"backend": "db", "query": ctx.input["query"]}
 
 @task(
     name="dispatch",
-    prompt="Route to the correct processing pipeline",
-    condition=BranchCondition(field="mode", enum=["fast", "slow"]),
-    branches={"fast": FastTask, "slow": SlowTask},
+    prompt="Dispatch to a backend task",
+    condition=BranchCondition(field="source", enum=["web", "db"]),
+    branches={"web": WebTask, "db": DBTask},
+    fallback=WebTask,
 )
-class DispatchTask: ...
+class DispatchTask:
+    pass
 ```
 
----
+Branch task classes must be decorated with `@task`.
 
-## Flow-Level Branching
+## Flow Branching
 
-Route to entirely different `@flow`-decorated classes:
+Use flow branching when each branch is a whole pipeline.
 
 ```python
-from flowforge import flow
-from flowforge.types import BranchCondition
+@flow(name="quick", prompt="Quick answer")
+class QuickFlow:
+    @task(name="answer", prompt="Short answer")
+    class Answer:
+        @step(order=1, prompt="Draft")
+        async def draft(ctx):
+            return {"mode": "quick"}
+
+@flow(name="deep", prompt="Deep research")
+class DeepFlow:
+    @task(name="research", prompt="Long research")
+    class Research:
+        @step(order=1, prompt="Research")
+        async def research(ctx):
+            return {"mode": "deep"}
 
 @flow(
-    name="dispatch",
-    prompt="Route by request type",
-    condition=BranchCondition(field="type", enum=["a", "b"]),
-    branches={"a": FlowA, "b": FlowB},
+    name="router",
+    prompt="Route by mode",
+    condition=BranchCondition(field="mode", enum=["quick", "deep"]),
+    branches={"quick": QuickFlow, "deep": DeepFlow},
+    fallback=QuickFlow,
 )
-class DispatchFlow: ...
+class RouterFlow:
+    pass
 ```
 
----
-
-## How Routing Works
-
-1. The `condition.field` is looked up on `ctx.input` (via `getattr` or `dict.get`)
-2. The resolved value is converted to a string and matched against `branches` keys
-3. If matched → that handler runs
-4. If not matched → `fallback` runs (or the decorated function body if no fallback)
-5. The handler's return value flows to the next `order` step
-
-```python
-class UserRequest(BaseModel):
-    user_id: str
-    plan: str      # "premium" | "standard" | "trial" | anything else
-
-@step(order=1, prompt="Validate user request", output_schema=UserRequest)
-async def validate(ctx): ...
-
-@step(
-    order=2,
-    prompt="Route by plan",
-    condition=BranchCondition(field="plan", enum=["premium", "standard", "trial"]),
-    branches={"premium": handle_premium, "standard": handle_standard, "trial": handle_trial},
-    fallback=handle_standard,
-)
-async def route_plan(ctx):
-    # ctx.input is the UserRequest from step order=1
-    # ctx.condition_value = ctx.input.plan  (e.g. "premium")
-    # ctx.selected_branch = "premium"       (set by runner)
-    ...
-```
-
----
+Branch flow classes must be decorated with `@flow`.
 
 ## Fallback Behavior
 
-| Situation | Behavior |
-|-----------|----------|
-| `value` is `None` | `fallback` runs; `selected_branch = "__fallback__"` |
-| `value` not in `branches` | `fallback` runs; `selected_branch = "__fallback__"` |
-| `fallback=None` and no match | Decorated function body runs |
+If no branch key matches, FlowForge uses `fallback` when provided. For a
+branching step, if no fallback is provided, the decorated function itself is
+the last-resort handler.
 
----
+## Trace Fields
 
-## Handler Context
-
-Handlers receive a `StepContext` with branch-related attributes populated:
+Branch selections appear in the run trace:
 
 ```python
-class SearchResult(BaseModel):
-    results: list[dict]
-    source: str
-
-async def handle_web(ctx):
-    # ctx.input           → previous step's output
-    # ctx.condition_value  → "web"
-    # ctx.selected_branch  → "web"
-    results = await some_web_api(ctx.input.query)
-    return SearchResult(results=results, source="web")
-```
-
----
-
-## Branch + Step Chain
-
-```python
-@task(name="search_and_rank", prompt="Search and rank results")
-class SearchAndRankTask:
-
-    @step(order=1, prompt="Analyze query to determine best source",
-          output_schema=AnalyzedQuery)
-    async def analyze(ctx): ...
-
-    @step(
-        order=2,
-        prompt="Route to the correct search backend",
-        condition=BranchCondition(field="source_preference", enum=["web", "db"]),
-        branches={"web": search_web, "db": search_db},
-        fallback=search_web,
-    )
-    async def route_search(ctx): ...
-
-    @step(order=3, prompt="Rank and deduplicate the search results",
-          input_schema=SearchResult)
-    async def rank_results(ctx):
-        results: SearchResult = ctx.input   # output of whichever branch ran
-        ...
-```
-
----
-
-## Tracing Branch Selection
-
-After a run, the `RunTrace` records which branch was selected:
-
-```python
-result, trace = await engine.run_traced(input_data)
-
+result, trace = await engine.run_traced(data)
 for node in trace.nodes:
     if node.selected_branch:
-        print(f"Step '{node.name}': selected '{node.selected_branch}'")
-```
-
-Or via CLI:
-
-```bash
-flowforge run agent.py -q '...' --trace
+        print(node.name, node.condition_value, node.selected_branch)
 ```

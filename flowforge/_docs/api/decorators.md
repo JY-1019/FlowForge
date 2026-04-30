@@ -8,8 +8,9 @@
 @global_config(
     prompt: str,
     llm_config: LLMConfig | None = None,
-    tools: list[ToolConfig] | None = None,
+    tools: list[ToolReference] | None = None,
     dynamic_flow: bool = False,
+    include_builtin_tools: bool = False,
 )
 class MyAgent: ...
 ```
@@ -20,8 +21,9 @@ class MyAgent: ...
 |------|------|----------|-------------|
 | `prompt` | `str` | Yes | System-level prompt prepended to every LLM call |
 | `llm_config` | `LLMConfig` | | Default model/temperature/token settings |
-| `tools` | `list[ToolConfig]` | | Global tool registrations (MCP, function, HTTP, Claude Skill). Available to **all** flows, tasks, and steps. |
+| `tools` | `list[ToolReference]` | | Global tool registrations (MCP, function, HTTP, Claude Skill, Agent Skill). Available to **all** flows, tasks, and steps. |
 | `dynamic_flow` | `bool` | | Enable dynamic flow generation. Injects the internal `_dynamic_generator` meta-flow. See [Dynamic Flow Guide](../guides/dynamic-flow.md). |
+| `include_builtin_tools` | `bool` | | Add FlowForge builtin tools to the global tool list. |
 
 Attaches `GlobalMeta` to the class as `cls.__flowforge_global_meta__`.
 
@@ -40,7 +42,7 @@ Attaches `GlobalMeta` to the class as `cls.__flowforge_global_meta__`.
     max_retries: int = 3,
     order: int | None = None,
     unique: bool = False,
-    tools: list[ToolConfig] | None = None,
+    tools: list[ToolReference] | None = None,
     condition: BranchCondition | None = None,
     branches: dict[str, type] | None = None,
     fallback: type | None = None,
@@ -57,11 +59,11 @@ class MyFlow: ...
 | `input_schema` | `Type[BaseModel]` | `None` | Validates flow input at execution time |
 | `output_schema` | `Type[BaseModel]` | `None` | Validates flow output at execution time |
 | `depends_on` | `list[str]` | `[]` | Names of flows that must finish before this one |
-| `parallel` | `bool` | `False` | Execute child nodes concurrently via anyio TaskGroup |
+| `parallel` | `bool` | `False` | Legacy flag: execute immediate child flows concurrently |
 | `max_retries` | `int` | `3` | Number of retries on `ExecutionError` with backoff |
 | `order` | `int \| None` | `None` | Execution position within parent. Same order = parallel |
 | `unique` | `bool` | `False` | Sole representative of its order group |
-| `tools` | `list[ToolConfig]` | `None` | Tools available to all tasks/steps **within this flow** |
+| `tools` | `list[ToolReference]` | `None` | Tool configs or globally registered tool names available to descendants |
 | `condition` | `BranchCondition` | `None` | Branch condition (turns flow into dispatcher) |
 | `branches` | `dict[str, type]` | `None` | `{value: FlowClass}` mapping for branching |
 | `fallback` | `type` | `None` | Default branch when no key matches |
@@ -80,7 +82,10 @@ Attaches `FlowMeta` to the class as `cls.__flowforge_flow_meta__`.
     output_schema: Type[BaseModel] | None = None,
     order: int | None = None,
     unique: bool = False,
-    tools: list[ToolConfig] | None = None,
+    tools: list[ToolReference] | None = None,
+    on_error: str = "raise",
+    max_loops: int = 1,
+    loop_condition: Callable[..., bool] | None = None,
     condition: BranchCondition | None = None,
     branches: dict[str, type] | None = None,
     fallback: type | None = None,
@@ -98,7 +103,10 @@ class MyTask: ...
 | `output_schema` | `Type[BaseModel]` | `None` | Output validation |
 | `order` | `int \| None` | `None` | Execution position within parent. Same order = parallel |
 | `unique` | `bool` | `False` | Sole representative of its order group |
-| `tools` | `list[ToolConfig]` | `None` | Tools available to all steps **within this task** |
+| `tools` | `list[ToolReference]` | `None` | Tool configs or globally registered tool names available to child tasks/steps |
+| `on_error` | `str` | `"raise"` | `"raise"` propagates errors; `"skip_remaining"` returns the last successful step output |
+| `max_loops` | `int` | `1` | Maximum attempts for the task step chain |
+| `loop_condition` | `Callable \| None` | `None` | `(output) -> bool`; `True` accepts the result |
 | `condition` | `BranchCondition` | `None` | Branch condition (turns task into dispatcher) |
 | `branches` | `dict[str, type]` | `None` | `{value: TaskClass}` mapping for branching |
 | `fallback` | `type` | `None` | Default branch when no key matches |
@@ -122,10 +130,13 @@ Attaches `TaskMeta` to the class as `cls.__flowforge_task_meta__`.
     tool_mode: bool = False,
     timeout_seconds: int = 60,
     unique: bool = False,
-    tools: list[ToolConfig] | None = None,
+    approval: bool = False,
+    tools: list[ToolReference] | None = None,
     condition: BranchCondition | None = None,
     branches: dict[str, Callable] | None = None,
     fallback: Callable | None = None,
+    pass_criteria: str | None = None,
+    pass_criteria_max_retries: int = 3,
 )
 async def my_step(ctx: StepContext) -> Any: ...
 ```
@@ -134,17 +145,20 @@ async def my_step(ctx: StepContext) -> Any: ...
 
 | Name | Type | Default | Description |
 |------|------|---------|-------------|
-| `order` | `int` | *(required)* | Execution order within the task. Must be unique per task |
+| `order` | `int` | *(required)* | Execution slot within the task. Same order = parallel group |
 | `prompt` | `str` | *(required)* | What this step does. Used as **system prompt** when `ctx.call_llm()` is called |
 | `input_schema` | `Type[BaseModel]` | `None` | Coerces and validates input before calling function |
 | `output_schema` | `Type[BaseModel]` | `None` | Coerces and validates return value |
-| `tool_mode` | `bool` | `False` | Register as LLM tool (skipped in sequential chain) |
+| `tool_mode` | `bool` | `False` | Metadata flag for tool-oriented steps; current runners still execute ordered steps normally |
 | `timeout_seconds` | `int` | `60` | Wall-clock timeout; raises `asyncio.TimeoutError` |
 | `unique` | `bool` | `False` | Sole representative of its order group |
-| `tools` | `list[ToolConfig]` | `None` | Tools available **only in this step** |
+| `approval` | `bool` | `False` | Pause before execution and raise `ApprovalRequired` with a checkpoint |
+| `tools` | `list[ToolReference]` | `None` | Tool configs or globally registered tool names available **only in this step** |
 | `condition` | `BranchCondition` | `None` | Branch condition (turns step into dispatcher) |
 | `branches` | `dict[str, Callable]` | `None` | `{value: handler}` mapping for branching |
 | `fallback` | `Callable` | `None` | Default handler when no key matches |
+| `pass_criteria` | `str \| None` | `None` | LLM-judged criteria for accepting the output |
+| `pass_criteria_max_retries` | `int` | `3` | Retry attempts when criteria fail |
 
 ### StepContext Attributes
 
@@ -161,6 +175,7 @@ async def my_step(ctx: StepContext) -> Any: ...
 | `ctx.llm_config` | `LLMConfig` | LLM configuration for this run |
 | `ctx.condition_value` | `Any` | Resolved condition value (branch steps only) |
 | `ctx.selected_branch` | `str` | Selected branch key (branch steps only) |
+| `ctx.pass_criteria_feedback` | `list` | Feedback from previous failed criteria checks |
 
 ### StepContext Methods
 

@@ -44,10 +44,13 @@ nav:
   - Getting Started:
     - Installation & Quickstart: getting-started.md
   - Concepts:
+    - Design Notes: initializing.md
     - Architecture Overview: concepts/architecture.md
     - Annotations In Depth: concepts/annotations.md
     - Data Flow & I/O: concepts/data-flow.md
+    - Input / Output Flow: io-flow.md
     - DAG Compilation: concepts/dag-compilation.md
+    - Compile Phase: compile-phase.md
   - Guides:
     - Your First Agent: guides/first-agent.md
     - Branch Dispatching: guides/branching.md

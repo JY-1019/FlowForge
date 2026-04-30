@@ -9,33 +9,32 @@
 | anyio | 4.x |
 | networkx | 3.3+ |
 
----
-
 ## Install
 
 ```bash
-# Minimal install
 pip install git+https://github.com/JY-1019/FlowForge.git
 
-# With all optional extras (visualization, MCP, OpenAI, Google)
+# Optional integrations
 pip install "flowforge[all] @ git+https://github.com/JY-1019/FlowForge.git"
+pip install "flowforge[viz] @ git+https://github.com/JY-1019/FlowForge.git"
+pip install "flowforge[openai] @ git+https://github.com/JY-1019/FlowForge.git"
+pip install "flowforge[google] @ git+https://github.com/JY-1019/FlowForge.git"
+```
 
-# Development install (editable + test deps)
+For local development:
+
+```bash
 git clone https://github.com/JY-1019/FlowForge.git
 cd FlowForge
 pip install -e ".[dev]"
 ```
 
----
-
 ## Hello World
-
-The smallest possible FlowForge agent:
 
 ```python
 # hello_agent.py
 import asyncio
-from flowforge import global_config, flow, task, step, FlowForge
+from flowforge import FlowForge, global_config, flow, task, step
 
 @global_config(prompt="You are a helpful assistant.")
 class HelloAgent:
@@ -50,61 +49,92 @@ class HelloAgent:
             async def say_hello(ctx):
                 return f"Hello, {ctx.input}!"
 
-
 async def main():
     engine = FlowForge.compile(HelloAgent)
     result = await engine.run("World")
-    print(result)   # Hello, World!
+    print(result)
 
 asyncio.run(main())
 ```
 
 Run it:
+
 ```bash
 python hello_agent.py
-# Hello, World!
 ```
 
----
+Expected output:
 
-## Validate & Visualize via CLI
+```text
+Hello, World!
+```
+
+## Add Typed I/O
+
+```python
+from pydantic import BaseModel
+
+class Query(BaseModel):
+    text: str
+
+class Answer(BaseModel):
+    text: str
+
+@task(name="answer", prompt="Answer the question", input_schema=Query, output_schema=Answer)
+class AnswerTask:
+    @step(order=1, prompt="Draft an answer", input_schema=Query, output_schema=Answer)
+    async def draft(ctx):
+        return Answer(text=f"Answering: {ctx.input.text}")
+```
+
+FlowForge validates and coerces values at the boundaries where schemas are
+provided.
+
+## Run A Route
+
+```python
+# Run only one flow
+result = await engine.run(data, route="hello")
+
+# Run one task inside a flow
+result = await engine.run(data, route="hello.greet")
+```
+
+`route` overrides `planning_mode` and is useful for debugging or exposing
+specific capabilities as API endpoints.
+
+## Generate Docs For Planning
+
+```python
+engine = FlowForge.compile(HelloAgent)
+await engine.generate_docs(planning_only=True)
+result = await engine.run("World", planning_mode="autonomous")
+```
+
+`planning_only=True` generates docs for global and flow nodes, which is enough
+for the flow-level planner and much cheaper than documenting every step.
+
+## Visualize
+
+```python
+print(engine.mermaid())          # full DAG as Mermaid
+
+result, trace = await engine.run_traced("World")
+print(engine.run_mermaid(trace)) # executed path
+engine.print_run_summary(trace)
+```
+
+With Graphviz installed:
+
+```python
+engine.visualize("dag.svg")
+engine.visualize_run("run.svg", trace)
+```
+
+## CLI
 
 ```bash
-# Validate the DAG (cycle detection, order uniqueness)
 flowforge validate hello_agent.py
-
-# Print Mermaid diagram
 flowforge viz hello_agent.py --mermaid
-
-# Run with execution trace
 flowforge run hello_agent.py -q "World" --trace
 ```
-
----
-
-## What just happened?
-
-When Python imports your file, each decorator runs bottom-up:
-
-```
-1. @step   → attaches StepMeta to say_hello.__flowforge_step_meta__
-2. @task   → scans class dict, finds step, builds TaskMeta
-3. @flow   → scans class dict, finds task, builds FlowMeta
-4. @global_config → finds flow, builds GlobalMeta
-```
-
-Then `FlowForge.compile()` converts that metadata tree into a networkx DAG and validates it. After that, `engine.run()` traverses the DAG and executes each node in topological order.
-
----
-
-## Next Steps
-
-| I want to… | Go to |
-|-----------|-------|
-| Understand the annotation hierarchy | [Concepts → Annotations](concepts/annotations.md) |
-| Learn how data moves between steps | [Concepts → Data Flow](concepts/data-flow.md) |
-| Build a real agent with branching | [Guides → First Agent](guides/first-agent.md) |
-| Register tools, Claude Skills, or Agent Skills | [Guides → Tools & LLM Calling](guides/tools-and-llm.md) |
-| Visualize a run | [Guides → Run Visualization](guides/visualization.md) |
-| Generate flows dynamically | [Guides → Dynamic Flow](guides/dynamic-flow.md) |
-| Use the CLI | [API → CLI](api/cli.md) |

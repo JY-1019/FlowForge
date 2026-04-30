@@ -2,143 +2,123 @@
 
 **Annotation-Based AI Agent Framework**
 
-Build production-grade AI agent pipelines using nothing but Python decorators.
-No graphs. No YAML. No LangChain dependency.
-
----
+FlowForge lets you build async AI-agent pipelines with Python decorators. You
+write normal classes and functions; FlowForge compiles them into a validated
+DAG, executes the selected route, records a trace, and can optionally let an
+LLM planner choose or generate missing flows.
 
 ```python
-from flowforge import global_config, flow, task, step, FlowForge
-from pydantic import BaseModel
+from flowforge import FlowForge, global_config, flow, task, step
 
-class Query(BaseModel):
-    text: str
-    lang: str = "en"
-
-@global_config(prompt="You are a research assistant.")
+@global_config(prompt="You are a helpful research assistant.")
 class ResearchAgent:
 
-    @flow(name="research", prompt="Analyze and answer the user query")
+    @flow(name="research", prompt="Analyze the query and produce an answer")
     class ResearchFlow:
 
         @task(name="analyze", prompt="Extract intent and keywords")
         class AnalyzeTask:
 
-            @step(order=1, prompt="Classify the query intent")
-            async def classify(ctx): ...
+            @step(order=1, prompt="Classify the request")
+            async def classify(ctx):
+                return {"intent": "research", "query": ctx.input["query"]}
 
-            @step(order=2, prompt="Extract key concepts")
-            async def extract_keywords(ctx): ...
+        @task(name="answer", prompt="Draft the final response")
+        class AnswerTask:
 
-# Compile → Run
+            @step(order=1, prompt="Write a concise answer")
+            async def draft(ctx):
+                return {"answer": f"Result for: {ctx.input['query']}"}
+
 engine = FlowForge.compile(ResearchAgent)
-result = await engine.run(Query(text="What is FlowForge?"))
+result = await engine.run({"query": "What is FlowForge?"})
 ```
 
----
-
-## Why FlowForge?
+## What You Get
 
 <div class="grid cards" markdown>
 
--   :material-tag-outline: **Annotation-First**
+-   :material-tag-outline: **Decorator-First Structure**
 
     ---
 
-    Your entire agent structure lives in Python decorators.
-    No imperative graph construction, no separate config files.
+    Define agents with `@global_config`, `@flow`, `@task`, and `@step`. No
+    manual graph wiring, no YAML, no LangChain dependency.
 
--   :material-graph-outline: **DAG-Native**
-
-    ---
-
-    Decorators compile to a networkx DAG automatically.
-    Cycle detection, topological sort, and I/O validation happen at import time.
-
--   :material-shield-check-outline: **Type-Safe I/O**
+-   :material-graph-outline: **Validated DAG Compilation**
 
     ---
 
-    Pydantic models enforce contracts at every annotation boundary.
-    Bad data never silently passes between steps.
+    Metadata compiles to a `networkx` DAG with stable node IDs, cycle checks,
+    route resolution, and schema-aware I/O validation.
 
--   :material-eye-outline: **Run Visualization**
-
-    ---
-
-    After every `engine.run()`, render which nodes executed,
-    how long each took, and which branch was chosen — as SVG or Mermaid.
-
--   :material-robot-outline: **Dual-Prompt System**
+-   :material-transit-connection-variant: **Ordered, Parallel, And Unique Nodes**
 
     ---
 
-    Every annotation carries a user-written `prompt` (runtime instruction)
-    and an AI-generated `doc` (planning metadata) — keeping execution and planning separate.
+    `order=None` means insertion-order sequential execution. Siblings with the
+    same explicit `order` run in parallel. `unique=True` makes one node the
+    exclusive runner for that order group.
 
--   :material-console: **Built-in CLI**
+-   :material-source-branch: **Branch Dispatching Without `@branch`**
 
     ---
 
-    `flowforge validate`, `flowforge viz`, `flowforge run --trace` —
-    inspect and execute your agents without writing any boilerplate.
+    Add `condition`, `branches`, and optional `fallback` to `@step`, `@task`,
+    or `@flow`. There is no public `@branch` decorator.
+
+-   :material-tools: **Tools, Skills, And LLM Calls**
+
+    ---
+
+    Register MCP servers, HTTP tools, Python functions, Claude Skills, and
+    local Agent Skills. Steps can call `ctx.call_tool(...)` or
+    `ctx.call_llm(...)`.
+
+-   :material-map-marker-path: **Route And Planner Execution**
+
+    ---
+
+    Run the whole DAG, a specific route like `"research.answer"`, or use
+    `planning_mode="autonomous"` / `"hybrid"` after generating docs.
 
 -   :material-creation-outline: **Dynamic Flow Generation**
 
     ---
 
-    Let the agent create missing flows. When the existing DAG does not cover a
-    requirement, the LLM can generate a new Flow, inject it at runtime, and
-    persist it in the manifest for reuse.
+    With `dynamic_flow=True`, the planner can generate missing FlowForge code,
+    inject it into the live DAG, and persist it for reuse.
 
--   :material-tools: **Tools & Skills**
+-   :material-eye-outline: **Run Trace Visualization**
 
     ---
 
-    Register MCP, HTTP, Python functions, Anthropic-native Claude Skills, and
-    local `SKILL.md` Agent Skills through the same `tools=[...]` interface and
-    activate them with `<tool-name>`.
+    Every run records executed nodes, status, duration, selected branches, and
+    checkpoints. Render the result as Mermaid, Graphviz, SVG, PNG, or a table.
 
 </div>
 
----
+## Mental Model
 
-## Installation
-
-```bash
-pip install git+https://github.com/JY-1019/FlowForge.git
-
-# With all optional extras:
-pip install "flowforge[all] @ git+https://github.com/JY-1019/FlowForge.git"
+```text
+@global_config              agent-wide prompt, model, tools, dynamic settings
+  └─ @flow                  high-level pipeline stage; flows can nest
+       ├─ @flow             sub-pipeline
+       └─ @task             work unit; tasks can nest
+            └─ @step        async function; ordered atomic action
 ```
 
-Requires **Python 3.11+**.
+Every node returns a value. That value becomes the next node's input. Pydantic
+schemas can validate boundaries when you provide `input_schema` and
+`output_schema`.
 
----
+## Start Here
 
-## Core Concepts in 60 Seconds
-
-```
-@global_config          ← top-level agent config (LLM, tools, system prompt)
-  └─ @flow              ← high-level pipeline stage (nestable, supports branching)
-       ├─ @flow         ← sub-pipeline (flows nest recursively)
-       └─ @task         ← execution unit (nestable, supports branching)
-            └─ @step    ← single action, runs in order=N (supports branching)
-```
-
-Branch dispatching is built into `@step`, `@task`, and `@flow` via optional `condition`, `branches`, and `fallback` parameters — there is no separate `@branch` decorator.
-
-Every decorator compiles to a **DAG node** with a dotted-path ID (e.g. `global.research.analyze.classify[1]`).
-At runtime the engine traverses the DAG, threads outputs into inputs, and records a full `RunTrace`.
-
----
-
-## Quick Links
-
-- [Installation & Quickstart →](getting-started.md)
-- [Annotation Reference →](concepts/annotations.md)
-- [I/O Data Flow →](concepts/data-flow.md)
-- [Tools & LLM Calling →](guides/tools-and-llm.md)
-- [Dynamic Flow Generation →](guides/dynamic-flow.md)
-- [Run Visualization Guide →](guides/visualization.md)
-- [CLI Reference →](api/cli.md)
+- [Installation & Quickstart](getting-started.md)
+- [Your First Agent](guides/first-agent.md)
+- [Annotations In Depth](concepts/annotations.md)
+- [Data Flow & I/O](concepts/data-flow.md)
+- [Branch Dispatching](guides/branching.md)
+- [Tools & LLM Calling](guides/tools-and-llm.md)
+- [Dynamic Flow Generation](guides/dynamic-flow.md)
+- [Engine & CompiledAgent](api/engine.md)

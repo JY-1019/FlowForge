@@ -19,7 +19,7 @@ Converts a `@global_config`-decorated class into a `CompiledAgent`. Raises `Comp
 
 - The class is not decorated with `@global_config`
 - The DAG has cycles (`CycleDetectedError`)
-- Step orders conflict (`OrderConflictError`)
+- Two same-order siblings both set `unique=True` (`OrderConflictError`)
 
 When `dynamic_options` is provided and the agent has `dynamic_flow=True`, the
 internal `_dynamic_generator` meta-flow is injected into the DAG. If
@@ -208,7 +208,7 @@ path = engine.visualize_run("run.svg", trace=trace)
 
 Return a Mermaid diagram for the last (or given) run.
 
-#### `compare_mermaid(trace=None)` → `str`
+#### `compare_mermaid(trace=None, include_full_dag=False)` → `str`
 
 Return a compact Markdown string with the executed-path Mermaid diagram.
 Pass `include_full_dag=True` to also include the full compiled DAG.
