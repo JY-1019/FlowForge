@@ -42,7 +42,8 @@ signatures uniform and simplifies user code.
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Any, TYPE_CHECKING
+from collections.abc import AsyncIterator, Callable, Coroutine, Generator
+from typing import Any, TYPE_CHECKING, Generic, TypeVar
 
 if TYPE_CHECKING:
     from flowforge.types import LLMConfig, ToolConfig, ToolReference, DynamicRunOptions
@@ -50,6 +51,58 @@ if TYPE_CHECKING:
     from flowforge.doc.models import AnyDoc
     from flowforge.viz.run_trace import RunTracer, Checkpoint
     from flowforge.execution.memory import SessionMemory
+
+
+_T = TypeVar("_T")
+
+
+class _LLMCall(Coroutine[Any, Any, _T], Generic[_T]):
+    """Lazy result returned by ``StepContext.call_llm``.
+
+    The object is awaitable for the normal ``await ctx.call_llm(...)`` API.
+    When streaming is enabled it is also an async iterator, which lets users
+    write ``async for chunk in ctx.call_llm(..., stream=True)`` without first
+    awaiting a coroutine.
+    """
+
+    def __init__(
+        self,
+        awaitable_factory: Callable[[], Coroutine[Any, Any, _T]],
+        stream_factory: Callable[[], AsyncIterator[str]] | None = None,
+    ) -> None:
+        self._awaitable_factory = awaitable_factory
+        self._stream_factory = stream_factory
+        self._coro: Coroutine[Any, Any, _T] | None = None
+
+    def _coroutine(self) -> Coroutine[Any, Any, _T]:
+        if self._coro is None:
+            self._coro = self._awaitable_factory()
+        return self._coro
+
+    def __await__(self) -> Generator[Any, None, _T]:
+        return self._coroutine().__await__()
+
+    def send(self, value: Any) -> Any:
+        return self._coroutine().send(value)
+
+    def throw(self, typ: Any, val: Any = None, tb: Any = None) -> Any:
+        if val is None and tb is None:
+            return self._coroutine().throw(typ)
+        if tb is None:
+            return self._coroutine().throw(typ, val)
+        return self._coroutine().throw(typ, val, tb)
+
+    def close(self) -> None:
+        self._coroutine().close()
+
+    def __aiter__(self) -> AsyncIterator[str]:
+        if self._stream_factory is None:
+            raise TypeError(
+                "ctx.call_llm(...) is awaitable. Use "
+                "`await ctx.call_llm(...)`, or pass `stream=True` to iterate "
+                "response chunks."
+            )
+        return self._stream_factory()
 
 
 def _tool_ref_name(tool: "ToolReference") -> str:
@@ -695,7 +748,19 @@ class StepContext:
                 "skill": skill_name,
             }
 
-    async def call_llm(
+    def _record_llm_interaction(self, prompt: str, response: Any) -> None:
+        """Record one LLM interaction for later step-history injection."""
+        step_name = ""
+        if hasattr(self, "_step_func_name"):
+            step_name = self._step_func_name
+        self.task_ctx.step_history.record_step(
+            step_name=step_name,
+            order=self.order,
+            prompt=prompt,
+            response=response,
+        )
+
+    def call_llm(
         self,
         prompt: str,
         *,
@@ -731,15 +796,16 @@ class StepContext:
         prompt:
             The user/task prompt (supports ``{var}`` and ``<tool>`` syntax).
         stream:
-            When ``True``, return an **async generator** that yields ``str``
-            chunks as the model produces them.  Streaming mode does not
-            support tool-use loops or structured output.
+            When ``True``, return an async-iterable call object that yields
+            ``str`` chunks as the model produces them.  Streaming mode does
+            not support tool-use loops or structured output.
 
         Returns
         -------
         Any
-            The LLM response content (text string, parsed structured output,
-            or async generator when ``stream=True``).
+            Awaitable call object for normal responses.  With
+            ``stream=True``, the same object can be used directly in
+            ``async for`` and can also be awaited to obtain an async iterator.
 
         Raises
         ------
@@ -782,40 +848,49 @@ class StepContext:
         # 4. Build system prompt with memory context.
         system_prompt = self._build_system_prompt()
 
-        # 5. Streaming mode — return async generator directly.
+        # 5. Streaming mode — return a lazy async-iterable call object.
         if stream:
-            from flowforge.execution.llm import stream_llm_api
-            return stream_llm_api(
+            if max_tool_rounds is not None:
+                raise ValueError("max_tool_rounds is not supported with stream=True.")
+
+            def _stream_factory() -> AsyncIterator[str]:
+                async def _gen() -> AsyncIterator[str]:
+                    from flowforge.execution.llm import stream_llm_api
+
+                    chunks: list[str] = []
+                    async for chunk in stream_llm_api(
+                        system_prompt=system_prompt,
+                        user_prompt=rendered,
+                        llm_config=self.llm_config,
+                        tool_configs=tool_configs,
+                        tool_registry=self.tools,
+                    ):
+                        chunks.append(chunk)
+                        yield chunk
+                    self._record_llm_interaction(rendered, "".join(chunks))
+
+                return _gen()
+
+            async def _await_stream() -> AsyncIterator[str]:
+                return _stream_factory()
+
+            return _LLMCall(_await_stream, _stream_factory)
+
+        # 6. Normal mode — call LLM (pass output_schema for structured output).
+        async def _run() -> Any:
+            result = await call_llm_api(
                 system_prompt=system_prompt,
                 user_prompt=rendered,
                 llm_config=self.llm_config,
                 tool_configs=tool_configs,
                 tool_registry=self.tools,
+                output_schema=self.output_schema,
+                max_tool_rounds=max_tool_rounds,
             )
+            self._record_llm_interaction(rendered, result)
+            return result
 
-        # 6. Normal mode — call LLM (pass output_schema for structured output).
-        result = await call_llm_api(
-            system_prompt=system_prompt,
-            user_prompt=rendered,
-            llm_config=self.llm_config,
-            tool_configs=tool_configs,
-            tool_registry=self.tools,
-            output_schema=self.output_schema,
-            max_tool_rounds=max_tool_rounds,
-        )
-
-        # 7. Record this step's interaction in the task's step history.
-        step_name = ""
-        if hasattr(self, "_step_func_name"):
-            step_name = self._step_func_name
-        self.task_ctx.step_history.record_step(
-            step_name=step_name,
-            order=self.order,
-            prompt=rendered,
-            response=result,
-        )
-
-        return result
+        return _LLMCall(_run)
 
     def _build_system_prompt(self) -> str:
         """Build the full system prompt with memory blocks appended."""

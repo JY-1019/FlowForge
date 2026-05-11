@@ -806,6 +806,102 @@ Review carefully.
             assert call_kwargs["tool_configs"] == []
 
     @pytest.mark.asyncio
+    async def test_call_llm_result_can_be_scheduled_as_task(self):
+        """call_llm remains coroutine-compatible for asyncio.create_task."""
+        import asyncio
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="sys",
+            tool_registry=ToolRegistry(),
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="test")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="test")
+        step_ctx = StepContext(task_ctx=task_ctx, step_prompt="helper")
+
+        with patch("flowforge.execution.llm.call_llm_api", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = "scheduled"
+
+            task = asyncio.create_task(step_ctx.call_llm("Run later"))
+            result = await task
+
+        assert result == "scheduled"
+
+    @pytest.mark.asyncio
+    async def test_call_llm_stream_is_direct_async_iterator(self):
+        """stream=True supports `async for chunk in ctx.call_llm(...)`."""
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(provider="anthropic", model="test-model"),
+            global_prompt="sys",
+            tool_registry=ToolRegistry(),
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="test")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="test")
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="helper",
+            step_input={"name": "Alice"},
+            order=1,
+        )
+
+        captured: dict[str, object] = {}
+
+        async def fake_stream_llm_api(**kwargs):
+            captured.update(kwargs)
+            for chunk in ("Hel", "lo"):
+                yield chunk
+
+        chunks: list[str] = []
+        with patch("flowforge.execution.llm.stream_llm_api", side_effect=fake_stream_llm_api):
+            async for chunk in step_ctx.call_llm("Greet {name}", stream=True):
+                chunks.append(chunk)
+
+        assert chunks == ["Hel", "lo"]
+        assert captured["system_prompt"] == "helper"
+        assert captured["user_prompt"] == "Greet Alice"
+        assert task_ctx.step_history.entries[0].response_summary == "Hello"
+
+    @pytest.mark.asyncio
+    async def test_call_llm_stream_can_still_be_awaited_for_iterator(self):
+        """Backward-compatible stream usage can await the async iterator first."""
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(provider="anthropic", model="test-model"),
+            global_prompt="sys",
+            tool_registry=ToolRegistry(),
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="test")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="test")
+        step_ctx = StepContext(task_ctx=task_ctx, step_prompt="helper")
+
+        async def fake_stream_llm_api(**kwargs):
+            yield "A"
+            yield "B"
+
+        with patch("flowforge.execution.llm.stream_llm_api", side_effect=fake_stream_llm_api):
+            stream = await step_ctx.call_llm("Say hi", stream=True)
+            chunks = [chunk async for chunk in stream]
+
+        assert chunks == ["A", "B"]
+
+    @pytest.mark.asyncio
+    async def test_call_llm_stream_rejects_executable_tools(self):
+        """Streaming fails loudly instead of silently dropping tool references."""
+        tool = FunctionTool(func=lambda query: {"query": query}, name="web_search")
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(provider="anthropic", model="test-model"),
+            global_prompt="sys",
+            tool_registry=ToolRegistry(),
+            global_tools=[tool],
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="test")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="test")
+        step_ctx = StepContext(task_ctx=task_ctx, step_prompt="helper")
+
+        with pytest.raises(ValueError, match="stream=True does not support"):
+            async for _ in step_ctx.call_llm("Search with <web_search>", stream=True):
+                pass
+
+    @pytest.mark.asyncio
     async def test_call_llm_code_step_no_call(self):
         """A pure code step does not call call_llm — just returns computed data."""
         @step(order=1, prompt="filter results")
@@ -1090,6 +1186,86 @@ class TestToolUseLoopIntegration:
                 llm_config=LLMConfig(provider="openai", model="test"),
                 tool_configs=[ClaudeSkill(name="pptx")],
             )
+
+
+class TestStreamingLLMProviders:
+    """Provider-specific streaming helpers."""
+
+    @pytest.mark.asyncio
+    async def test_google_stream_uses_google_genai_sdk(self, monkeypatch):
+        """Gemini streaming uses the same google-genai SDK as normal calls."""
+        import sys
+        import types
+
+        from flowforge.execution.llm import _stream_google
+
+        captured: dict[str, object] = {}
+        monkeypatch.setenv("FLOWFORGE_SSL_VERIFY", "1")
+
+        class FakeChunk:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class FakeModels:
+            async def generate_content_stream(self, **kwargs):
+                captured["request"] = kwargs
+
+                async def _chunks():
+                    yield FakeChunk("Gem")
+                    yield FakeChunk("")
+                    yield FakeChunk("ini")
+
+                return _chunks()
+
+        class FakeAio:
+            def __init__(self) -> None:
+                self.models = FakeModels()
+
+            async def aclose(self) -> None:
+                captured["closed"] = True
+
+        class FakeClient:
+            def __init__(self, **kwargs) -> None:
+                captured["client_kwargs"] = kwargs
+                self.aio = FakeAio()
+
+        def fake_generate_config(**kwargs):
+            captured["config_kwargs"] = kwargs
+            return {"config": kwargs}
+
+        fake_google = types.ModuleType("google")
+        fake_genai = types.ModuleType("google.genai")
+        fake_genai.Client = FakeClient
+        fake_genai.types = types.SimpleNamespace(
+            GenerateContentConfig=fake_generate_config,
+        )
+        fake_google.genai = fake_genai
+        monkeypatch.setitem(sys.modules, "google", fake_google)
+        monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+
+        config = LLMConfig(
+            provider="google",
+            model="gemini-test",
+            api_key="key",
+            temperature=0.2,
+            max_tokens=123,
+        )
+        chunks = [
+            chunk async for chunk in _stream_google("system", "user", config)
+        ]
+
+        assert chunks == ["Gem", "ini"]
+        assert captured["client_kwargs"] == {"api_key": "key"}
+        assert captured["request"] == {
+            "model": "gemini-test",
+            "contents": "user",
+            "config": {"config": {
+                "temperature": 0.2,
+                "max_output_tokens": 123,
+                "system_instruction": "system",
+            }},
+        }
+        assert captured["closed"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -785,16 +785,25 @@ async def stream_llm_api(
     simplified path — **no tool-use loop** and **no structured output**.
     Use ``call_llm_api`` for those features.
 
-    Supported providers: ``anthropic``, ``openai``.  Google Gemini falls
-    back to a single-chunk yield of the full response.
+    Supported providers: ``anthropic``, ``openai``, and ``google``.
 
     Usage from a step::
 
         async for chunk in ctx.call_llm("prompt", stream=True):
             print(chunk, end="", flush=True)
     """
-    non_agent_tool_configs, agent_skill_configs = _split_agent_skill_configs(tool_configs)
-    _, claude_skill_configs = _split_claude_skill_configs(non_agent_tool_configs)
+    (
+        regular_tool_configs,
+        claude_skill_configs,
+        agent_skill_configs,
+    ) = _split_skill_configs(tool_configs)
+    if regular_tool_configs:
+        names = [_get_tool_name(tc) or type(tc).__name__ for tc in regular_tool_configs]
+        raise ValueError(
+            "stream=True does not support executable tool-use loops. "
+            f"Remove tool references {names!r} or call ctx.call_llm(...) "
+            "without stream=True."
+        )
     if claude_skill_configs:
         raise ValueError("ClaudeSkill tools are not supported with stream=True.")
     if agent_skill_configs:
@@ -817,75 +826,94 @@ async def _stream_anthropic(system_prompt: str, user_prompt: str, config: LLMCon
     """Yield text deltas from the Anthropic streaming API."""
     import anthropic
 
-    client_kwargs: dict[str, Any] = {
-        "api_key": config.api_key or None,
-        "base_url": config.base_url or None,
-    }
+    client_kwargs: dict[str, Any] = {}
+    if config.api_key:
+        client_kwargs["api_key"] = config.api_key
+    if config.base_url:
+        client_kwargs["base_url"] = config.base_url
     if not config.verify_ssl or os.environ.get("FLOWFORGE_SSL_VERIFY", "1").lower() in ("0", "false", "no", "off"):
         import httpx as _httpx
         client_kwargs["http_client"] = _httpx.AsyncClient(verify=False)
     client = anthropic.AsyncAnthropic(**client_kwargs)
-    async with client.messages.stream(
-        model=config.model,
-        max_tokens=config.max_tokens,
-        temperature=config.temperature,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    ) as stream:
-        async for text in stream.text_stream:
-            yield text
+    try:
+        async with client.messages.stream(
+            model=config.model,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        ) as stream:
+            async for text in stream.text_stream:
+                yield text
+    finally:
+        await client.close()
 
 
 async def _stream_openai(system_prompt: str, user_prompt: str, config: LLMConfig):
     """Yield text deltas from the OpenAI streaming API."""
     import openai
 
-    client_kwargs: dict[str, Any] = {
-        "api_key": config.api_key or None,
-        "base_url": config.base_url or None,
-    }
+    client_kwargs: dict[str, Any] = {}
+    if config.api_key:
+        client_kwargs["api_key"] = config.api_key
+    if config.base_url:
+        client_kwargs["base_url"] = config.base_url
     if not config.verify_ssl or os.environ.get("FLOWFORGE_SSL_VERIFY", "1").lower() in ("0", "false", "no", "off"):
         import httpx as _httpx
         client_kwargs["http_client"] = _httpx.AsyncClient(verify=False)
     client = openai.AsyncOpenAI(**client_kwargs)
-    response = await client.chat.completions.create(
-        model=config.model,
-        max_tokens=config.max_tokens,
-        temperature=config.temperature,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        stream=True,
-    )
-    async for chunk in response:
-        delta = chunk.choices[0].delta if chunk.choices else None
-        if delta and delta.content:
-            yield delta.content
+    try:
+        response = await client.chat.completions.create(
+            model=config.model,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            stream=True,
+        )
+        async for chunk in response:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                yield delta.content
+    finally:
+        await client.close()
 
 
 async def _stream_google(system_prompt: str, user_prompt: str, config: LLMConfig):
     """Yield text chunks from the Google Gemini streaming API."""
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types as gtypes
 
+    genai_kwargs: dict[str, Any] = {}
     if config.api_key:
-        genai.configure(api_key=config.api_key)
+        genai_kwargs["api_key"] = config.api_key
+    if not config.verify_ssl or os.environ.get("FLOWFORGE_SSL_VERIFY", "1").lower() in ("0", "false", "no", "off"):
+        import httpx as _httpx
+        genai_kwargs["http_options"] = {"client": _httpx.AsyncClient(verify=False)}
+    client = genai.Client(**genai_kwargs)
 
-    model = genai.GenerativeModel(
-        model_name=config.model,
-        system_instruction=system_prompt,
-    )
-    response = await model.generate_content_async(
-        user_prompt,
-        generation_config=genai.types.GenerationConfig(
-            temperature=config.temperature,
-            max_output_tokens=config.max_tokens,
-        ),
-        stream=True,
-    )
-    async for chunk in response:
-        if chunk.text:
-            yield chunk.text
+    config_kwargs: dict[str, Any] = {
+        "temperature": config.temperature,
+        "max_output_tokens": config.max_tokens,
+    }
+    if system_prompt:
+        config_kwargs["system_instruction"] = system_prompt
+    gen_config = gtypes.GenerateContentConfig(**config_kwargs)
+
+    try:
+        response = await client.aio.models.generate_content_stream(
+            model=config.model,
+            contents=user_prompt,
+            config=gen_config,
+        )
+        async for chunk in response:
+            text = getattr(chunk, "text", None)
+            if text:
+                yield text
+    finally:
+        await client.aio.aclose()
 
 
 # ---------------------------------------------------------------------------
