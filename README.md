@@ -42,18 +42,36 @@ result = await engine.run({"query": "AI agent frameworks in 2026"})
 ## Installation
 
 ```bash
-pip install git+https://github.com/JY-1019/FlowForge.git
+pip install flowforge
 ```
 
 With optional extras:
 
 ```bash
-pip install "flowforge[all] @ git+https://github.com/JY-1019/FlowForge.git"
-pip install "flowforge[viz] @ git+https://github.com/JY-1019/FlowForge.git"
-pip install "flowforge[mcp] @ git+https://github.com/JY-1019/FlowForge.git"
+pip install "flowforge[viz]"        # Graphviz rendering
+pip install "flowforge[openai]"     # OpenAI provider support
+pip install "flowforge[google]"     # Gemini provider support
+pip install "flowforge[mcp]"        # MCP server integration
+pip install "flowforge[artifacts]"  # PDF, PPTX, DOCX, charts, images
+pip install "flowforge[docs]"       # Local MkDocs documentation
+pip install "flowforge[all]"        # All runtime extras
 ```
 
 > Requires Python 3.11+
+
+Install directly from GitHub when testing unreleased changes:
+
+```bash
+pip install "flowforge @ git+https://github.com/JY-1019/FlowForge.git"
+```
+
+For local development:
+
+```bash
+git clone https://github.com/JY-1019/FlowForge.git
+cd FlowForge
+python -m pip install -e ".[dev,all]"
+```
 
 ## Quick Start
 
@@ -399,6 +417,12 @@ You can also browse the docs directly on GitHub: [flowforge/_docs/](https://gith
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+development setup, test commands, and packaging checks. Please report security
+issues privately using the guidance in [SECURITY.md](SECURITY.md).
 
 ## Author
 
