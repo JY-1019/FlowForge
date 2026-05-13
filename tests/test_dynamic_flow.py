@@ -21,7 +21,7 @@ from flowforge.dynamic import meta_flow as dynamic_meta_flow
 from flowforge.planner import ExecutionPlan
 from flowforge.schema.compiler import add_flow_to_dag
 from flowforge.schema.dag import NodeType
-from flowforge.types import AgentSkill, ClaudeSkill, FunctionTool, LLMConfig
+from flowforge.types import AgentSkill, ClaudeSkill, FunctionTool, HTTPTool, LLMConfig
 from flowforge import DynamicRunOptions
 
 
@@ -2245,6 +2245,67 @@ class TimeoutFlow:
 
         assert "clone-coding (agent-skill)" in catalog
         assert 'ctx.call_llm("instruction <clone-coding>")' in catalog
+
+    def test_tool_catalog_shows_schema_params_for_http_tools(self, tmp_path):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "default": 5},
+            },
+            "required": ["query"],
+        }
+        gen = DynamicFlowGenerator(
+            llm_config=LLMConfig(model="test"),
+            dag=FlowForge.compile(DynamicAgent).dag,
+            tool_configs=[
+                HTTPTool(
+                    url="https://api.example.test/search",
+                    name="search_api",
+                    description="Search API.",
+                    input_schema=schema,
+                )
+            ],
+        )
+
+        catalog = gen._format_tool_catalog()
+
+        assert "search_api (http)" in catalog
+        assert "Parameters: (query: string, limit: integer = 5)" in catalog
+        assert 'Call: await ctx.call_tool("search_api", query=...)' in catalog
+        assert 'ctx.call_llm("instruction <search_api>")' in catalog
+
+    def test_tool_catalog_uses_unpacking_for_non_identifier_schema_keys(self, tmp_path):
+        from flowforge.dynamic.generator import DynamicFlowGenerator
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "max-results": {"type": "integer"},
+                "from": {"type": "string"},
+            },
+            "required": ["max-results", "from"],
+        }
+        gen = DynamicFlowGenerator(
+            llm_config=LLMConfig(model="test"),
+            dag=FlowForge.compile(DynamicAgent).dag,
+            tool_configs=[
+                HTTPTool(
+                    url="https://api.example.test/search",
+                    name="search_api",
+                    input_schema=schema,
+                )
+            ],
+        )
+
+        catalog = gen._format_tool_catalog()
+
+        assert (
+            'Call: await ctx.call_tool("search_api", '
+            '**{\'max-results\': ..., \'from\': ...})'
+        ) in catalog
 
     def test_tool_catalog_compacts_to_relevant_tools(self, tmp_path):
         from flowforge.dynamic.generator import DynamicFlowGenerator

@@ -18,8 +18,9 @@ Token budget
 ------------
 - Session memory: keeps the last ``max_entries`` (default 10) run summaries.
   Each entry is capped at ``max_entry_chars`` (default 300) characters.
-- Step history: each entry is capped at ``max_step_chars`` (default 200)
-  characters.  Injected as a compact block in the system prompt.
+- Step history: keeps the last ``max_entries`` (default 20) LLM interactions.
+  Each entry is capped at ``max_step_chars`` (default 200) characters.
+  Injected as a compact block in the system prompt.
 
 Both can be cleared by the user at any time via ``engine.memory.clear()``
 or ``ctx.clear_step_history()``.
@@ -109,7 +110,9 @@ class SessionMemory:
         self._entries.append(entry)
 
         # Evict oldest if over limit.
-        if len(self._entries) > self.max_entries:
+        if self.max_entries <= 0:
+            self._entries.clear()
+        elif len(self._entries) > self.max_entries:
             self._entries = self._entries[-self.max_entries:]
 
     def to_prompt_block(self) -> str:
@@ -151,6 +154,10 @@ class SessionMemory:
             text = str(data)
 
         if len(text) > max_chars:
+            if max_chars <= 0:
+                return ""
+            if max_chars <= 3:
+                return "." * max_chars
             text = text[:max_chars - 3] + "..."
         return text
 
@@ -177,11 +184,15 @@ class StepHistory:
 
     Parameters
     ----------
+    max_entries:
+        Maximum number of step summaries to keep. Oldest entries are dropped
+        when the limit is exceeded.
     max_step_chars:
         Maximum characters per step response summary.
     """
 
-    def __init__(self, max_step_chars: int = 200) -> None:
+    def __init__(self, max_entries: int = 20, max_step_chars: int = 200) -> None:
+        self.max_entries = max_entries
         self.max_step_chars = max_step_chars
         self._entries: list[StepHistoryEntry] = []
 
@@ -208,6 +219,10 @@ class StepHistory:
             prompt_summary=prompt_summary,
             response_summary=resp_text,
         ))
+        if self.max_entries <= 0:
+            self._entries.clear()
+        elif len(self._entries) > self.max_entries:
+            self._entries = self._entries[-self.max_entries:]
 
     def to_prompt_block(self) -> str:
         """Render as a compact prompt block for subsequent steps."""

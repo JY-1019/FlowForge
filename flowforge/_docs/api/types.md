@@ -17,6 +17,7 @@ config = LLMConfig(
     model="claude-sonnet-4-6",
     temperature=0.3,
     max_tokens=4096,
+    max_tool_result_chars=12000,
     api_key=None,
     base_url=None,
     verify_ssl=True,
@@ -29,6 +30,7 @@ config = LLMConfig(
 | `model` | `str` | `"claude-sonnet-4-6"` | Model identifier |
 | `temperature` | `float` | `0.3` | Sampling temperature |
 | `max_tokens` | `int` | `4096` | Maximum tokens in response |
+| `max_tool_result_chars` | `int` | `12000` | Maximum characters from each tool result fed back to the model; `0` disables truncation |
 | `api_key` | `str \| None` | `None` | Provider API key; SDK env vars are used when omitted |
 | `base_url` | `str \| None` | `None` | Custom base URL, useful for OpenAI-compatible endpoints |
 | `verify_ssl` | `bool` | `True` | Whether provider HTTP clients verify SSL certificates |
@@ -70,6 +72,11 @@ mcp = MCPServer(
     url="https://api.example.com/mcp",
     name="example_api",
     description="Example MCP server",
+    input_schema={
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    },
     headers={"Authorization": "Bearer ..."},  # optional
 )
 ```
@@ -88,6 +95,8 @@ tool = FunctionTool(
     name="my_search",
     description="Search for information",
     func=my_tool,
+    # optional override; otherwise inferred from function annotations
+    input_schema=None,
 )
 ```
 
@@ -103,6 +112,11 @@ http_tool = HTTPTool(
     url="https://api.weather.com/v1/current",
     method="GET",
     description="Get current weather data",
+    input_schema={
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    },
 )
 ```
 
@@ -221,8 +235,10 @@ class FetchFlow:
 ```
 
 String references are resolved against concrete tool configs already present
-in the global/parent tool chain. Dynamic generated flows use this form to
-declare intended tool scope without rebuilding `FunctionTool` objects.
+in the global/parent tool chain, and `ctx.call_tool()` can also resolve
+runtime adapters registered in the global `ToolRegistry`. Dynamic generated
+flows use this form to declare intended tool scope without rebuilding concrete
+tool objects.
 
 Use a Claude Skill from a step with the same angle-bracket syntax as other
 LLM tools:

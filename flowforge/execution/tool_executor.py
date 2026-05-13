@@ -16,6 +16,7 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from flowforge.types import ToolConfig, MCPServer, FunctionTool, HTTPTool
+    from flowforge.tools.base import ToolAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ class ToolExecutor:
     def __init__(self, tool_configs: list[ToolConfig]) -> None:
         from flowforge.types import MCPServer, FunctionTool, HTTPTool
 
-        self._configs: dict[str, ToolConfig] = {}
+        self._configs: dict[str, ToolConfig | ToolAdapter] = {}
         for tc in tool_configs:
             if isinstance(tc, MCPServer):
                 name = tc.name
@@ -66,6 +67,8 @@ class ToolExecutor:
                 name = tc.name or (tc.func.__name__ if hasattr(tc.func, "__name__") else "")
             elif isinstance(tc, HTTPTool):
                 name = tc.name or "http_tool"
+            elif hasattr(tc, "name") and hasattr(tc, "call"):
+                name = getattr(tc, "name", "")
             else:
                 continue
             if name:
@@ -105,25 +108,40 @@ class ToolExecutor:
     def has_tool(self, name: str) -> bool:
         return name in self._configs
 
-    async def execute(self, name: str, tool_input: dict[str, Any]) -> str:
-        """Execute a tool by *name* and return the result as a string."""
+    async def execute_raw(
+        self,
+        name: str,
+        tool_input: dict[str, Any],
+        *,
+        ctx: Any = None,
+    ) -> Any:
+        """Execute a tool by *name* and return its native Python result."""
         from flowforge.types import MCPServer, FunctionTool, HTTPTool
 
         config = self._configs.get(name)
         if config is None:
-            return f"Error: unknown tool '{name}'"
+            raise ValueError(f"unknown tool {name!r}")
 
+        if isinstance(config, MCPServer):
+            return await self._execute_mcp(config, name, tool_input)
+        if isinstance(config, FunctionTool):
+            return await self._execute_function(config, tool_input, ctx=ctx)
+        if isinstance(config, HTTPTool):
+            return await self._execute_http(config, tool_input)
+        if hasattr(config, "call"):
+            return await self._execute_adapter(config, tool_input, ctx=ctx)
+        raise TypeError(f"unsupported tool type for {name!r}")
+
+    async def execute(self, name: str, tool_input: dict[str, Any]) -> str:
+        """Execute a tool by *name* and return the result as LLM-safe text."""
         try:
-            if isinstance(config, MCPServer):
-                return await self._execute_mcp(config, name, tool_input)
-            elif isinstance(config, FunctionTool):
-                return await self._execute_function(config, tool_input)
-            elif isinstance(config, HTTPTool):
-                return await self._execute_http(config, tool_input)
-            return f"Error: unsupported tool type for '{name}'"
+            result = await self.execute_raw(name, tool_input)
         except Exception as e:
             logger.warning("Tool execution failed: %s(%s) → %s", name, tool_input, e)
             return f"Error executing tool '{name}': {e}"
+        if isinstance(result, str):
+            return result
+        return json.dumps(result, default=str, ensure_ascii=False)
 
     async def fetch_mcp_tool_schemas(self) -> dict[str, dict[str, Any]]:
         """Fetch real tool schemas from all MCP servers.
@@ -325,25 +343,54 @@ class ToolExecutor:
     # FunctionTool
     # ------------------------------------------------------------------
 
-    async def _execute_function(self, config: FunctionTool, tool_input: dict[str, Any]) -> str:
+    async def _execute_function(
+        self,
+        config: FunctionTool,
+        tool_input: dict[str, Any],
+        *,
+        ctx: Any = None,
+    ) -> Any:
         import asyncio
 
         func = config.func
+        call_input = dict(tool_input)
+        if ctx is not None:
+            try:
+                sig = inspect.signature(func)
+                if "ctx" in sig.parameters and "ctx" not in call_input:
+                    call_input["ctx"] = ctx
+            except (TypeError, ValueError):
+                pass
         if inspect.iscoroutinefunction(func):
-            result = await func(**tool_input)
+            return await func(**call_input)
         else:
             loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(None, lambda: func(**tool_input))
+            return await loop.run_in_executor(None, lambda: func(**call_input))
 
-        if isinstance(result, str):
-            return result
-        return json.dumps(result, default=str, ensure_ascii=False)
+    async def _execute_adapter(
+        self,
+        adapter: Any,
+        tool_input: dict[str, Any],
+        *,
+        ctx: Any = None,
+    ) -> Any:
+        call_input = dict(tool_input)
+        if (
+            ctx is not None
+            and "ctx" not in call_input
+            and (
+                _callable_accepts_ctx(adapter.call)
+                or _callable_accepts_ctx(getattr(adapter, "_func", None))
+            )
+        ):
+            call_input["ctx"] = ctx
+        return await adapter.call(**call_input)
 
     # ------------------------------------------------------------------
     # HTTPTool
     # ------------------------------------------------------------------
 
-    async def _execute_http(self, config: HTTPTool, tool_input: dict[str, Any]) -> str:
+    async def _execute_http(self, config: HTTPTool, tool_input: dict[str, Any]) -> Any:
         client = await self._get_client()
         if config.method.upper() == "GET":
             resp = await client.get(
@@ -356,4 +403,17 @@ class ToolExecutor:
                 json=tool_input, headers=config.headers, timeout=30.0,
             )
         resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "")
+        if "json" in content_type.lower():
+            return resp.json()
         return resp.text
+
+
+def _callable_accepts_ctx(func: Any) -> bool:
+    if func is None:
+        return False
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    return "ctx" in sig.parameters

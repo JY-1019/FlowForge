@@ -37,6 +37,9 @@ class LLMConfig(BaseModel):
         Sampling temperature (0 = deterministic, 1 = creative).
     max_tokens:
         Maximum tokens in the model response.
+    max_tool_result_chars:
+        Maximum characters from a single tool result that are fed back into
+        the model during tool-use loops. ``0`` disables truncation.
     api_key:
         Provider API key.  When ``None`` the SDK reads from the appropriate
         environment variable (``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``, or
@@ -50,6 +53,7 @@ class LLMConfig(BaseModel):
     model: str = "claude-sonnet-4-6"
     temperature: float = 0.3
     max_tokens: int = 4096
+    max_tool_result_chars: int = 12000
     api_key: str | None = None
     base_url: str | None = None
     verify_ssl: bool = True
@@ -132,6 +136,9 @@ class MCPServer(BaseModel):
     url: str
     name: str = ""
     description: str = ""
+    input_schema: dict[str, Any] = Field(
+        default_factory=lambda: {"type": "object", "properties": {}, "required": []}
+    )
     headers: dict[str, str] = Field(default_factory=dict)
 
 
@@ -141,6 +148,7 @@ class FunctionTool(BaseModel):
     func: Any
     name: str = ""
     description: str = ""
+    input_schema: dict[str, Any] | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -152,6 +160,9 @@ class HTTPTool(BaseModel):
     method: str = "POST"
     name: str = ""
     description: str = ""
+    input_schema: dict[str, Any] = Field(
+        default_factory=lambda: {"type": "object", "properties": {}, "required": []}
+    )
     headers: dict[str, str] = Field(default_factory=dict)
 
 

@@ -146,7 +146,7 @@ async def my_step(ctx: StepContext) -> Any: ...
 | Name | Type | Default | Description |
 |------|------|---------|-------------|
 | `order` | `int` | *(required)* | Execution slot within the task. Same order = parallel group |
-| `prompt` | `str` | *(required)* | What this step does. Used as **system prompt** when `ctx.call_llm()` is called |
+| `prompt` | `str` | *(required)* | What this step does. Included in the hierarchical **system prompt** when `ctx.call_llm()` is called |
 | `input_schema` | `Type[BaseModel]` | `None` | Coerces and validates input before calling function |
 | `output_schema` | `Type[BaseModel]` | `None` | Coerces and validates return value |
 | `tool_mode` | `bool` | `False` | Metadata flag for tool-oriented steps; current runners still execute ordered steps normally |
@@ -165,7 +165,7 @@ async def my_step(ctx: StepContext) -> Any: ...
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `ctx.input` | `Any` | Previous step's output (or task input if order=1) |
-| `ctx.step_prompt` | `str` | The annotation prompt (system prompt for `call_llm`) |
+| `ctx.step_prompt` | `str` | The step annotation prompt (one section of the `call_llm` system prompt) |
 | `ctx.tools` | `ToolRegistry` | Global tool registry |
 | `ctx.merged_tools` | `list[ToolConfig]` | All tools merged from global → flow → task → step |
 | `ctx.previous_results` | `dict[int, Any]` | All prior step results keyed by order |
@@ -183,7 +183,7 @@ async def my_step(ctx: StepContext) -> Any: ...
 
 Call the LLM with a templated user prompt.
 
-- `@step(prompt="...")` is used as the **system prompt**
+- Global, flow, task, and step prompts are assembled into the **system prompt**
 - `prompt` argument is the **user prompt**
 - `{field}` in the prompt is replaced with `ctx.input.field`
 - `<tool_name>` in the prompt includes that tool in the API call

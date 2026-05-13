@@ -15,7 +15,7 @@ FlowForge supports **hierarchical tool registration**: tools declared at a highe
             └─ @step(tools=[...])   ← available only in this step
 ```
 
-Inside a step function, use `ctx.call_llm(prompt)` to make an AI API call. The annotation's `prompt` becomes the **system prompt**, and the argument to `call_llm()` becomes the **user prompt**.
+Inside a step function, use `ctx.call_llm(prompt)` to make an AI API call. The global, flow, task, and step annotation prompts are assembled into the **system prompt**, and the argument to `call_llm()` becomes the **user prompt**.
 
 Child annotations may also reference globally registered tools by name:
 
@@ -32,7 +32,9 @@ class Agent:
 ```
 
 This name-reference form is intended for generated flows and scoped prompts;
-the actual tool config still lives at `@global_config`.
+the actual tool config still lives at `@global_config`. Runtime adapters
+registered in the global `ToolRegistry` are also visible to `<tool>` prompt
+references and `ctx.call_tool()`.
 
 ---
 
@@ -43,8 +45,17 @@ FlowForge provides five tool configurations:
 ```python
 from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill, AgentSkill
 
-# MCP Server
-mcp = MCPServer(url="https://api.example.com/mcp", name="search", description="Web search")
+# MCP Server. input_schema is optional but helps non-MCP schema discovery.
+mcp = MCPServer(
+    url="https://api.example.com/mcp",
+    name="search",
+    description="Web search",
+    input_schema={
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    },
+)
 
 # Python function
 def my_func(query: str) -> str:
@@ -52,8 +63,17 @@ def my_func(query: str) -> str:
 
 func_tool = FunctionTool(func=my_func, name="my_func", description="Custom function")
 
-# HTTP API
-http = HTTPTool(url="https://api.example.com/translate", name="translate", method="POST")
+# HTTP API. input_schema tells the LLM what JSON/query params to send.
+http = HTTPTool(
+    url="https://api.example.com/translate",
+    name="translate",
+    method="POST",
+    input_schema={
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    },
+)
 
 # Claude Agent Skill (Anthropic provider only)
 pptx = ClaudeSkill(name="pptx")
@@ -270,7 +290,7 @@ async def my_step(ctx):
 
 | Source | Role | Description |
 |--------|------|-------------|
-| `@step(prompt="...")` | **System prompt** | Describes the step's purpose; sent as the system message |
+| `@global_config`, `@flow`, `@task`, `@step` prompts | **System prompt** | Hierarchical instructions for the agent, flow, task, and current step |
 | `ctx.call_llm("...")` | **User prompt** | The actual task instruction; sent as the user message |
 
 ### Template Syntax: `{variable}`
@@ -353,7 +373,7 @@ User Prompt
     - **MCPServer** -- JSON-RPC over Streamable HTTP (MCP protocol)
     - **FunctionTool** -- Direct Python function call (sync or async)
     - **HTTPTool** -- HTTP request via httpx
-4. **Result feedback** -- Tool results are sent back to the LLM as `tool_result` messages.
+4. **Result feedback** -- Tool results are sent back to the LLM as `tool_result` messages. Oversized results are truncated according to `LLMConfig.max_tool_result_chars` to keep the active context bounded.
 5. **Repeat** -- Steps 2-4 repeat until the LLM returns a final text answer or a `structured_output` tool call (when `output_schema` is set). Max 25 rounds.
 
 ### Example: MCP Tool Loop
@@ -380,7 +400,7 @@ async def browse(ctx):
     # The LLM will:
     # 1. Call browser_navigate(url=...) → FlowForge executes via MCP
     # 2. Call browser_snapshot() → FlowForge executes via MCP
-    # 3. Call structured_output(...) → FlowForge returns the dict
+    # 3. Call structured_output(...) → FlowForge validates ResearchResult
     return await ctx.call_llm("""
         Navigate to '{url}' using <browser_navigate>,
         then read the page with <browser_snapshot>.
@@ -534,7 +554,7 @@ async def summarize(ctx):
     return {"summary": result}
 ```
 
-The annotation `prompt` is sent as the system prompt, and the `call_llm()` argument is the user prompt.
+The annotation prompts are sent as the system prompt, and the `call_llm()` argument is the user prompt.
 
 ### Mixing Both in a Task
 
@@ -661,17 +681,30 @@ Call the LLM with a templated user prompt. When tools are referenced via `<tool_
 |-----------|------|-------------|
 | `prompt` | `str` | User prompt with `{var}` and `<tool>` syntax |
 
-**Returns:** The LLM response -- a `dict` when `output_schema` is set on the step, otherwise a plain text `str`.
+**Returns:** The LLM response. When `output_schema` is set on the step, FlowForge validates the response into that Pydantic model before returning it to step code. Without `output_schema`, it returns plain text or parsed JSON when possible.
+
+`stream=True` is for plain text streaming only. It is rejected when the step declares `output_schema`, because streaming cannot satisfy the structured output contract.
 
 **Template syntax:**
 - `{field}` → replaced with `ctx.input.field`
 - `<tool>` → tool included in the API call, marker removed from text
 
-**Tool-use loop:** When the LLM returns `tool_use` blocks, each tool is executed (MCP, function, or HTTP) and the result is fed back. This repeats until the LLM returns text or structured output (max 25 rounds).
+**Tool-use loop:** When the LLM returns `tool_use` blocks, each tool is executed (MCP, function, or HTTP) and the result is fed back. This repeats until the LLM returns text or structured output (max 25 rounds). Each tool result is capped by `LLMConfig.max_tool_result_chars` by default.
+
+### `ctx.call_tool(tool_name: str, **kwargs) → Any`
+
+Call a tool directly from step code. FlowForge searches annotation-scoped
+tools first, then the global `ToolRegistry`. It supports `FunctionTool`,
+`HTTPTool`, `MCPServer`, and registry `ToolAdapter` instances. Function tools
+and adapters that declare a `ctx` parameter receive the current `StepContext`
+automatically.
+
+The return value is wrapped for ergonomic access, so dict results still support
+normal key lookup while also behaving well inside strings and model prompts.
 
 ### `ctx.step_prompt` → `str`
 
-The annotation prompt from `@step(prompt="...")`. Used as the system prompt in `call_llm()`.
+The annotation prompt from `@step(prompt="...")`. It is one section of the hierarchical system prompt in `call_llm()`.
 
 ### `ctx.input` → `Any`
 

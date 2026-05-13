@@ -104,6 +104,9 @@ Steps can call tools directly:
 result = await ctx.call_tool("search", query="FlowForge")
 ```
 
+Direct calls work for annotation-scoped `FunctionTool`, `HTTPTool`, `MCPServer`,
+and adapters registered in the global `ToolRegistry`.
+
 Or expose tools to the LLM:
 
 ```python

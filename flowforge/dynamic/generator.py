@@ -1118,14 +1118,13 @@ class DynamicFlowGenerator:
             return "(no tools available)"
 
         from flowforge.types import MCPServer, FunctionTool, HTTPTool, ClaudeSkill, AgentSkill
-        import inspect
 
-        lines: list[str] = []
         selected_tools, omitted = self._select_tool_configs_for_codegen(
             user_query=user_query,
             artifacts=artifacts,
         )
-        for tool in selected_tools:
+
+        def build_entry(tool: Any, *, compact: bool) -> str:
             name = ""
             description = ""
             kind = "tool"
@@ -1135,17 +1134,23 @@ class DynamicFlowGenerator:
                 name = tool.name
                 description = tool.description
                 kind = "mcp"
+                params_info = _format_schema_params(tool.input_schema)
             elif isinstance(tool, FunctionTool):
                 name = tool.name or (
                     tool.func.__name__ if hasattr(tool.func, "__name__") else ""
                 )
                 description = tool.description
                 kind = "function"
-                params_info = _format_func_params(tool.func)
+                params_info = (
+                    _format_schema_params(tool.input_schema)
+                    if tool.input_schema
+                    else _format_func_params(tool.func)
+                )
             elif isinstance(tool, HTTPTool):
                 name = tool.name
                 description = tool.description
                 kind = "http"
+                params_info = _format_schema_params(tool.input_schema)
             elif isinstance(tool, ClaudeSkill):
                 name = tool.name or tool.skill_id
                 description = tool.description
@@ -1156,31 +1161,64 @@ class DynamicFlowGenerator:
                 kind = "agent-skill"
 
             if not name:
-                continue
+                return ""
+            if isinstance(tool, FunctionTool) and not tool.input_schema:
+                example = _format_call_example(tool.func)
+            else:
+                example = _format_schema_call_example(getattr(tool, "input_schema", None))
+
+            if compact:
+                entry = f"- {name} ({kind}) | Decorator scope: tools=[\"{name}\"]"
+                if params_info:
+                    entry += f" | Parameters: {params_info}"
+                    entry += f" | Call: await ctx.call_tool(\"{name}\", {example})"
+                elif kind in {"claude-skill", "agent-skill"}:
+                    entry += f" | Call: await ctx.call_llm(\"instruction <{name}>\")"
+                if kind in {"http", "mcp"}:
+                    entry += f" | LLM-mediated: await ctx.call_llm(\"instruction <{name}>\")"
+                return entry
+
             desc = description or "No description provided."
             entry = f"- {name} ({kind}): {desc}"
             entry += f"\n    Decorator scope: tools=[\"{name}\"]"
             if params_info:
                 entry += f"\n    Parameters: {params_info}"
-                entry += f"\n    Call: await ctx.call_tool(\"{name}\", {_format_call_example(tool.func)})"
+                entry += f"\n    Call: await ctx.call_tool(\"{name}\", {example})"
             elif kind in {"claude-skill", "agent-skill"}:
                 entry += f"\n    Call: await ctx.call_llm(\"instruction <{name}>\")"
-            lines.append(entry)
+            if kind in {"http", "mcp"}:
+                entry += f"\n    LLM-mediated: await ctx.call_llm(\"instruction <{name}>\")"
+            return entry
 
-        text = "\n".join(lines) if lines else "(no named tools available)"
-        if omitted:
-            text += (
-                "\n- ... "
-                f"{omitted} lower-relevance tool(s) omitted from this compact "
-                "catalog to save tokens. Add them to required_tools to force inclusion."
-            )
+        def build_text(*, compact: bool) -> str:
+            lines: list[str] = [
+                "Prompt references: scope a tool with decorator tools=[\"tool_name\"], "
+                "then reference <tool_name> inside ctx.call_llm(...)."
+            ]
+            for tool in selected_tools:
+                entry = build_entry(tool, compact=compact)
+                if entry:
+                    lines.append(entry)
+            text = "\n".join(lines) if lines else "(no named tools available)"
+            if omitted:
+                text += (
+                    "\n- ... "
+                    f"{omitted} lower-relevance tool(s) omitted from this compact "
+                    "catalog to save tokens. Add them to required_tools to force inclusion."
+                )
+            return text
+
+        text = build_text(compact=False)
 
         max_chars = 0
         if self._dynamic_options is not None:
             max_chars = self._dynamic_options.codegen_tool_catalog_max_chars
         if max_chars > 0 and len(text) > max_chars:
+            compact_text = build_text(compact=True)
+            if len(compact_text) <= max_chars:
+                return compact_text
             text = (
-                text[:max_chars].rstrip()
+                compact_text[:max_chars].rstrip()
                 + "\n...[tool catalog truncated by codegen_tool_catalog_max_chars]"
             )
         return text
@@ -2380,6 +2418,27 @@ def _format_func_params(func: Any) -> str:
     return f"({', '.join(parts)})"
 
 
+def _format_schema_params(schema: Any) -> str:
+    """Return a compact parameter signature from a JSON Schema object."""
+    if not isinstance(schema, dict):
+        return ""
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return ""
+    required = set(schema.get("required") or [])
+    parts: list[str] = []
+    for name, prop in properties.items():
+        if not isinstance(prop, dict):
+            prop = {}
+        typ = prop.get("type") or ("anyOf" if prop.get("anyOf") else "any")
+        if name in required:
+            parts.append(f"{name}: {typ}")
+        else:
+            default = f" = {prop['default']!r}" if "default" in prop else " = ..."
+            parts.append(f"{name}: {typ}{default}")
+    return f"({', '.join(parts)})"
+
+
 def _format_call_example(func: Any) -> str:
     """Return a compact keyword-argument example for ctx.call_tool()."""
     import inspect
@@ -2397,6 +2456,29 @@ def _format_call_example(func: Any) -> str:
             parts.append(f'{pname}=...')
         # Skip optional params in the example
     return ", ".join(parts) if parts else "..."
+
+
+def _format_schema_call_example(schema: Any) -> str:
+    if not isinstance(schema, dict):
+        return "..."
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return "..."
+    required = schema.get("required") or []
+    names = [name for name in required if name in properties]
+    if not names:
+        return "..."
+    if any(not _is_valid_kwarg_name(name) for name in names):
+        parts = [f"{name!r}: ..." for name in names]
+        return "**{" + ", ".join(parts) + "}"
+    parts = [f"{name}=..." for name in names]
+    return ", ".join(parts) if parts else "..."
+
+
+def _is_valid_kwarg_name(name: str) -> bool:
+    import keyword
+
+    return isinstance(name, str) and name.isidentifier() and not keyword.iskeyword(name)
 
 
 def _sanitise_name(name: str) -> str:

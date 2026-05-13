@@ -60,6 +60,7 @@ _ANTHROPIC_CODE_EXECUTION_TOOL = {
     "type": "code_execution_20250825",
     "name": "code_execution",
 }
+_DEFAULT_MAX_TOOL_RESULT_CHARS = 12000
 
 
 # ---------------------------------------------------------------------------
@@ -230,19 +231,22 @@ def _build_tool_config_to_anthropic(tool_config: Any) -> dict[str, Any]:
         return {
             "name": name,
             "description": desc,
-            "input_schema": _infer_schema_from_hints(tool_config.func),
+            "input_schema": (
+                tool_config.input_schema
+                or _infer_schema_from_hints(tool_config.func)
+            ),
         }
     elif isinstance(tool_config, MCPServer):
         return {
             "name": tool_config.name or "mcp_tool",
             "description": tool_config.description or f"MCP server at {tool_config.url}",
-            "input_schema": {"type": "object", "properties": {}, "required": []},
+            "input_schema": tool_config.input_schema,
         }
     elif isinstance(tool_config, HTTPTool):
         return {
             "name": tool_config.name or "http_tool",
             "description": tool_config.description or f"HTTP {tool_config.method} {tool_config.url}",
-            "input_schema": {"type": "object", "properties": {}, "required": []},
+            "input_schema": tool_config.input_schema,
         }
     # Fallback for ToolAdapter instances from registry
     if hasattr(tool_config, "to_anthropic_tool"):
@@ -528,6 +532,9 @@ def _get_tool_name(tc: Any) -> str:
         return tc.name or tc.skill_id
     elif isinstance(tc, AgentSkill):
         return tc.name
+    name = getattr(tc, "name", "")
+    if isinstance(name, str):
+        return name
     return ""
 
 
@@ -594,6 +601,28 @@ def _format_anthropic_text_response(content: Any) -> str:
         artifact_lines.extend(f"- file_id: {file_id}" for file_id in file_ids)
         text += "\n".join(artifact_lines)
     return text
+
+
+def _tool_result_max_chars(config: LLMConfig) -> int:
+    """Return the configured tool-result character budget for one tool call."""
+    raw = getattr(config, "max_tool_result_chars", _DEFAULT_MAX_TOOL_RESULT_CHARS)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_TOOL_RESULT_CHARS
+
+
+def _trim_tool_result_for_context(text: str, max_chars: int) -> str:
+    """Bound a tool result before feeding it back into model context."""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    return (
+        text[:max_chars].rstrip()
+        + f"\n\n[FlowForge truncated this tool result to {max_chars} chars; "
+        f"{omitted} chars omitted. Request a narrower tool call or a larger "
+        "LLMConfig.max_tool_result_chars if more context is required.]"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1053,6 +1082,10 @@ async def _call_anthropic(
             if block in executable:
                 logger.info("Tool call  round=%d  %s(%s)", round_idx, block.name, str(block.input)[:200])
                 result_text = await executor.execute(block.name, block.input)
+                result_text = _trim_tool_result_for_context(
+                    result_text,
+                    _tool_result_max_chars(config),
+                )
                 preview = result_text[:500].replace("\n", "\\n") if result_text else ""
                 logger.info("Tool result  %s → %s", block.name, preview)
                 tool_results.append({
@@ -1190,6 +1223,10 @@ async def _call_openai(
                 args = _json.loads(tc.function.arguments)
                 logger.info("Tool call  round=%d  %s(%s)", round_idx, tc.function.name, str(args)[:200])
                 result_text = await executor.execute(tc.function.name, args)
+                result_text = _trim_tool_result_for_context(
+                    result_text,
+                    _tool_result_max_chars(config),
+                )
                 logger.info("Tool result  %s → %s", tc.function.name, result_text[:500])
             else:
                 result_text = f"Error: Tool '{tc.function.name}' not found."
@@ -1305,6 +1342,10 @@ async def _call_google(
             if executor and executor.has_tool(fn_name):
                 logger.info("Tool call  round=%d  %s(%s)", round_idx, fn_name, str(fn_args)[:200])
                 result_text = await executor.execute(fn_name, fn_args)
+                result_text = _trim_tool_result_for_context(
+                    result_text,
+                    _tool_result_max_chars(config),
+                )
                 logger.info("Tool result  %s → %s", fn_name, result_text[:500] if result_text else "")
             else:
                 result_text = f"Error: Tool '{fn_name}' not found."

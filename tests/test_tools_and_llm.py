@@ -506,6 +506,31 @@ class TestToolResolution:
         assert "clone-coding" in joined
         assert "frontend-design" in joined
 
+    def test_resolve_registry_adapter_by_name(self):
+        """Prompt markers can target adapters registered in ToolRegistry."""
+        from flowforge.tools.function_tool import FunctionToolAdapter
+
+        registry = ToolRegistry()
+        adapter = FunctionToolAdapter(lambda query: {"answer": query}, name="lookup")
+        registry.register(adapter)
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=registry,
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx, flow_name="f", flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx, task_name="t", task_prompt="test",
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx, step_prompt="test",
+        )
+
+        assert step_ctx._resolve_tool_configs(["lookup"]) == [adapter]
+
 
 # ---------------------------------------------------------------------------
 # Full compile with tools at every level
@@ -632,7 +657,10 @@ class TestCallLLM:
             mock_call.assert_called_once()
 
             call_kwargs = mock_call.call_args[1]
-            assert call_kwargs["system_prompt"] == "You are a search assistant"
+            assert "Global instructions:\nsystem" in call_kwargs["system_prompt"]
+            assert "Flow instructions (f):\ntest" in call_kwargs["system_prompt"]
+            assert "Task instructions (t):\ntest" in call_kwargs["system_prompt"]
+            assert "Step instructions:\nYou are a search assistant" in call_kwargs["system_prompt"]
             assert "AI trends" in call_kwargs["user_prompt"]
             assert "ko" in call_kwargs["user_prompt"]
             assert "<web_search>" not in call_kwargs["user_prompt"]
@@ -806,6 +834,37 @@ Review carefully.
             assert call_kwargs["tool_configs"] == []
 
     @pytest.mark.asyncio
+    async def test_call_llm_uses_registry_adapter_from_prompt_marker(self):
+        """Registry-only adapters are available to <tool> prompt references."""
+        from flowforge.tools.function_tool import FunctionToolAdapter
+
+        registry = ToolRegistry()
+        adapter = FunctionToolAdapter(lambda query: {"answer": query}, name="lookup")
+        registry.register(adapter)
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(provider="anthropic", model="test-model"),
+            global_prompt="sys",
+            tool_registry=registry,
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="test")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="test")
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="Use registered tools",
+            step_input={"query": "alpha"},
+        )
+
+        with patch("flowforge.execution.llm.call_llm_api", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = "done"
+            result = await step_ctx.call_llm("Look up {query} with <lookup>")
+
+        assert result == "done"
+        call_kwargs = mock_call.call_args.kwargs
+        assert call_kwargs["tool_configs"] == [adapter]
+        assert "<lookup>" not in call_kwargs["user_prompt"]
+
+    @pytest.mark.asyncio
     async def test_call_llm_result_can_be_scheduled_as_task(self):
         """call_llm remains coroutine-compatible for asyncio.create_task."""
         import asyncio
@@ -857,7 +916,8 @@ Review carefully.
                 chunks.append(chunk)
 
         assert chunks == ["Hel", "lo"]
-        assert captured["system_prompt"] == "helper"
+        assert "Global instructions:\nsys" in captured["system_prompt"]
+        assert "Step instructions:\nhelper" in captured["system_prompt"]
         assert captured["user_prompt"] == "Greet Alice"
         assert task_ctx.step_history.entries[0].response_summary == "Hello"
 
@@ -985,6 +1045,24 @@ class StructuredOutputAgent:
                 return result
 
 
+_structured_inner_observations = []
+
+
+@global_config(prompt="structured output inner agent", llm_config=LLMConfig(model="test"))
+class StructuredOutputInnerAgent:
+    @flow(name="f", prompt="f")
+    class F:
+        @task(name="t", prompt="t")
+        class T:
+            @step(order=1, prompt="analyze this", output_schema=StructuredResult)
+            async def analyze(ctx):
+                result = await ctx.call_llm("do the analysis on {value}")
+                _structured_inner_observations.append(
+                    (type(result), result.title, result.score)
+                )
+                return result
+
+
 class TestStructuredOutput:
     @pytest.mark.asyncio
     async def test_output_schema_passed_to_call_llm(self):
@@ -1004,6 +1082,47 @@ class TestStructuredOutput:
             # Verify result was validated into the schema.
             assert result.title == "Test Result"
             assert result.score == 0.95
+
+    @pytest.mark.asyncio
+    async def test_call_llm_returns_validated_model_inside_step(self):
+        """A structured LLM call matches the step output contract immediately."""
+        _structured_inner_observations.clear()
+
+        with patch("flowforge.execution.llm.call_llm_api", new_callable=AsyncMock) as mock_api:
+            mock_api.return_value = {"title": "Inside Step", "score": 0.88}
+
+            engine = FlowForge.compile(StructuredOutputInnerAgent)
+            result = await engine.run({"value": "test data"})
+
+        assert _structured_inner_observations == [
+            (StructuredResult, "Inside Step", 0.88)
+        ]
+        assert result.title == "Inside Step"
+        assert result.score == 0.88
+
+    @pytest.mark.asyncio
+    async def test_streaming_rejected_when_step_has_output_schema(self):
+        """Streaming cannot satisfy the structured output harness contract."""
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(provider="anthropic", model="test-model"),
+            global_prompt="system",
+            tool_registry=ToolRegistry(),
+        )
+        flow_ctx = FlowContext(
+            global_ctx=global_ctx, flow_name="f", flow_prompt="test",
+        )
+        task_ctx = TaskContext(
+            flow_ctx=flow_ctx, task_name="t", task_prompt="test",
+        )
+        step_ctx = StepContext(
+            task_ctx=task_ctx,
+            step_prompt="You produce structured output",
+            output_schema=StructuredResult,
+        )
+
+        with pytest.raises(ValueError, match="output_schema"):
+            async for _ in step_ctx.call_llm("stream it", stream=True):
+                pass
 
     @pytest.mark.asyncio
     async def test_output_schema_none_when_not_set(self):
@@ -1094,6 +1213,86 @@ class TestToolExecutor:
         result = await executor.execute("nonexistent", {})
         assert "unknown tool" in result.lower()
 
+    @pytest.mark.asyncio
+    async def test_execute_raw_injects_context_for_function_tool(self):
+        from flowforge.execution.tool_executor import ToolExecutor
+
+        def needs_ctx(value: str, ctx=None) -> dict:
+            return {"value": value, "has_ctx": ctx is not None}
+
+        executor = ToolExecutor([FunctionTool(func=needs_ctx, name="needs_ctx")])
+        raw = await executor.execute_raw(
+            "needs_ctx",
+            {"value": "ok"},
+            ctx=object(),
+        )
+
+        assert raw == {"value": "ok", "has_ctx": True}
+
+    @pytest.mark.asyncio
+    async def test_execute_raw_supports_tool_adapter(self):
+        from flowforge.execution.tool_executor import ToolExecutor
+        from flowforge.tools.function_tool import FunctionToolAdapter
+
+        adapter = FunctionToolAdapter(lambda query: {"answer": query}, name="lookup")
+        executor = ToolExecutor([adapter])
+
+        raw = await executor.execute_raw("lookup", {"query": "alpha"})
+        text = await executor.execute("lookup", {"query": "alpha"})
+
+        assert raw == {"answer": "alpha"}
+        assert '"answer": "alpha"' in text
+
+    @pytest.mark.asyncio
+    async def test_execute_raw_injects_context_for_function_tool_adapter(self):
+        from flowforge.execution.tool_executor import ToolExecutor
+        from flowforge.tools.function_tool import FunctionToolAdapter
+
+        def lookup(query: str, ctx=None) -> dict:
+            return {"answer": query, "has_ctx": ctx is not None}
+
+        adapter = FunctionToolAdapter(lookup, name="lookup")
+        executor = ToolExecutor([adapter])
+
+        raw = await executor.execute_raw("lookup", {"query": "alpha"}, ctx=object())
+
+        assert raw == {"answer": "alpha", "has_ctx": True}
+
+    @pytest.mark.asyncio
+    async def test_execute_raw_returns_native_json_for_http_tool(self, monkeypatch):
+        from flowforge.execution.tool_executor import ToolExecutor
+
+        class FakeResponse:
+            headers = {"content-type": "application/json"}
+            text = '{"ok": true}'
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"ok": True, "value": 7}
+
+        class FakeClient:
+            async def request(self, method, url, json, headers, timeout):
+                assert method == "POST"
+                assert url == "https://api.example.test"
+                assert json == {"query": "alpha"}
+                return FakeResponse()
+
+        async def fake_get_client(self):
+            return FakeClient()
+
+        monkeypatch.setattr(ToolExecutor, "_get_client", fake_get_client)
+        executor = ToolExecutor([
+            HTTPTool(url="https://api.example.test", name="api", method="POST")
+        ])
+
+        raw = await executor.execute_raw("api", {"query": "alpha"})
+        text = await executor.execute("api", {"query": "alpha"})
+
+        assert raw == {"ok": True, "value": 7}
+        assert '"value": 7' in text
+
 
 class TestToolUseLoopIntegration:
     """Integration tests verifying the tool-use loop in _call_anthropic."""
@@ -1121,6 +1320,31 @@ class TestToolUseLoopIntegration:
         assert executor is not None
         assert executor.has_tool("my_tool")
         assert schemas == {}  # No MCP → no schemas fetched
+
+    def test_tool_result_trimming_bounds_context_growth(self):
+        """Tool-use loops trim oversized tool results before model feedback."""
+        from flowforge.execution.llm import (
+            _tool_result_max_chars,
+            _trim_tool_result_for_context,
+        )
+
+        config = LLMConfig(max_tool_result_chars=12)
+        trimmed = _trim_tool_result_for_context("x" * 20, _tool_result_max_chars(config))
+
+        assert trimmed.startswith("x" * 12)
+        assert "truncated this tool result" in trimmed
+        assert "8 chars omitted" in trimmed
+
+    def test_tool_result_trimming_can_be_disabled(self):
+        from flowforge.execution.llm import (
+            _tool_result_max_chars,
+            _trim_tool_result_for_context,
+        )
+
+        config = LLMConfig(max_tool_result_chars=0)
+        text = "x" * 20
+
+        assert _trim_tool_result_for_context(text, _tool_result_max_chars(config)) == text
 
     def test_claude_skill_request_helpers(self):
         from flowforge.execution.llm import (
@@ -1381,6 +1605,35 @@ class TestFunctionToolSchemaInference:
         assert result["input_schema"]["properties"]["query"]["type"] == "string"
         assert result["input_schema"]["properties"]["limit"]["type"] == "integer"
         assert "query" in result["input_schema"]["required"]
+
+    def test_tool_configs_can_carry_explicit_input_schema(self):
+        """Function/HTTP/MCP configs expose explicit schemas to prompt tools."""
+        from flowforge.execution.llm import _tool_config_to_anthropic
+
+        schema = {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        }
+        func_tool = FunctionTool(
+            func=lambda query: query,
+            name="explicit_func",
+            input_schema=schema,
+        )
+        http_tool = HTTPTool(
+            url="https://api.example.test/search",
+            name="search_api",
+            input_schema=schema,
+        )
+        mcp_tool = MCPServer(
+            url="https://mcp.example.test",
+            name="search_mcp",
+            input_schema=schema,
+        )
+
+        assert _tool_config_to_anthropic(func_tool)["input_schema"] == schema
+        assert _tool_config_to_anthropic(http_tool)["input_schema"] == schema
+        assert _tool_config_to_anthropic(mcp_tool)["input_schema"] == schema
 
 
 class TestBuiltinShellTools:
@@ -1853,6 +2106,46 @@ class TestToolResultWrapper:
         assert result[:5] == "abcde"
         assert f"snippet={result[:3]}" == "snippet=abc"
         assert "abc" in str(result)
+
+    @pytest.mark.asyncio
+    async def test_call_tool_uses_function_name_when_name_omitted(self):
+        def implicit_name(query: str) -> dict:
+            return {"content": query}
+
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=ToolRegistry(),
+            global_tools=[FunctionTool(func=implicit_name)],
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="f")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="t")
+        step_ctx = StepContext(task_ctx=task_ctx, step_prompt="s")
+
+        result = await step_ctx.call_tool("implicit_name", query="alpha")
+
+        assert result["content"] == "alpha"
+
+    @pytest.mark.asyncio
+    async def test_call_tool_supports_registry_adapter(self):
+        from flowforge.tools.function_tool import FunctionToolAdapter
+
+        registry = ToolRegistry()
+        registry.register(
+            FunctionToolAdapter(lambda query: {"content": query}, name="lookup")
+        )
+        global_ctx = GlobalContext(
+            llm_config=LLMConfig(),
+            global_prompt="test",
+            tool_registry=registry,
+        )
+        flow_ctx = FlowContext(global_ctx=global_ctx, flow_name="f", flow_prompt="f")
+        task_ctx = TaskContext(flow_ctx=flow_ctx, task_name="t", task_prompt="t")
+        step_ctx = StepContext(task_ctx=task_ctx, step_prompt="s")
+
+        result = await step_ctx.call_tool("lookup", query="alpha")
+
+        assert result["content"] == "alpha"
 
     def test_tool_result_falls_back_through_keys(self):
         from flowforge.execution.tool_result import ToolResult
