@@ -15,6 +15,8 @@
 
 FlowForge is a Python framework that lets you define complex AI agent pipelines using **decorators alone**. No graph construction code, no YAML configs, no LangChain ceremony — just annotate your classes and functions, and FlowForge compiles them into an executable DAG.
 
+Current version: `0.1.1`
+
 ```python
 from flowforge import global_config, flow, task, step, FlowForge
 

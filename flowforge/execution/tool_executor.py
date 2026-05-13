@@ -270,6 +270,8 @@ class ToolExecutor:
         headers: dict[str, str] | None = None,
     ) -> None:
         """Perform the MCP initialize handshake + initialized notification."""
+        from flowforge import __version__ as flowforge_version
+
         base_headers = self._mcp_headers(url, headers)
 
         # 1) initialize
@@ -279,7 +281,7 @@ class ToolExecutor:
             "params": {
                 "protocolVersion": "2025-03-26",
                 "capabilities": {},
-                "clientInfo": {"name": "flowforge", "version": "0.1.0"},
+                "clientInfo": {"name": "flowforge", "version": flowforge_version},
             },
             "id": self._next_id(),
         }
