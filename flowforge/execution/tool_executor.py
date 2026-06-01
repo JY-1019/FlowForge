@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     from flowforge.types import ToolConfig, MCPServer, FunctionTool, HTTPTool
     from flowforge.tools.base import ToolAdapter
 
+from flowforge.observability import tool_span
+
 logger = logging.getLogger(__name__)
 
 # MCP Streamable HTTP spec requires both content types in Accept.
@@ -123,14 +125,24 @@ class ToolExecutor:
             raise ValueError(f"unknown tool {name!r}")
 
         if isinstance(config, MCPServer):
-            return await self._execute_mcp(config, name, tool_input)
-        if isinstance(config, FunctionTool):
-            return await self._execute_function(config, tool_input, ctx=ctx)
-        if isinstance(config, HTTPTool):
-            return await self._execute_http(config, tool_input)
-        if hasattr(config, "call"):
+            tool_type = "mcp"
+        elif isinstance(config, FunctionTool):
+            tool_type = "function"
+        elif isinstance(config, HTTPTool):
+            tool_type = "http"
+        elif hasattr(config, "call"):
+            tool_type = "adapter"
+        else:
+            raise TypeError(f"unsupported tool type for {name!r}")
+
+        with tool_span(name, tool_type):
+            if tool_type == "mcp":
+                return await self._execute_mcp(config, name, tool_input)
+            if tool_type == "function":
+                return await self._execute_function(config, tool_input, ctx=ctx)
+            if tool_type == "http":
+                return await self._execute_http(config, tool_input)
             return await self._execute_adapter(config, tool_input, ctx=ctx)
-        raise TypeError(f"unsupported tool type for {name!r}")
 
     async def execute(self, name: str, tool_input: dict[str, Any]) -> str:
         """Execute a tool by *name* and return the result as LLM-safe text."""

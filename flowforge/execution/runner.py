@@ -68,6 +68,7 @@ from flowforge.execution.context import (
 )
 from flowforge.execution.parallel import run_parallel, run_with_timeout
 from flowforge.errors import ExecutionError
+from flowforge.observability import node_span
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +307,25 @@ class StepRunner:
     """
 
     async def run(
+        self,
+        meta: StepMeta,
+        task_ctx: TaskContext,
+        step_input: Any,
+        parent_node_id: str = "",
+    ) -> Any:
+        """Execute the step within an OTel span, then return its output."""
+        node_id = f"{parent_node_id}.{meta.func.__name__}[{meta.order}]"
+        with node_span(
+            node_id,
+            "step",
+            name=meta.func.__name__,
+            order=meta.order,
+            is_branch=meta.is_branch,
+            pass_criteria=bool(meta.pass_criteria),
+        ):
+            return await self._run_impl(meta, task_ctx, step_input, parent_node_id)
+
+    async def _run_impl(
         self,
         meta: StepMeta,
         task_ctx: TaskContext,
@@ -661,6 +681,24 @@ class TaskRunner:
         self._step_runner = StepRunner()
 
     async def run(
+        self,
+        meta: TaskMeta,
+        flow_ctx: FlowContext,
+        task_input: Any,
+        parent_node_id: str = "",
+    ) -> Any:
+        """Execute the task within an OTel span, then return its output."""
+        node_id = f"{parent_node_id}.{meta.name}"
+        with node_span(
+            node_id,
+            "task",
+            name=meta.name,
+            order=meta.order,
+            is_branch=meta.is_branch,
+        ):
+            return await self._run_impl(meta, flow_ctx, task_input, parent_node_id)
+
+    async def _run_impl(
         self,
         meta: TaskMeta,
         flow_ctx: FlowContext,
@@ -1058,6 +1096,26 @@ class FlowRunner:
         raise final_err from last_exc
 
     async def _run_once(
+        self,
+        meta: FlowMeta,
+        global_ctx: GlobalContext,
+        flow_input: Any,
+        parent_flow_output: Any,
+        node_id: str,
+    ) -> Any:
+        """Execute the flow body once within an OTel span (no retry)."""
+        with node_span(
+            node_id,
+            "flow",
+            name=meta.name,
+            order=meta.order,
+            is_branch=meta.is_branch,
+        ):
+            return await self._run_once_impl(
+                meta, global_ctx, flow_input, parent_flow_output, node_id
+            )
+
+    async def _run_once_impl(
         self,
         meta: FlowMeta,
         global_ctx: GlobalContext,

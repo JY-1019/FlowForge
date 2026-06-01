@@ -47,6 +47,8 @@ if TYPE_CHECKING:
     from flowforge.tools.registry import ToolRegistry
     from flowforge.execution.tool_executor import ToolExecutor
 
+from flowforge.observability import llm_span, record_llm_usage
+
 logger = logging.getLogger(__name__)
 
 # Maximum number of tool-use round-trips before forcing a final answer.
@@ -675,6 +677,33 @@ async def call_llm_api(
     output_schema: type | None = None,
     max_tool_rounds: int | None = None,
 ) -> Any:
+    """Call the LLM, wrapping the request in an OTel ``llm.chat`` span.
+
+    Thin wrapper around :func:`_call_llm_api_impl`; token usage recorded by the
+    provider helpers (via :func:`record_llm_usage`) lands on this span.
+    """
+    with llm_span(llm_config.provider, llm_config.model):
+        return await _call_llm_api_impl(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            llm_config=llm_config,
+            tool_configs=tool_configs,
+            tool_registry=tool_registry,
+            output_schema=output_schema,
+            max_tool_rounds=max_tool_rounds,
+        )
+
+
+async def _call_llm_api_impl(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    llm_config: LLMConfig,
+    tool_configs: list[ToolConfig] | None = None,
+    tool_registry: ToolRegistry | None = None,
+    output_schema: type | None = None,
+    max_tool_rounds: int | None = None,
+) -> Any:
     """Call the LLM using the configured provider.
 
     When tools are provided (MCP, FunctionTool, HTTPTool), a **tool-use loop**
@@ -949,6 +978,35 @@ async def _stream_google(system_prompt: str, user_prompt: str, config: LLMConfig
 # Anthropic provider — with tool-use loop
 # ---------------------------------------------------------------------------
 
+def _record_usage(response: Any, provider: str) -> None:
+    """Extract token counts from a provider response and record them on the
+    active ``llm.chat`` span.  Tolerant of missing fields / shapes."""
+    try:
+        if provider == "anthropic":
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                record_llm_usage(
+                    getattr(usage, "input_tokens", 0) or 0,
+                    getattr(usage, "output_tokens", 0) or 0,
+                )
+        elif provider == "openai":
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                record_llm_usage(
+                    getattr(usage, "prompt_tokens", 0) or 0,
+                    getattr(usage, "completion_tokens", 0) or 0,
+                )
+        elif provider == "google":
+            usage = getattr(response, "usage_metadata", None)
+            if usage is not None:
+                record_llm_usage(
+                    getattr(usage, "prompt_token_count", 0) or 0,
+                    getattr(usage, "candidates_token_count", 0) or 0,
+                )
+    except Exception:  # noqa: BLE001 - never let instrumentation break a call
+        pass
+
+
 async def _call_anthropic(
     system_prompt: str,
     user_prompt: str,
@@ -1026,6 +1084,7 @@ async def _call_anthropic(
     for round_idx in range(tool_rounds):
         kwargs["messages"] = messages
         response = await create_message(**kwargs)
+        _record_usage(response, "anthropic")
 
         # Log raw response
         logger.debug(
@@ -1114,6 +1173,7 @@ async def _call_anthropic(
         kwargs["messages"] = messages
         kwargs["tool_choice"] = {"type": "tool", "name": _structured_tool_name}
         response = await create_message(**kwargs)
+        _record_usage(response, "anthropic")
         for block in response.content:
             if getattr(block, "type", None) == "tool_use" and block.name == _structured_tool_name:
                 return block.input
@@ -1195,6 +1255,7 @@ async def _call_openai(
     for round_idx in range(tool_rounds):
         kwargs["messages"] = messages
         response = await client.chat.completions.create(**kwargs)
+        _record_usage(response, "openai")
         msg = response.choices[0].message
 
         if not msg.tool_calls:
@@ -1244,6 +1305,7 @@ async def _call_openai(
         kwargs["messages"] = messages
         kwargs["tool_choice"] = {"type": "function", "function": {"name": _structured_fn_name}}
         response = await client.chat.completions.create(**kwargs)
+        _record_usage(response, "openai")
         msg = response.choices[0].message
         if msg.tool_calls:
             for tc in msg.tool_calls:
@@ -1315,6 +1377,7 @@ async def _call_google(
     response = await chat.send_message_async(
         user_prompt, generation_config=gen_config,
     )
+    _record_usage(response, "google")
 
     # -- Tool-use loop -------------------------------------------------------
     has_executable = executor is not None and any(
@@ -1361,6 +1424,7 @@ async def _call_google(
         response = await chat.send_message_async(
             fn_responses, generation_config=gen_config,
         )
+        _record_usage(response, "google")
 
     # -- Extract final text --------------------------------------------------
     # Gemini with response_schema returns JSON text — parse it.

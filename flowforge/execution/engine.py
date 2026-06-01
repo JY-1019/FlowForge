@@ -9,6 +9,7 @@ from flowforge.execution.context import GlobalContext
 from flowforge.execution.memory import SessionMemory
 from flowforge.execution.parallel import run_parallel
 from flowforge.execution.runner import FlowRunner, _group_by_order
+from flowforge.observability import node_span
 from flowforge.errors import PlannerError
 from flowforge.schema.dag import FlowForgeDAG, NodeType
 from flowforge.annotations.metadata import GlobalMeta
@@ -643,6 +644,14 @@ class ExecutionEngine:
         )
 
     async def _run_root_flows(
+        self,
+        global_ctx: GlobalContext,
+        input_data: Any,
+    ) -> Any:
+        with node_span("flowforge.run", "run", name=self._global_meta.prompt or "run"):
+            return await self._run_root_flows_impl(global_ctx, input_data)
+
+    async def _run_root_flows_impl(
         self,
         global_ctx: GlobalContext,
         input_data: Any,
