@@ -29,6 +29,47 @@ from flowforge.skills.sync import (
 )
 
 _BUNDLED_ROOT = Path(__file__).resolve().parent / "anthropic"
+_NATIVE_ROOT = Path(__file__).resolve().parent / "native"
+
+
+def native_skill_path(name: str) -> Path:
+    """Return the local path to a FlowForge-authored native Agent Skill.
+
+    Native skills live under ``flowforge/skills/native/<name>/`` and ship with
+    FlowForge itself (they are not vendored from the upstream Anthropic
+    repository).  Raises ``FileNotFoundError`` if *name* is unknown.
+    """
+    name = validate_skill_name(name)
+    path = _NATIVE_ROOT / name
+    if not (path / "SKILL.md").is_file():
+        available = ", ".join(native_skill_names()) or "(none)"
+        raise FileNotFoundError(
+            f"No native FlowForge skill named {name!r}. Available: {available}."
+        )
+    return path
+
+
+def native_skill_names() -> list[str]:
+    """Return the names of all FlowForge-authored native Agent Skills."""
+    if not _NATIVE_ROOT.is_dir():
+        return []
+    return sorted(
+        child.name
+        for child in _NATIVE_ROOT.iterdir()
+        if child.is_dir() and (child / "SKILL.md").is_file()
+    )
+
+
+def skill_path(name: str) -> Path:
+    """Resolve *name* to a skill directory, native skills taking precedence.
+
+    Checks FlowForge native skills first, then vendored Anthropic skills.
+    Raises ``FileNotFoundError`` if neither has *name*.
+    """
+    name = validate_skill_name(name)
+    if (_NATIVE_ROOT / name / "SKILL.md").is_file():
+        return _NATIVE_ROOT / name
+    return bundled_skill_path(name)
 
 
 def bundled_skill_path(name: str) -> Path:
@@ -64,6 +105,9 @@ __all__ = [
     "DEFAULT_BUNDLED_SKILLS",
     "bundled_skill_names",
     "bundled_skill_path",
+    "native_skill_names",
+    "native_skill_path",
+    "skill_path",
     "sync_default_skills",
     "sync_skill",
     "validate_skill_name",

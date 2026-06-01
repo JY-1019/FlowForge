@@ -58,10 +58,12 @@ google = [
     "google-generativeai>=0.8",
 ]
 mcp = ["mcp>=1.0"]
+pandoc = ["pypandoc-binary>=1.13"]
 artifacts = [
     "beautifulsoup4>=4.12",
     "matplotlib>=3.8",
     "pillow>=10.0",
+    "pypandoc-binary>=1.13",
     "pypdf>=4.0",
     "python-pptx>=0.6.23",
     "python-docx>=1.1",
@@ -75,6 +77,7 @@ examples = [
     "beautifulsoup4>=4.12",
     "matplotlib>=3.8",
     "pillow>=10.0",
+    "pypandoc-binary>=1.13",
     "pypdf>=4.0",
     "python-pptx>=0.6.23",
     "python-docx>=1.1",
@@ -88,6 +91,7 @@ all = [
     "beautifulsoup4>=4.12",
     "matplotlib>=3.8",
     "pillow>=10.0",
+    "pypandoc-binary>=1.13",
     "pypdf>=4.0",
     "python-pptx>=0.6.23",
     "python-docx>=1.1",
@@ -105,6 +109,7 @@ dev = [
     "beautifulsoup4>=4.12",
     "matplotlib>=3.8",
     "pillow>=10.0",
+    "pypandoc-binary>=1.13",
     "pypdf>=4.0",
     "python-pptx>=0.6.23",
     "python-docx>=1.1",
@@ -140,6 +145,10 @@ flowforge = [
     "skills/anthropic/*/assets/**/*",
     "skills/anthropic/*/references/**/*",
     "skills/anthropic/*/scripts/**/*",
+    "skills/native/*/SKILL.md",
+    "skills/native/*/assets/**/*",
+    "skills/native/*/references/**/*",
+    "skills/native/*/scripts/**/*",
     "tools/_ppt_master/LICENSE",
     "tools/_ppt_master/TECHNICAL_DESIGN.md",
 ]

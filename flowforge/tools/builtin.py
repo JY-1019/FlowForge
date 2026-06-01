@@ -388,6 +388,41 @@ def _create_document_tools(options: DynamicRunOptions) -> list[FunctionTool]:
 
     return [
         FunctionTool(
+            func=_make_doc_render_tool(project_root, options),
+            name="doc_render",
+            description=(
+                "RECOMMENDED unified document renderer. Convert ONE Markdown "
+                "'source' string into a professional 'html', 'docx', 'pptx', "
+                "or 'md' artifact via Pandoc. The target format is taken from "
+                "the file extension of 'path' (or pass 'to' to override). "
+                "PPTX/DOCX output is native and fully editable (not images); "
+                "use Markdown headings to split slides (tune with "
+                "'slide_level'). HTML themes: default, dark, consulting, "
+                "academic, tech (pass via 'theme'). Optional: 'toc' for a "
+                "table of contents, 'reference_doc' (a project-relative "
+                ".docx/.pptx template) to style docx/pptx, 'title' metadata, "
+                "'custom_css' to layer extracted palette/font CSS over an HTML "
+                "theme. "
+                "Requires Pandoc (pypandoc-binary); auto-installs when "
+                "DependencyPolicy.allow_install=True. Path is project-relative. "
+                "Prefer this over pptx_create/docx_create/markdown_write."
+            ),
+        ),
+        FunctionTool(
+            func=_make_html_create_tool(project_root, options),
+            name="html_create",
+            description=(
+                "Create a standalone, styled .html document from a Markdown "
+                "'source' string via Pandoc, with syntax highlighting and a "
+                "built-in CSS 'theme' (default, dark, consulting, academic, "
+                "tech). Optional 'toc', 'title', and 'custom_css' (extra CSS, "
+                "e.g. an extracted palette/font set, layered over the theme). "
+                "Requires Pandoc "
+                "(pypandoc-binary); auto-installs when "
+                "DependencyPolicy.allow_install=True. Path is project-relative."
+            ),
+        ),
+        FunctionTool(
             func=_make_pdf_read_text_tool(project_root, max_output),
             name="pdf_read_text",
             description=(
@@ -405,7 +440,9 @@ def _create_document_tools(options: DynamicRunOptions) -> list[FunctionTool]:
                 "chart, quote, blank. Supports svg/svg_path; set "
                 "engine='ppt-master' for vendored SVG-to-DrawingML native "
                 "shape export. Themes: default, dark, editorial, consulting, "
-                "academic, tech. Requires python-pptx. Path is project-relative."
+                "academic, tech. Requires python-pptx. Path is project-relative. "
+                "For prose-driven decks from Markdown, prefer the 'doc_render' "
+                "tool; use this when you need precise JSON-structured layouts."
             ),
         ),
         FunctionTool(
@@ -435,19 +472,21 @@ def _create_document_tools(options: DynamicRunOptions) -> list[FunctionTool]:
                 "('heading', 'paragraph', 'bullets') and 'text' or 'items'. "
                 "Requires python-docx; auto-installs it when "
                 "DependencyPolicy.allow_install=True. Path must be relative "
-                "to the project root."
+                "to the project root. For rich Markdown-to-Word conversion "
+                "(tables, code, footnotes), prefer the 'doc_render' tool."
             ),
         ),
         FunctionTool(
             func=_make_markdown_write_tool(project_root),
             name="markdown_write",
             description=(
-                "Write a Markdown (.md) file. Accepts the markdown content "
-                "as a string. Path must be relative to the project root. "
-                "For FlowForge run reports, keep content concise and prefer "
-                "the executed path or summary over a full DAG Mermaid dump "
-                "unless the user explicitly asks for the full DAG. "
-                "No external dependencies required."
+                "Write a Markdown (.md) file verbatim from a string. Path "
+                "must be relative to the project root. For FlowForge run "
+                "reports, keep content concise and prefer the executed path "
+                "or summary over a full DAG Mermaid dump unless the user "
+                "explicitly asks for the full DAG. No external dependencies "
+                "required. To render that Markdown into html/docx/pptx, use "
+                "the 'doc_render' tool."
             ),
         ),
         FunctionTool(
@@ -1428,6 +1467,90 @@ def _make_markdown_write_tool(project_root: Path):
             return {"ok": False, "error": f"Failed to write Markdown: {e}"}
 
     _tool.__name__ = "builtin_markdown_write"
+    return _tool
+
+
+def _make_doc_render_tool(project_root: Path, options: DynamicRunOptions):
+    """Pandoc-backed unified renderer: one Markdown source → html/docx/pptx/md."""
+    def _tool(
+        path: str,
+        source: str,
+        to: str = "",
+        theme: str = "default",
+        toc: bool = False,
+        slide_level: int = 0,
+        reference_doc: str = "",
+        title: str = "",
+        custom_css: str = "",
+    ) -> dict[str, Any]:
+        from flowforge.tools.doc_render import render_document
+
+        try:
+            resolved = _resolve_safe_path(project_root, path)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
+        fmt = (to or resolved.suffix.lstrip(".")).strip().lower()
+
+        ref: str | None = None
+        if reference_doc:
+            try:
+                ref = str(_resolve_safe_path(project_root, reference_doc))
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+
+        result = render_document(
+            source,
+            fmt,
+            resolved,
+            theme=theme,
+            toc=toc,
+            slide_level=slide_level or None,
+            reference_doc=ref,
+            title=title or None,
+            custom_css=custom_css or None,
+            options=options,
+        )
+        if result.get("ok"):
+            result["path"] = path
+        return result
+
+    _tool.__name__ = "builtin_doc_render"
+    return _tool
+
+
+def _make_html_create_tool(project_root: Path, options: DynamicRunOptions):
+    """Pandoc-backed standalone HTML renderer with built-in CSS themes."""
+    def _tool(
+        path: str,
+        source: str,
+        theme: str = "default",
+        toc: bool = False,
+        title: str = "",
+        custom_css: str = "",
+    ) -> dict[str, Any]:
+        from flowforge.tools.doc_render import render_document
+
+        try:
+            resolved = _resolve_safe_path(project_root, path)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
+        result = render_document(
+            source,
+            "html",
+            resolved,
+            theme=theme,
+            toc=toc,
+            title=title or None,
+            custom_css=custom_css or None,
+            options=options,
+        )
+        if result.get("ok"):
+            result["path"] = path
+        return result
+
+    _tool.__name__ = "builtin_html_create"
     return _tool
 
 

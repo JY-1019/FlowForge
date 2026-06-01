@@ -338,9 +338,17 @@ app.add_typer(skills_app)
 
 @skills_app.command("list")
 def skills_list() -> None:
-    """Show vendored skills and the curated default bundle."""
-    from flowforge.skills import bundled_skill_names
+    """Show FlowForge-native skills plus vendored Anthropic skills."""
+    from flowforge.skills import bundled_skill_names, native_skill_names
     from flowforge.skills.sync import DEFAULT_BUNDLED_SKILLS, UPSTREAM_REPO
+
+    native = native_skill_names()
+    if native:
+        native_table = Table(title="FlowForge Native Skills")
+        native_table.add_column("name", style="cyan")
+        for name in native:
+            native_table.add_row(name)
+        console.print(native_table)
 
     vendored = set(bundled_skill_names())
     default = set(DEFAULT_BUNDLED_SKILLS)
@@ -358,7 +366,7 @@ def skills_list() -> None:
     console.print(table)
     if not vendored:
         console.print(
-            "[dim]No skills vendored yet.  Run "
+            "[dim]No Anthropic skills vendored yet.  Run "
             "`flowforge skills sync` to install the default bundle.[/dim]"
         )
 
