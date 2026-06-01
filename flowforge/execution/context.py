@@ -285,6 +285,9 @@ class GlobalContext:
         self.session_memory: SessionMemory | None = session_memory
         # Dynamic generation options for this run.
         self.dynamic_options: DynamicRunOptions | None = dynamic_options
+        # Harness Ledger runtime for this run (set by the engine when any
+        # root flow carries @ledger config).  None ⇒ ledger inactive.
+        self.ledger: Any = None
 
 
 class FlowContext:

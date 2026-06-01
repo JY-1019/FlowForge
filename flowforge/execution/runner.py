@@ -74,6 +74,40 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Ledger guard helper
+# ---------------------------------------------------------------------------
+
+async def _ledger_guarded(
+    *,
+    global_ctx: GlobalContext,
+    meta: Any,
+    node_id: str,
+    node_type: str,
+    step_name: str,
+    input_data: Any,
+    thunk: Any,
+) -> Any:
+    """Route execution through the run's :class:`Ledger` when one is active.
+
+    The whole feature is inert unless both a live ledger runtime
+    (``global_ctx.ledger``) and a node-level config (``meta.ledger``) are
+    present, so non-ledger flows pay nothing.
+    """
+    ledger = getattr(global_ctx, "ledger", None)
+    if ledger is None or getattr(meta, "ledger", None) is None:
+        return await thunk()
+    return await ledger.guard_step(
+        meta=meta,
+        node_id=node_id,
+        node_type=node_type,
+        step_name=step_name,
+        input_data=input_data,
+        tracer=global_ctx.tracer,
+        thunk=thunk,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Order-grouping helper
 # ---------------------------------------------------------------------------
 
@@ -323,7 +357,17 @@ class StepRunner:
             is_branch=meta.is_branch,
             pass_criteria=bool(meta.pass_criteria),
         ):
-            return await self._run_impl(meta, task_ctx, step_input, parent_node_id)
+            return await _ledger_guarded(
+                global_ctx=task_ctx.global_ctx,
+                meta=meta,
+                node_id=node_id,
+                node_type="step",
+                step_name=meta.func.__name__,
+                input_data=step_input,
+                thunk=lambda: self._run_impl(
+                    meta, task_ctx, step_input, parent_node_id
+                ),
+            )
 
     async def _run_impl(
         self,
@@ -696,7 +740,17 @@ class TaskRunner:
             order=meta.order,
             is_branch=meta.is_branch,
         ):
-            return await self._run_impl(meta, flow_ctx, task_input, parent_node_id)
+            return await _ledger_guarded(
+                global_ctx=flow_ctx.global_ctx,
+                meta=meta,
+                node_id=node_id,
+                node_type="task",
+                step_name=meta.name,
+                input_data=task_input,
+                thunk=lambda: self._run_impl(
+                    meta, flow_ctx, task_input, parent_node_id
+                ),
+            )
 
     async def _run_impl(
         self,
@@ -1111,8 +1165,16 @@ class FlowRunner:
             order=meta.order,
             is_branch=meta.is_branch,
         ):
-            return await self._run_once_impl(
-                meta, global_ctx, flow_input, parent_flow_output, node_id
+            return await _ledger_guarded(
+                global_ctx=global_ctx,
+                meta=meta,
+                node_id=node_id,
+                node_type="flow",
+                step_name=meta.name,
+                input_data=flow_input,
+                thunk=lambda: self._run_once_impl(
+                    meta, global_ctx, flow_input, parent_flow_output, node_id
+                ),
             )
 
     async def _run_once_impl(

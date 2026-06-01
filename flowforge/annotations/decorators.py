@@ -182,6 +182,7 @@ def step(
     fallback: Callable[..., Any] | None = None,
     pass_criteria: str | PassCriteria | None = None,
     pass_criteria_max_retries: int = 3,
+    contract: str | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark an async function as a step within a leaf task.
 
@@ -289,6 +290,7 @@ def step(
             fallback=fallback,
             pass_criteria=pass_criteria,
             pass_criteria_max_retries=pass_criteria_max_retries,
+            contract=contract,
         )
 
         # Validate branch handler return-type consistency at decoration time
@@ -322,6 +324,7 @@ def task(
     condition: BranchCondition | None = None,
     branches: dict[str, type] | None = None,
     fallback: type | None = None,
+    contract: str | None = None,
 ) -> Callable[[type], type]:
     """Mark a class as a task, collecting its steps and / or child tasks.
 
@@ -430,6 +433,7 @@ def task(
                 condition=condition,
                 branches=branch_metas,
                 fallback=fallback_meta,
+                contract=contract,
             )
         else:
             # ---------------------------------------------------------------
@@ -465,6 +469,7 @@ def task(
                 on_error=on_error,
                 max_loops=max_loops,
                 loop_condition=loop_condition,
+                contract=contract,
             )
 
             # Run compile-time validators immediately so errors are reported
@@ -499,6 +504,7 @@ def flow(
     condition: BranchCondition | None = None,
     branches: dict[str, type] | None = None,
     fallback: type | None = None,
+    contract: str | None = None,
 ) -> Callable[[type], type]:
     """Mark a class as a flow, collecting its child flows and tasks.
 
@@ -614,6 +620,7 @@ def flow(
                 condition=condition,
                 branches=branch_metas,
                 fallback=fallback_meta,
+                contract=contract,
             )
         else:
             # ---------------------------------------------------------------
@@ -646,6 +653,7 @@ def flow(
                 order=order,
                 unique=unique,
                 tools=tools or [],
+                contract=contract,
             )
             validate_sibling_order_uniqueness(name, meta.child_flows)
             validate_sibling_order_uniqueness(name, meta.tasks)

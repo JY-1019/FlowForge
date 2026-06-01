@@ -82,6 +82,7 @@ from flowforge.types import (
     DependencyPolicy,
 )
 from flowforge.dynamic.generator import DynamicFlowGenerator
+from flowforge.ledger import ledger, LedgerConfig, ContractViolation
 from flowforge.errors import (
     FlowForgeError,
     OrderConflictError,
@@ -818,6 +819,10 @@ __all__ = [
     "AgentSession",
     # Dynamic flow generation
     "DynamicFlowGenerator",
+    # Harness Ledger
+    "ledger",
+    "LedgerConfig",
+    "ContractViolation",
     # Errors
     "FlowForgeError",
     "OrderConflictError",

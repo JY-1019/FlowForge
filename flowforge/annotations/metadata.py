@@ -137,6 +137,17 @@ class StepMeta:
     # Called when no key in `branches` matches the condition value.
     fallback: Callable[..., Any] | None = None
 
+    # ------------------------------------------------------------------
+    # Harness Ledger (set by the @ledger decorator / @step(contract=...))
+    # ------------------------------------------------------------------
+
+    # Natural-language must-not rule checked before this step runs.
+    contract: str | None = None
+
+    # Shared LedgerConfig injected by @ledger; non-None ⇒ ledger is active for
+    # this node.  Typed Any to avoid importing the ledger package here.
+    ledger: Any = None
+
     @property
     def is_branch(self) -> bool:
         """``True`` when this step acts as a branch dispatcher.
@@ -265,6 +276,12 @@ class TaskMeta:
 
     # TaskMeta used when no key matches the condition value.
     fallback: TaskMeta | None = None
+
+    # ------------------------------------------------------------------
+    # Harness Ledger (set by the @ledger decorator / @task(contract=...))
+    # ------------------------------------------------------------------
+    contract: str | None = None
+    ledger: Any = None
 
     @property
     def is_leaf(self) -> bool:
@@ -396,6 +413,12 @@ class FlowMeta:
     # place (so the next retry runs the fixed version).  FlowRunner calls
     # it on ``ExecutionError`` before each retry attempt.
     runtime_repair: Callable[..., Any] | None = None
+
+    # ------------------------------------------------------------------
+    # Harness Ledger (set by the @ledger decorator / @flow(contract=...))
+    # ------------------------------------------------------------------
+    contract: str | None = None
+    ledger: Any = None
 
     @property
     def is_branch(self) -> bool:

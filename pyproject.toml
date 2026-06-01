@@ -126,6 +126,7 @@ Issues = "https://github.com/JY-1019/FlowForge/issues"
 
 [project.scripts]
 flowforge = "flowforge.cli.main:app"
+ledger = "flowforge.ledger.cli:app"
 
 [tool.setuptools]
 include-package-data = true

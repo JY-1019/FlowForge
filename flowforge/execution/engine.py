@@ -142,6 +142,9 @@ class ExecutionEngine:
         )
         global_ctx.all_docs = self._docs
 
+        # ── Harness Ledger: activate when any root flow carries @ledger ──
+        self._setup_ledger(global_ctx, tracer, input_data)
+
         # Inject compiled agent reference for the dynamic flow generator.
         if self._compiled_agent is not None:
             global_ctx.shared_data["_compiled_agent"] = self._compiled_agent
@@ -276,6 +279,7 @@ class ExecutionEngine:
             else:
                 if tracer:
                     tracer.finish_run(current_output, error=str(e))
+                self._finish_ledger(global_ctx, current_output, error=str(e))
                 raise
 
         # Record this run in session memory for cross-run context.
@@ -286,8 +290,40 @@ class ExecutionEngine:
             planning_mode=planning_mode,
         )
 
+        self._finish_ledger(global_ctx, current_output, error=None)
         run_trace = tracer.finish_run(current_output) if tracer else RunTrace()
         return current_output, run_trace
+
+    # ------------------------------------------------------------------
+    # Harness Ledger wiring
+    # ------------------------------------------------------------------
+
+    def _setup_ledger(self, global_ctx: GlobalContext, tracer: Any, input_data: Any) -> None:
+        config = next(
+            (f.ledger for f in self._global_meta.flows if getattr(f, "ledger", None)),
+            None,
+        )
+        if config is None:
+            return
+        from flowforge.ledger.core import Ledger
+        from flowforge.viz.run_trace import _safe_repr
+
+        led = Ledger(config, llm_config=self._global_meta.llm_config)
+        run_id = tracer.trace.run_id if tracer else "run"
+        led.start_run(run_id, _safe_repr(input_data))
+        global_ctx.ledger = led
+
+    def _finish_ledger(self, global_ctx: GlobalContext, output: Any, error: str | None) -> None:
+        led = getattr(global_ctx, "ledger", None)
+        if led is None:
+            return
+        from flowforge.viz.run_trace import _safe_repr
+
+        try:
+            led.finish_run(_safe_repr(output), error)
+        finally:
+            led.close()
+            global_ctx.ledger = None
 
     async def _try_dynamic_recovery_after_failure(
         self,
