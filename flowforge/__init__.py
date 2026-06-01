@@ -72,6 +72,8 @@ from flowforge.annotations.decorators import _GLOBAL_ATTR
 from flowforge.types import (
     LLMConfig,
     BranchCondition,
+    Branch,
+    PassCriteria,
     MCPServer,
     ClaudeSkill,
     AgentSkill,
@@ -132,6 +134,69 @@ def _extend_tools_once(target: list[ToolConfig], tools: list[ToolConfig]) -> Non
         if name and name not in existing:
             target.append(tool)
             existing.add(name)
+
+
+def _render_run_report(
+    dag: "FlowForgeDAG",
+    trace: "RunTrace",
+    *,
+    include_full_dag: bool = False,
+) -> str:
+    """Render a Markdown run report with the executed-path Mermaid diagram.
+
+    Shared by ``CompiledAgent.compare_mermaid`` and
+    ``AgentSession.compare_mermaid`` so both produce identical output.
+    """
+    from flowforge.viz.subtree import render_run_mermaid
+
+    status  = "✓ OK" if trace.succeeded else "✗ FAILED"
+    dur     = f"{trace.duration_ms:.0f} ms" if trace.duration_ms else "—"
+    n_exec  = len(trace.executed_node_ids)
+    n_total = len(dag.get_all_nodes())
+
+    legend = [
+        "> - **Colored** nodes ran (dark = global/flow/task/step, red = error)",
+        "> - **Bold arrows** (`==>`) are the executed edges",
+        "> - **Gray dashed** nodes were compiled but skipped this run",
+    ]
+
+    if include_full_dag:
+        from flowforge.viz.renderer import render_mermaid
+
+        return "\n".join([
+            "# FlowForge — DAG vs Executed Path",
+            "",
+            "## 1. Full DAG Structure",
+            "> Every node compiled from the annotations.",
+            "",
+            "```mermaid",
+            render_mermaid(dag),
+            "```",
+            "",
+            f"## 2. Executed Path — Run `{trace.run_id}`",
+            f"> Status: **{status}** · Duration: **{dur}** · "
+            f"Executed: **{n_exec} / {n_total}** nodes",
+            ">",
+            *legend,
+            "",
+            "```mermaid",
+            render_run_mermaid(dag, trace),
+            "```",
+        ])
+
+    return "\n".join([
+        "# FlowForge — Executed Path",
+        "",
+        f"## Run `{trace.run_id}`",
+        f"> Status: **{status}** · Duration: **{dur}** · "
+        f"Executed: **{n_exec} / {n_total}** nodes",
+        ">",
+        *legend,
+        "",
+        "```mermaid",
+        render_run_mermaid(dag, trace),
+        "```",
+    ])
 
 
 class AgentSession:
@@ -228,38 +293,10 @@ class AgentSession:
         Set ``include_full_dag=True`` to include the full compiled DAG before
         the run diagram.
         """
-        from flowforge.viz.subtree import render_run_mermaid
-
         t = trace or self.last_trace
         if t is None:
             raise RuntimeError("No run trace available.")
-
-        status = "OK" if t.succeeded else "FAILED"
-        dur = f"{t.duration_ms:.0f} ms" if t.duration_ms else "-"
-        n_exec = len(t.executed_node_ids)
-        n_total = len(self._dag.get_all_nodes())
-
-        lines = [
-            "# FlowForge - Executed Path",
-            "",
-            f"> Status: **{status}** | Duration: **{dur}** | "
-            f"Executed: **{n_exec} / {n_total}** nodes",
-            "",
-            "```mermaid", render_run_mermaid(self._dag, t), "```",
-        ]
-        if include_full_dag:
-            from flowforge.viz.renderer import render_mermaid
-
-            lines = [
-                "# FlowForge - DAG vs Executed Path",
-                "", "## 1. Full DAG Structure", "",
-                "```mermaid", render_mermaid(self._dag), "```", "",
-                f"## 2. Executed Path - Run `{t.run_id}`",
-                f"> Status: **{status}** | Duration: **{dur}** | "
-                f"Executed: **{n_exec} / {n_total}** nodes", "",
-                "```mermaid", render_run_mermaid(self._dag, t), "```",
-            ]
-        return "\n".join(lines)
+        return _render_run_report(self._dag, t, include_full_dag=include_full_dag)
 
 
 class CompiledAgent:
@@ -654,60 +691,12 @@ class CompiledAgent:
         Raises:
             RuntimeError: If no trace is available.
         """
-        from flowforge.viz.subtree import render_run_mermaid
-
         t = trace or self.last_trace
         if t is None:
             raise RuntimeError(
                 "No run trace available. Call engine.run() or engine.run_traced() first."
             )
-
-        status  = "✓ OK" if t.succeeded else "✗ FAILED"
-        dur     = f"{t.duration_ms:.0f} ms" if t.duration_ms else "—"
-        n_exec  = len(t.executed_node_ids)
-        n_total = len(self._dag.get_all_nodes())
-
-        lines = [
-            "# FlowForge — Executed Path",
-            "",
-            f"## Run `{t.run_id}`",
-            f"> Status: **{status}** · Duration: **{dur}** · "
-            f"Executed: **{n_exec} / {n_total}** nodes",
-            ">",
-            "> - **Colored** nodes ran (dark = global/flow/task/step, red = error)",
-            "> - **Bold arrows** (`==>`) are the executed edges",
-            "> - **Gray dashed** nodes were compiled but skipped this run",
-            "",
-            "```mermaid",
-            render_run_mermaid(self._dag, t),
-            "```",
-        ]
-        if include_full_dag:
-            from flowforge.viz.renderer import render_mermaid
-
-            lines = [
-                "# FlowForge — DAG vs Executed Path",
-                "",
-                "## 1. Full DAG Structure",
-                "> Every node compiled from the annotations.",
-                "",
-                "```mermaid",
-                render_mermaid(self._dag),
-                "```",
-                "",
-                f"## 2. Executed Path — Run `{t.run_id}`",
-                f"> Status: **{status}** · Duration: **{dur}** · "
-                f"Executed: **{n_exec} / {n_total}** nodes",
-                ">",
-                "> - **Colored** nodes ran (dark = global/flow/task/step, red = error)",
-                "> - **Bold arrows** (`==>`) are the executed edges",
-                "> - **Gray dashed** nodes were compiled but skipped this run",
-                "",
-                "```mermaid",
-                render_run_mermaid(self._dag, t),
-                "```",
-            ]
-        return "\n".join(lines)
+        return _render_run_report(self._dag, t, include_full_dag=include_full_dag)
 
     def print_run_summary(self, trace: RunTrace | None = None) -> None:
         """Print a terminal table summarising the last (or given) run."""
@@ -815,6 +804,8 @@ __all__ = [
     # Types
     "LLMConfig",
     "BranchCondition",
+    "Branch",
+    "PassCriteria",
     "MCPServer",
     "ClaudeSkill",
     "AgentSkill",

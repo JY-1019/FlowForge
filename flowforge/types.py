@@ -1,6 +1,7 @@
 """Core type definitions for FlowForge."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field as _dc_field
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 
@@ -47,6 +48,11 @@ class LLMConfig(BaseModel):
     base_url:
         Custom base URL for the HTTP client.  Useful for OpenAI-compatible
         proxy endpoints or local model servers.
+    verify_ssl:
+        Whether the provider HTTP client verifies SSL certificates.  Set to
+        ``False`` to bypass verification behind a TLS-intercepting corporate
+        proxy (can also be forced off via the ``FLOWFORGE_SSL_VERIFY=0``
+        environment variable).  Defaults to ``True``.
     """
 
     provider: Literal["anthropic", "openai", "google"] = "anthropic"
@@ -128,6 +134,72 @@ class BranchCondition(BaseModel):
 
     field: str
     enum: list[str]
+
+
+@dataclass
+class Branch:
+    """Single-object branch specification for ``@step`` / ``@task`` / ``@flow``.
+
+    Groups what used to be three separate decorator parameters
+    (``condition`` / ``branches`` / ``fallback``) into one value, so the node
+    becomes a *branch dispatcher* with a single argument::
+
+        @step(
+            order=2,
+            prompt="route by format",
+            branch=Branch(
+                on="fmt",
+                cases={"csv": csv_handler, "json": json_handler},
+                default=csv_handler,
+            ),
+        )
+
+    The discriminator enum is derived automatically from ``cases`` keys, so it
+    never has to be listed twice.
+
+    Parameters
+    ----------
+    on:
+        Name of the discriminator field read from the node input.
+    cases:
+        ``{value: target}`` mapping.  ``target`` is an async handler callable
+        for ``@step`` and a ``@task`` / ``@flow``-decorated class for
+        ``@task`` / ``@flow``.
+    default:
+        Target used when no key in ``cases`` matches the resolved value.
+        Optional.
+    """
+
+    on: str
+    cases: dict[str, Any] = _dc_field(default_factory=dict)
+    default: Any = None
+
+
+@dataclass
+class PassCriteria:
+    """Output-quality gate for a ``@step`` (single-object form).
+
+    Groups ``pass_criteria`` and ``pass_criteria_max_retries`` into one value::
+
+        @step(
+            order=2,
+            prompt="...",
+            pass_criteria=PassCriteria("답변은 한국어여야 한다", max_retries=1),
+        )
+
+    Equivalent to passing ``pass_criteria="..."`` plus
+    ``pass_criteria_max_retries=1`` as separate arguments.
+
+    Parameters
+    ----------
+    criteria:
+        Natural-language criteria the step output must satisfy.
+    max_retries:
+        Maximum retry attempts when the output fails the criteria.
+    """
+
+    criteria: str
+    max_retries: int = 3
 
 
 class MCPServer(BaseModel):

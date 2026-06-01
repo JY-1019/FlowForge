@@ -86,7 +86,13 @@ from flowforge.annotations.validators import (
 from flowforge.errors import CompileError
 
 if TYPE_CHECKING:
-    from flowforge.types import BranchCondition, LLMConfig, ToolReference
+    from flowforge.types import (
+        Branch,
+        BranchCondition,
+        LLMConfig,
+        PassCriteria,
+        ToolReference,
+    )
 
 # ---------------------------------------------------------------------------
 # Internal sentinel attribute names
@@ -100,6 +106,59 @@ _STEP_ATTR   = "__flowforge_step_meta__"
 _TASK_ATTR   = "__flowforge_task_meta__"
 _FLOW_ATTR   = "__flowforge_flow_meta__"
 _GLOBAL_ATTR = "__flowforge_global_meta__"
+
+
+# ---------------------------------------------------------------------------
+# Parameter normalisation helpers
+#
+# ``@step`` / ``@task`` / ``@flow`` accept a single ``branch=Branch(...)``
+# object as a concise alternative to the legacy ``condition`` / ``branches`` /
+# ``fallback`` trio.  These helpers fold the convenience forms back into the
+# canonical fields the metadata dataclasses already understand, so the rest of
+# the pipeline is unchanged.
+# ---------------------------------------------------------------------------
+
+def _normalize_branch(
+    node_kind: str,
+    label: str,
+    branch: "Branch | None",
+    condition: "BranchCondition | None",
+    branches: dict[str, Any] | None,
+    fallback: Any,
+) -> tuple["BranchCondition | None", dict[str, Any] | None, Any]:
+    """Resolve ``branch=Branch(...)`` into ``(condition, branches, fallback)``.
+
+    Raises ``CompileError`` if both the single-object form and any of the
+    legacy parameters are supplied, so the source of truth is unambiguous.
+    """
+    if branch is None:
+        return condition, branches, fallback
+
+    if condition is not None or branches is not None or fallback is not None:
+        raise CompileError(
+            f"{node_kind} '{label}': pass either `branch=Branch(...)` or the "
+            f"legacy `condition`/`branches`/`fallback` parameters, not both."
+        )
+
+    from flowforge.types import BranchCondition as _BranchCondition
+
+    resolved_condition = _BranchCondition(
+        field=branch.on,
+        enum=list(branch.cases.keys()),
+    )
+    return resolved_condition, dict(branch.cases), branch.default
+
+
+def _normalize_pass_criteria(
+    pass_criteria: "str | PassCriteria | None",
+    max_retries: int,
+) -> tuple[str | None, int]:
+    """Resolve ``pass_criteria=PassCriteria(...)`` into ``(text, max_retries)``."""
+    from flowforge.types import PassCriteria as _PassCriteria
+
+    if isinstance(pass_criteria, _PassCriteria):
+        return pass_criteria.criteria, pass_criteria.max_retries
+    return pass_criteria, max_retries
 
 
 # ---------------------------------------------------------------------------
@@ -117,10 +176,11 @@ def step(
     unique: bool = False,
     approval: bool = False,
     tools: list[ToolReference] | None = None,
+    branch: Branch | None = None,
     condition: BranchCondition | None = None,
     branches: dict[str, Callable[..., Any]] | None = None,
     fallback: Callable[..., Any] | None = None,
-    pass_criteria: str | None = None,
+    pass_criteria: str | PassCriteria | None = None,
     pass_criteria_max_retries: int = 3,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Mark an async function as a step within a leaf task.
@@ -168,17 +228,29 @@ def step(
         At most one step per order group may carry ``unique=True`` —
         declaring two steps with the same ``order`` and ``unique=True``
         raises ``OrderConflictError`` at decoration time.
+    branch:
+        ``Branch(on=..., cases={...}, default=...)`` — the recommended
+        single-object form of branch dispatching.  The discriminator enum is
+        derived from ``cases`` keys.  Mutually exclusive with the legacy
+        ``condition`` / ``branches`` / ``fallback`` parameters below.
     condition:
-        ``BranchCondition`` that specifies the discriminator field and its
-        allowed values.  Required to enable branch dispatching.
+        Legacy form.  ``BranchCondition`` that specifies the discriminator
+        field and its allowed values.  Prefer ``branch=`` for new code.
     branches:
-        ``{value: handler}`` mapping.  ``handler`` must be an async callable
-        that accepts a ``StepContext`` and returns a value.
+        Legacy form.  ``{value: handler}`` mapping.  ``handler`` must be an
+        async callable that accepts a ``StepContext`` and returns a value.
     fallback:
-        Handler called when no key in ``branches`` matches the resolved
-        condition value.  Falls back to the decorated ``func`` if omitted.
+        Legacy form.  Handler called when no key in ``branches`` matches the
+        resolved condition value.  Falls back to the decorated ``func`` if
+        omitted.
+
+    Note — ``tool_mode``, ``approval``, ``pass_criteria`` and
+    ``pass_criteria_max_retries`` are provided **only at the step level**.
+
     pass_criteria:
-        Natural-language criteria the step output must satisfy.  When set,
+        Natural-language criteria the step output must satisfy (or a
+        ``PassCriteria(...)`` object bundling the criteria and ``max_retries``).
+        When set,
         an LLM judge evaluates the output after execution.  If the output
         fails the criteria, the step is re-run with feedback about what was
         wrong (up to ``pass_criteria_max_retries`` attempts).  After all
@@ -193,6 +265,13 @@ def step(
         The original ``func`` unchanged (metadata is attached as an
         attribute, not via a wrapper).
     """
+    condition, branches, fallback = _normalize_branch(
+        "@step", prompt, branch, condition, branches, fallback
+    )
+    pass_criteria, pass_criteria_max_retries = _normalize_pass_criteria(
+        pass_criteria, pass_criteria_max_retries
+    )
+
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         meta = StepMeta(
             order=order,
@@ -239,6 +318,7 @@ def task(
     on_error: str = "raise",
     max_loops: int = 1,
     loop_condition: Callable[..., bool] | None = None,
+    branch: Branch | None = None,
     condition: BranchCondition | None = None,
     branches: dict[str, type] | None = None,
     fallback: type | None = None,
@@ -276,15 +356,23 @@ def task(
         ``order`` group within the parent flow.  All sibling tasks with the
         same ``order`` are skipped.  At most one task per order group per
         parent may carry ``unique=True``.
+    branch:
+        ``Branch(on=..., cases={...}, default=...)`` — recommended
+        single-object form.  ``cases`` values must be ``@task``-decorated
+        classes.  Mutually exclusive with the legacy ``condition`` /
+        ``branches`` / ``fallback`` parameters.
     condition:
-        ``BranchCondition`` that identifies the discriminator field on the
-        task input.  Turns this task into a branch dispatcher.
+        Legacy form.  ``BranchCondition`` that identifies the discriminator
+        field on the task input.  Turns this task into a branch dispatcher.
     branches:
-        ``{value: TaskClass}`` mapping.  Each value must be a class decorated
-        with ``@task``.  At runtime the task delegates to the class whose key
-        matches ``condition.field`` in the input.
+        Legacy form.  ``{value: TaskClass}`` mapping.  Each value must be a
+        class decorated with ``@task``.
     fallback:
-        A ``@task``-decorated class used when no key in ``branches`` matches.
+        Legacy form.  A ``@task``-decorated class used when no key in
+        ``branches`` matches.
+
+    Note — ``on_error``, ``max_loops`` and ``loop_condition`` are provided
+    **only at the task level**.
 
     Raises
     ------
@@ -297,7 +385,12 @@ def task(
     IOBindingError
         If consecutive ``@step`` nodes have incompatible I/O schemas.
     """
+    _condition, _branches, _fallback = _normalize_branch(
+        "@task", name, branch, condition, branches, fallback
+    )
+
     def decorator(cls: type) -> type:
+        condition, branches, fallback = _condition, _branches, _fallback
         if condition is not None:
             # ---------------------------------------------------------------
             # Branch task: resolve TaskMeta from the provided branch classes.
@@ -402,6 +495,7 @@ def flow(
     order: int | None = None,
     unique: bool = False,
     tools: list[ToolReference] | None = None,
+    branch: Branch | None = None,
     condition: BranchCondition | None = None,
     branches: dict[str, type] | None = None,
     fallback: type | None = None,
@@ -451,14 +545,23 @@ def flow(
         ``order`` group within its parent.  All sibling flows with the same
         ``order`` are skipped.  At most one flow per order group per parent
         may carry ``unique=True``.
+    branch:
+        ``Branch(on=..., cases={...}, default=...)`` — recommended
+        single-object form.  ``cases`` values must be ``@flow``-decorated
+        classes.  Mutually exclusive with the legacy ``condition`` /
+        ``branches`` / ``fallback`` parameters.
     condition:
-        ``BranchCondition`` that identifies the discriminator field on the
-        flow input.  Turns this flow into a branch dispatcher.
+        Legacy form.  ``BranchCondition`` that identifies the discriminator
+        field on the flow input.  Turns this flow into a branch dispatcher.
     branches:
-        ``{value: FlowClass}`` mapping.  Each value must be a class decorated
-        with ``@flow``.
+        Legacy form.  ``{value: FlowClass}`` mapping.  Each value must be a
+        class decorated with ``@flow``.
     fallback:
-        A ``@flow``-decorated class used when no key in ``branches`` matches.
+        Legacy form.  A ``@flow``-decorated class used when no key in
+        ``branches`` matches.
+
+    Note — ``depends_on``, ``parallel`` and ``max_retries`` are provided
+    **only at the flow level**.
 
     Raises
     ------
@@ -466,7 +569,12 @@ def flow(
         If any value in ``branches`` (or ``fallback``) is not decorated with
         ``@flow``.
     """
+    _condition, _branches, _fallback = _normalize_branch(
+        "@flow", name, branch, condition, branches, fallback
+    )
+
     def decorator(cls: type) -> type:
+        condition, branches, fallback = _condition, _branches, _fallback
         if condition is not None:
             # ---------------------------------------------------------------
             # Branch flow: resolve FlowMeta from the provided branch classes.
